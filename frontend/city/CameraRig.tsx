@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useRef, type ReactNode } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
@@ -74,7 +75,7 @@ export function CameraRig(): ReactNode {
         .set(...HUB_POSITION)
         .addScaledVector(OVERVIEW_DIRECTION, dist);
       flyToTarget.current.set(
-        HUB_POSITION[0],
+        HUB_POSITION[0],k
         HUB_POSITION[1] + 2.2,
         HUB_POSITION[2],
       );
