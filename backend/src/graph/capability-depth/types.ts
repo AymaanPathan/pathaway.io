@@ -177,11 +177,11 @@ export interface FileRecord {
   packages: string[];
   packagesRemoved: string[];
   signals: Record<string, number>;
-  /** "kind:name" for symbols DEFINED in the added lines */
+  
   symbols: string[];
   symbolsModified: string[];
   depChanges: { added: string[]; removed: string[]; changed: string[] } | null;
-  /** lazily computed lowercase search text (matching runs once per topic x file) */
+  
   symbolText?: string;
   pathText?: string;
 }
@@ -205,12 +205,12 @@ export interface DemoRow {
 export interface FileIndex {
   files: FileRecord[];
   repoNames: Map<string, string>;
-  /** packages declared in a repository's manifests (Repository.dependencies_json) */
+  
   repoDeclared: Map<string, Set<string>>;
   commitFileCount: Map<string, number>;
-  /** commit metadata cache shared by every topic of one atlas (no repeated queries) */
+  
   commitMeta?: Map<string, Row>;
-  /** all developer demonstrations, or null when the preload failed */
+  
   demos?: DemoRow[] | null;
 }
 
@@ -301,7 +301,7 @@ export interface EvidenceAtlas {
   experiences: AtlasExperience[];
   skills: AtlasSkill[];
   repositories: AtlasRepository[];
-  /** in memory only, never serialised */
+  
   index: FileIndex;
 }
 
@@ -316,7 +316,7 @@ export interface ApproachSpec {
 
 export interface CapabilityMappingSpec {
   id: string;
-  /** 0..1: how strongly the capability belongs to the topic */
+  
   weight: number;
   reason: string;
 }
@@ -332,25 +332,25 @@ export interface RelationDetail {
 export interface TopicSpec {
   slug: string;
   name: string;
-  /** one of TOPIC_DOMAINS; classified by the agent from evidence */
+  
   domain: string;
   description: string;
   aliases: string[];
   keywords: string[];
   packages: string[];
   signals: string[];
-  /** capability ids already validated against the Capability catalog */
+  
   capabilityIds: string[];
-  /** weighted, explained version of capabilityIds (optional for old stored specs) */
+  
   capabilityMappings?: CapabilityMappingSpec[];
   approaches: ApproachSpec[];
-  /** canonical topic slugs once resolved by the agent */
+  
   buildsOn: string[];
   related: string[];
-  /** rationale-carrying versions of buildsOn / related (optional for old stored specs) */
+  
   buildsOnDetail?: RelationDetail[];
   relatedDetail?: RelationDetail[];
-  /** FileChange ids confirmed by a full-text probe (code content matches) */
+  
   pinnedFileIds: string[];
 }
 
@@ -418,7 +418,7 @@ export interface CodeSample {
 export interface DemoNote {
   ref: string;
   capabilityId: string;
-  /** "capability": reached through a mapped capability; "keyword": text match only */
+  
   matchedBy: "capability" | "keyword";
   technique: string;
   depth: string;
@@ -485,12 +485,12 @@ export interface TopicContext {
     hops: number;
     developerLevel: string;
     developerScore: number;
-    /** why the first hop of the path exists */
+    
     reason?: string;
     confidence?: number;
     strength?: RelationStrength;
     basis?: string;
-    /** slugs from the topic (excluded) to this foundation (included) */
+    
     via?: string[];
     developerConfidence?: string;
     developerAuthenticity?: string;
@@ -504,7 +504,7 @@ export interface TopicContext {
 export interface TopicFootprint {
   commitIds: string[];
   repoIds: string[];
-  /** "<repositoryId>:<directory>" of every matched file */
+  
   dirs: string[];
 }
 
@@ -574,7 +574,7 @@ export interface BaselineInput {
   additions: number;
   testFiles: number;
   definedSymbols: number;
-  demoBestRank: number; // 0 none, 1 usage, 2 implementation, 3 strong
+  demoBestRank: number;
   hardeningCount: number;
   revisitRatio: number;
   followUpCommits: number;
@@ -648,9 +648,9 @@ export interface TopicEvidencePath {
   capabilityId: string;
   capability: string;
   demonstrations: number;
-  /** how strongly the capability belongs to the topic (0..1), when recorded */
+  
   weight: number | null;
-  /** why the capability was mapped to the topic */
+  
   reason: string;
 }
 
@@ -669,17 +669,17 @@ export interface LearningNode {
   name: string;
   domain: string;
   hops: number;
-  /** slugs from the topic (excluded) to this node (included) */
+  
   via: string[];
-  /** the edge that connects this node to the previous one on `via` */
+  
   edge: LearningEdge;
-  /** every edge on the path is "required" */
+  
   requiredPath: boolean;
   foundationRank: number | null;
   developer: DeveloperTopicDepth | null;
-  /** the developer shows at least working depth here */
+  
   met: boolean;
-  /** required, on a required path, and not met */
+  
   blocking: boolean;
 }
 
@@ -703,18 +703,18 @@ export interface TopicLearningGraph {
     clusterId: number | null;
   };
   developer: DeveloperTopicDepth | null;
-  /** BUILDS_ON*1..maxHops: what must be understood first */
+  
   prerequisites: LearningNode[];
-  /** reverse BUILDS_ON: what this topic opens up */
+  
   unlocks: LearningNode[];
   related: RelatedLearningNode[];
-  /** taxonomy capabilities with weights, reasons and this developer's demonstration counts */
+  
   capabilityPaths: TopicEvidencePath[];
   readiness: {
-    /** no direct required prerequisite is unmet */
+    
     ready: boolean;
     unmetRequired: string[];
-    /** unmet required foundations, deepest first: the order to learn them in */
+    
     learningOrder: string[];
     metPrerequisites: string[];
   };
@@ -730,9 +730,9 @@ export interface LearningFrontierEntry {
     clusterId: number | null;
   };
   developer: DeveloperTopicDepth | null;
-  /** every direct required prerequisite is met (or there are none) */
+  
   ready: boolean;
-  /** direct prerequisites with edge rationale and the developer's depth in each */
+  
   prerequisites: Array<{
     slug: string;
     name: string;
@@ -743,7 +743,7 @@ export interface LearningFrontierEntry {
     developer: DeveloperTopicDepth | null;
   }>;
   blockedBy: string[];
-  /** number of topics that directly build on this one */
+  
   unlocks: number;
   why: string;
 }
@@ -755,9 +755,9 @@ export interface TopicGraphMetrics {
   betweenness: number;
   communities: number;
   components: number;
-  /** human-readable reasons a metric is absent (kept for older callers) */
+  
   fallbacks: string[];
-  /** ok: every expected algorithm ran and wrote every row; partial/failed/empty_graph otherwise */
+  
   status: "ok" | "partial" | "failed" | "empty_graph";
   algorithmsRun: string[];
   failures: string[];
@@ -809,16 +809,16 @@ export interface DepthAssessmentRecord {
   rationale: string;
   strengths: string[];
   gaps: string[];
-  /** hardening behaviours (limits, error paths, cleanup, validation...) actually observed */
+  
   safeguards: string[];
-  /** what was built, each tied to a cited code or detector reference */
+  
   implementations: ImplementationNote[];
   approaches: ApproachRecord[];
-  /** only the evidence that was actually cited */
+  
   evidence: EvidenceRef[];
   stats: EvidenceTotals;
   spec: TopicSpec;
-  /** true when the LLM was unavailable and the baseline decided */
+  
   fallback: boolean;
 }
 
@@ -826,13 +826,13 @@ export interface TopicRelationInput {
   from: string;
   to: string;
   type: TopicRelationType;
-  /** specific rationale: why the edge exists. Generic templates are rejected. */
+  
   reason: string;
-  /** 0..1 (default 0.6) */
+  
   confidence?: number;
-  /** BUILDS_ON only (default "helpful") */
+  
   strength?: RelationStrength;
-  /** default "llm_inferred" */
+  
   basis?: RelationBasis;
 }
 
@@ -849,13 +849,9 @@ export interface StoreDepthInput {
   model: string;
   assessments: DepthAssessmentRecord[];
   relations: TopicRelationInput[];
-  /** true: remove this developer's assessments that are not in this build */
+  
   replaceAll: boolean;
-  /**
-   * true: Topic -[:MAPS_TO]-> Capability edges of the written topics that this
-   * build did not re-assert are removed (the topic was deliberately remapped).
-   * Only edges created by this pipeline (basis "agent_validated") are touched.
-   */
+  
   pruneStaleMappings?: boolean;
 }
 
@@ -873,7 +869,7 @@ export interface StoreDepthResult {
   relationsRequested: number;
   relations: number;
   rejectedRelations: TopicRelationRejection[];
-  /** nodes deleted because they lost their anchor during this write */
+  
   orphansRemoved: { assessments: number; approaches: number; topics: number };
 }
 
@@ -888,9 +884,9 @@ export interface TopicMetadataInput {
 export interface TopicCapabilityMapping {
   topicSlug: string;
   capabilityId: string;
-  /** 0..1 (default 0.5). Mappings under MIN_MAPPING_WEIGHT are not persisted. */
+  
   weight?: number;
-  /** why this capability belongs to this topic */
+  
   reason?: string;
 }
 
@@ -901,9 +897,9 @@ export interface BackfillTopicRow {
   domain: string | null;
   description: string;
   aliases: string[];
-  /** every stored TopicSpec (any developer) that produced an assessment of this topic */
+  
   specs: TopicSpec[];
-  /** id does not follow the canonical `topic:<slug>` form */
+  
   nonCanonicalId: boolean;
 }
 
@@ -922,11 +918,11 @@ export interface DepthProfileSummary {
 }
 
 export interface OrphanReport {
-  /** Topics no assessment points at */
+  
   topicsWithoutAssessment: string[];
-  /** Topics with no BUILDS_ON / RELATED_TOPIC edge in either direction */
+  
   topicsWithoutRelations: string[];
-  /** Topics with no MAPS_TO -> Capability edge */
+  
   topicsWithoutCapability: string[];
   assessmentsWithoutTopic: number;
   approachesWithoutTopic: number;
@@ -988,7 +984,7 @@ export interface TopicDepthDetail {
   stats: EvidenceTotals | null;
   baselineLevel: DepthLevel;
   context: TopicContext | null;
-  /** topics that build on this one, each with the reason the edge exists */
+  
   unlocks: Array<{
     slug: string;
     name: string;
@@ -1002,9 +998,9 @@ export interface TopicDepthDetail {
     reason: string;
     confidence: number;
   }>;
-  /** taxonomy capabilities of the topic with weights, reasons and THIS developer's demonstration counts */
+  
   capabilityPaths: TopicEvidencePath[];
-  /** full prerequisite / unlock traversal with developer depth and evidence */
+  
   learning: TopicLearningGraph | null;
 }
 

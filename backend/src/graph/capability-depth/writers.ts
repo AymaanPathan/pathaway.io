@@ -288,9 +288,9 @@ export async function refreshTopicGraphMetricsImpl(
     metrics.fallbacks.push(message);
   };
 
-  // Count each relationship type independently. FalkorDB graph algorithms
-  // can reject a configuration containing a relationship type absent from
-  // the current graph (for example BUILDS_ON when only RELATED_TOPIC exists).
+
+
+
   const counts = await tryRows(
     graph,
     "topic relationship counts",
@@ -315,7 +315,7 @@ export async function refreshTopicGraphMetricsImpl(
   let buildsOnEdges = num(countRow.buildsOnEdges);
   let relatedEdges = num(countRow.relatedEdges);
 
-  // Validate relationship types against what the database actually knows.
+
   const typeRows = await tryRows(
     graph,
     "relationship types",
@@ -341,7 +341,7 @@ export async function refreshTopicGraphMetricsImpl(
     fail(
       `graph ranking unavailable: ${metrics.topics} topics and ${metrics.relations} usable taxonomy edges; nothing was ranked`,
     );
-    // nothing to rank: previous ranks no longer describe this taxonomy
+
     await tryRows(
       graph,
       "clear topic metrics",
@@ -387,7 +387,7 @@ export async function refreshTopicGraphMetricsImpl(
       }
       if (written > 0) {
         metrics.algorithmsRun.push(label);
-        // drop this metric from topics the fresh run did not return
+
         await tryRows(
           graph,
           `clear stale ${prop}`,
@@ -407,8 +407,8 @@ export async function refreshTopicGraphMetricsImpl(
     }
   };
 
-  // Prefer dependency edges for foundation PageRank; when there are none yet,
-  // rank the existing RELATED_TOPIC graph instead. Both are FalkorDB PageRank.
+
+
   const pageRankType = buildsOnEdges > 0 ? "BUILDS_ON" : "RELATED_TOPIC";
   metrics.pageRank = await runMetric(
     `algo.pageRank (${pageRankType})`,
@@ -419,7 +419,7 @@ export async function refreshTopicGraphMetricsImpl(
     "score",
   );
 
-  // Pass only relationship types that exist and have edges.
+
   const traversalTypes: string[] = [];
   if (buildsOnEdges > 0) traversalTypes.push("BUILDS_ON");
   if (relatedEdges > 0) traversalTypes.push("RELATED_TOPIC");
@@ -439,7 +439,7 @@ export async function refreshTopicGraphMetricsImpl(
     "score",
   );
 
-  // Communities are meaningful only on the RELATED_TOPIC subgraph.
+
   if (relatedEdges > 0) {
     metrics.communities = await runMetric(
       "algo.labelPropagation",
@@ -691,9 +691,9 @@ export async function writeTopicRelationsImpl(
     for (const r of found) present.add(str(r.id));
   }
 
-  // A foundation the model names but that has no assessment used to be rejected
-  // with "target topic is not persisted", which silently dropped most BUILDS_ON
-  // edges. Persist it as an unassessed taxonomy node (frontend draws it dashed).
+
+
+
   const SLUG_OK = /^[a-z0-9_]{1,60}$/;
   const stubSlugs = unique(
     relations
@@ -729,7 +729,7 @@ export async function writeTopicRelationsImpl(
     for (const slug of stubSlugs) present.add(topicId(slug));
     log("created unassessed foundation topics", { count: stubSlugs.length });
   }
-  // fresh read: this decides a write (cycle detection must see every edge)
+
   const existingBuilds = await readTaxonomyEdges(graph, "BUILDS_ON", {
     fresh: true,
   });
@@ -753,7 +753,7 @@ export async function writeTopicRelationsImpl(
     return null;
   };
 
-  // BUILDS_ON first so RELATED_TOPIC checks see every accepted prerequisite.
+
   for (const r of relations.filter((x) => x.type === "BUILDS_ON")) {
     const base = { from: r.from, to: r.to, type: r.type };
     const problem = precheck(r);
@@ -803,8 +803,8 @@ export async function writeTopicRelationsImpl(
     }));
   const edgeParams = { now: options.now, build_id: buildId, model };
 
-  // The rationale only moves when the new assertion is at least as confident
-  // as the stored one (or nothing meaningful is stored yet).
+
+
   const edgeQuery = (type: TopicRelationType, reverse: boolean) => `
     UNWIND $batch AS item
     MATCH (a:Topic {id: item.from_id})
@@ -884,15 +884,15 @@ export async function storeDepthAssessments(
   };
   const list = input.assessments;
 
-  // 1) Topic nodes (SHARED taxonomy). Metadata is validated and refreshed on
-  //    every write; created_at is preserved. No developer data lands here.
+
+
   result.topics = await writeTopicMetadata(
     graph,
     list.map((a) => a.topic),
     { now },
   );
 
-  // 1b) Topic -> Capability taxonomy mappings (SHARED, existing capabilities only).
+
   const mappingInputs: TopicCapabilityMapping[] = list.flatMap((a) => {
     const detailed = a.spec.capabilityMappings ?? [];
     const detailedIds = new Set(detailed.map((m) => m.id));
@@ -923,7 +923,7 @@ export async function storeDepthAssessments(
   result.mappings = mapped.written;
   result.unresolvedMappings = mapped.unresolved;
 
-  // 2) Approach nodes + APPROACH_OF.
+
   const approachRows = list.flatMap((a) =>
     a.approaches.map((ap) => ({
       id: approachId(a.topic.slug, ap.slug),
@@ -951,8 +951,8 @@ export async function storeDepthAssessments(
     { strict: true },
   );
 
-  // 3) DepthAssessment nodes (DEVELOPER-specific; id embeds the developer id,
-  //    so one developer's run can never overwrite another's record).
+
+
   result.assessments = await runCounted(
     graph,
     "DepthAssessment nodes",
@@ -1038,7 +1038,7 @@ export async function storeDepthAssessments(
     },
   );
 
-  // 4) Ownership + topic edges.
+
   const owner = list.map((a) => ({
     assessment_id: assessmentId(developerId, a.topic.slug),
     topic_id: topicId(a.topic.slug),
@@ -1070,7 +1070,7 @@ export async function storeDepthAssessments(
     { strict: true },
   );
 
-  // 5) USES_APPROACH (the grouping: which way did this developer do it?).
+
   await runCounted(
     graph,
     "USES_APPROACH edges",
@@ -1109,8 +1109,8 @@ export async function storeDepthAssessments(
     { params: { build_id: buildId }, strict: true },
   );
 
-  // 6) BACKED_BY: cited evidence. Targets can vanish when the evidence graph
-  //    is rebuilt, so these are non-strict; evidence_json keeps a snapshot.
+
+
   const kinds: Array<[EvidenceRef["kind"], string]> = [
     ["code", "FileChange"],
     ["demonstration", "Demonstration"],
@@ -1145,7 +1145,7 @@ export async function storeDepthAssessments(
     );
   }
 
-  // 7) Developer -> Topic roll-up for fast reads and algorithms.
+
   await runCounted(
     graph,
     "KNOWS_TOPIC edges",
@@ -1179,8 +1179,8 @@ export async function storeDepthAssessments(
     },
   );
 
-  // 8) Taxonomy relations (SHARED, no developer data). Validated: only edges
-  //    the database accepted are counted; everything else is reported.
+
+
   const relationOutcome = await writeTopicRelations(graph, input.relations, {
     now,
     buildId,
@@ -1198,7 +1198,7 @@ export async function storeDepthAssessments(
     relationsRejected: result.rejectedRelations.length,
   });
 
-  // 9) Stale cleanup. Only after every strict write above succeeded.
+
   await graph.query(
     `
     MATCH (a:DepthAssessment)-[r:BACKED_BY|USES_APPROACH]->()
@@ -1227,7 +1227,7 @@ export async function storeDepthAssessments(
     );
   }
 
-  // 10) Orphan cleanup: assessments / approaches / topics that lost their anchor.
+
   result.orphansRemoved = await cleanupOrphans(graph);
 
   log("depth assessments stored", result as unknown as Row);

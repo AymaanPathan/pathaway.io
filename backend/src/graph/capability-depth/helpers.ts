@@ -402,8 +402,8 @@ export const GENERIC_RELATION_TEMPLATE =
   /\b(builds on|relates to|is related to|related to|depends on)\b/i;
 
 export async function setupSchema(graph: Graph): Promise<void> {
-  // Every `WHERE x.id IN $ids` / `MATCH (x:Label {id: ...})` below is a full
-  // label scan without an index, so each looked-up label gets one.
+
+
   const indexes: Array<[string, string]> = [
     ["Topic", "id"],
     ["Topic", "slug"],

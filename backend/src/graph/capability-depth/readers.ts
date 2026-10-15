@@ -457,7 +457,7 @@ export async function readEvidenceAtlas(
     fetchDemonstrations(graph, developerId),
   ]);
 
-  // ---- atoms ----------------------------------------------------------------
+
   const pkg = new Map<string, Acc>();
   const sig = new Map<string, Acc>();
   const vocab = new Map<string, number>();
