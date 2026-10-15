@@ -1,7 +1,3 @@
-
-
-
-
 import React, {
   createContext,
   useContext,
@@ -40,8 +36,6 @@ export interface SkillEvidenceItem {
 }
 
 type WorldContextValueWithSkill = WorldContextValue & {
-  
-  
   insights: SkillInsights | null;
   selectedSkillSlug: string | null;
   skillDetail: SkillDetail | null;
@@ -50,9 +44,6 @@ type WorldContextValueWithSkill = WorldContextValue & {
   selectSkill: (slug: string) => void;
   clearSelectedSkill: () => void;
 
-  
-  
-  
   skillInsight: SkillInsight | null;
   isInsightLoading: boolean;
   insightError: string | null;
@@ -79,7 +70,6 @@ type WorldContextValueWithBuilds = WorldContextValueWithSkill & {
 };
 
 const WorldContext = createContext<WorldContextValueWithBuilds | null>(null);
-
 
 const API_BASE: string =
   (import.meta as ImportMeta & { env?: { VITE_API_URL?: string } }).env
@@ -114,10 +104,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
 
   const regenerateSourceRef = useRef<EventSource | null>(null);
 
-  
-  
-  
-
   const [selectedSkillSlug, setSelectedSkillSlug] = useState<string | null>(
     null,
   );
@@ -129,16 +115,10 @@ export function WorldProvider({ children }: WorldProviderProps) {
   const [isInsightLoading, setIsInsightLoading] = useState<boolean>(false);
   const [insightError, setInsightError] = useState<string | null>(null);
 
-  
-  
   const selectedSkillSlugRef = useRef<string | null>(null);
   useEffect(() => {
     selectedSkillSlugRef.current = selectedSkillSlug;
   }, [selectedSkillSlug]);
-
-  
-  
-  
 
   const [viewMode, setViewMode] = useState<WorldViewMode>("skills");
 
@@ -158,11 +138,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     () => Object.fromEntries(projects.map((p) => [p.id, p])),
     [projects],
   );
-
-  
-  
-  
-  
 
   const loadGraph = useCallback(async (): Promise<void> => {
     setIsLoading(true);
@@ -213,12 +188,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     loadGraph();
   }, [loadGraph]);
 
-  
-  
-  
-  
-  
-  
   const loadBuilds = useCallback(async (): Promise<void> => {
     setIsBuildsLoading(true);
     setBuildsError(null);
@@ -258,8 +227,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     }
   }, []);
 
-  
-  
   useEffect(() => {
     if (viewMode === "builds" && !hasLoadedBuildsRef.current) {
       loadBuilds();
@@ -279,10 +246,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     () => Object.fromEntries(areas.map((area) => [area.id, area])),
     [areas],
   );
-
-  
-  
-  
 
   const resetSkillSidebar = useCallback(() => {
     setSelectedSkillSlug(null);
@@ -313,8 +276,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     setFocusedProjectId(null);
   }, []);
 
-  
-  
   const handleSetViewMode = useCallback(
     (mode: WorldViewMode) => {
       setViewMode(mode);
@@ -327,10 +288,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     },
     [resetSkillSidebar],
   );
-
-  
-  
-  
 
   const simulate = useCallback(() => {
     if (areas.length === 0) return;
@@ -354,10 +311,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     setPackages((prev) => prev.filter((pkg) => pkg.id !== pkgId));
     setPulses((prev) => ({ ...prev, [areaId]: Date.now() }));
   }, []);
-
-  
-  
-  
 
   const generateAreas = useCallback(() => {
     if (isGenerating) return;
@@ -504,15 +457,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     };
   }, [isGenerating, resetSkillSidebar]);
 
-  
-  
-  
-  
-  
-  
-  
-  
-
   const generateBuilds = useCallback(() => {
     if (isGeneratingBuilds) return;
     if (buildsSourceRef.current) return;
@@ -638,18 +582,12 @@ export function WorldProvider({ children }: WorldProviderProps) {
     };
   }, [isGeneratingBuilds]);
 
-  
-  
-  
-
   const selectSkill = useCallback((slug: string) => {
     setSelectedSkillSlug(slug);
     setSkillDetail(null);
     setSkillError(null);
     setIsSkillLoading(true);
 
-    
-    
     setSkillInsight(null);
     setInsightError(null);
     setIsInsightLoading(false);
@@ -690,15 +628,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     resetSkillSidebar();
   }, [resetSkillSidebar]);
 
-  
-  
-  
-  
-  
-  
-  
-  
-
   const loadInsight = useCallback((forceRefresh = false) => {
     const slug = selectedSkillSlugRef.current;
 
@@ -716,7 +645,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
     })
       .then(async (res) => {
         if (res.status === 404) {
-          
           if (slug === selectedSkillSlugRef.current) {
             setSkillInsight(null);
           }
@@ -751,10 +679,6 @@ export function WorldProvider({ children }: WorldProviderProps) {
         }
       });
   }, []);
-
-  
-  
-  
 
   const value: WorldContextValueWithBuilds = {
     areas,

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useRef, type ReactNode } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
@@ -7,6 +6,18 @@ import { useWorld } from "./WorldContext";
 import { HUB_POSITION } from "./mockGraph";
 import { getBridgeSpan, getBuildingHeight, getRingRadius } from "./cityKit";
 
+// After the fly-to finishes, OrbitControls owns the camera: left-drag
+// orbits a full 360° around the city, right-drag / two-finger pans,
+// wheel / pinch zooms.
+//
+// Overview: a 3/4 aerial shot of the whole city. Pull-back distance
+// scales with the ring radius, which grows with the number of
+// buildings (see getRingRadius in CityLayout.ts).
+//
+// Focus: a dollhouse shot of one building from the plaza side, pulled
+// back and low enough to look straight into the opened-up floors (see
+// BuildingFloors.tsx), slightly off-axis so the bridge stays visible and
+// nothing is clipped by the neighbouring towers.
 const OVERVIEW_DIRECTION = new THREE.Vector3(0.55, 0.8, 1).normalize();
 const FLY_DURATION_MS = 850;
 
@@ -22,10 +33,10 @@ export function CameraRig(): ReactNode {
   const { camera } = useThree();
   const { focusedAreaId, areaMap, areas } = useWorld();
 
-  
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const controlsRef = useRef<any>(null);
-  
-  
+  // Sentinel that can never equal a real key, so the very first effect
+  // run always counts as "changed" and frames the city.
   const lastKeyRef = useRef<string>("__uninitialized__");
   const flying = useRef<boolean>(false);
   const flyStart = useRef<number>(0);
@@ -34,11 +45,6 @@ export function CameraRig(): ReactNode {
   const flyToPos = useRef(new THREE.Vector3());
   const flyToTarget = useRef(new THREE.Vector3());
 
-  
-  
-  
-  
-  
   const focusKey = focusedAreaId ?? `__overview__:${areas.length}`;
 
   useEffect(() => {
@@ -57,11 +63,11 @@ export function CameraRig(): ReactNode {
       const [ax, ay, az] = area.position;
       const h = getBuildingHeight(area.skillCount, area.evidenceCount);
       const { ux, uz } = getBridgeSpan(area.position);
-      
+      // perpendicular to the hub->building direction
       const px = -uz;
       const pz = ux;
 
-      
+      // back off with building height so every floor fits in frame
       const back = 5.5 + h * 0.5;
       flyToTarget.current.set(ax, ay + h * 0.5, az);
       flyToPos.current.set(
@@ -75,7 +81,7 @@ export function CameraRig(): ReactNode {
         .set(...HUB_POSITION)
         .addScaledVector(OVERVIEW_DIRECTION, dist);
       flyToTarget.current.set(
-        HUB_POSITION[0],k
+        HUB_POSITION[0],
         HUB_POSITION[1] + 2.2,
         HUB_POSITION[2],
       );

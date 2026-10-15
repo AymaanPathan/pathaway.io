@@ -1,5 +1,3 @@
-
-
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
@@ -17,17 +15,6 @@ import {
   GRASS_DARK,
 } from "./Theme";
 import type { Vec3 } from "../src/types";
-
-
-
-
-
-
-
-
-
-
-
 
 export function LabAtmosphere() {
   return (
@@ -65,8 +52,6 @@ export function LabAtmosphere() {
   );
 }
 
-
-
 export function LabFloor() {
   const gridTexture = useMemo(() => {
     const size = 1024;
@@ -78,8 +63,6 @@ export function LabFloor() {
     ctx.fillStyle = PAPER;
     ctx.fillRect(0, 0, size, size);
 
-    
-    
     ctx.strokeStyle = "rgba(16, 18, 16, 0.055)";
     ctx.lineWidth = 1;
     const step = 32;
@@ -96,7 +79,6 @@ export function LabFloor() {
       ctx.stroke();
     }
 
-    
     ctx.strokeStyle = "rgba(16, 18, 16, 0.1)";
     ctx.lineWidth = 1.4;
     for (let x = 0; x <= size; x += step * 4) {
@@ -112,8 +94,6 @@ export function LabFloor() {
       ctx.stroke();
     }
 
-    
-    
     ctx.fillStyle = "rgba(16, 18, 16, 0.2)";
     for (let x = 0; x <= size; x += step * 4) {
       for (let y = 0; y <= size; y += step * 4) {
@@ -151,13 +131,9 @@ export function LabFloor() {
   );
 }
 
-
-
 export function LabPerimeter() {
   return null;
 }
-
-
 
 export function HomeAtmosphere() {
   return (
@@ -201,8 +177,6 @@ export function HomeGround() {
     ctx.fillStyle = GRASS;
     ctx.fillRect(0, 0, size, size);
 
-    
-    
     const rand = mulberry32(7);
     ctx.fillStyle = GRASS_DARK;
     for (let i = 0; i < 900; i++) {
@@ -238,8 +212,6 @@ export function HomeGround() {
     </mesh>
   );
 }
-
-
 
 interface SoftShadowProps {
   position?: Vec3;
@@ -307,10 +279,6 @@ export function HoloDisc({
     </group>
   );
 }
-
-
-
-
 
 interface DataPillarProps {
   position?: Vec3;
@@ -526,8 +494,6 @@ export function StatusBanner({
   );
 }
 
-
-
 interface FloorDetailingProps {
   count?: number;
   seed?: number;
@@ -568,8 +534,7 @@ export function FloorDetailing({
         x,
         z,
         scale: 0.5 + rand() * 0.35,
-        
-        
+
         hue: rand() > 0.5 ? YELLOW : INK,
       });
     }
