@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/purity */
 import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
@@ -139,27 +140,27 @@ export function HomeAtmosphere() {
   return (
     <>
       <color attach="background" args={[SKY]} />
-      <fog attach="fog" args={[SKY_FOG, 40, 120]} />
-      <hemisphereLight args={["#fff6d8", GRASS_DARK, 0.65]} />
-      <ambientLight intensity={0.5} />
+      <fog attach="fog" args={[SKY_FOG, 70, 190]} />
+      <hemisphereLight args={["#fff6e0", GRASS_DARK, 0.55]} />
+      <ambientLight intensity={0.38} />
       <directionalLight
         position={[16, 30, 14]}
-        intensity={1.6}
+        intensity={1.0}
         color="#fff3d0"
         castShadow
-        shadow-mapSize={[2048, 2048]}
-        shadow-camera-left={-34}
-        shadow-camera-right={34}
-        shadow-camera-top={34}
-        shadow-camera-bottom={-34}
+        shadow-mapSize={[1024, 1024]}
+        shadow-camera-left={-60}
+        shadow-camera-right={60}
+        shadow-camera-top={60}
+        shadow-camera-bottom={-60}
         shadow-camera-near={1}
-        shadow-camera-far={100}
+        shadow-camera-far={140}
         shadow-bias={-0.0012}
         shadow-normalBias={0.04}
       />
       <directionalLight
         position={[-18, 16, -16]}
-        intensity={0.3}
+        intensity={0.18}
         color="#ffe9b0"
       />
     </>
@@ -192,8 +193,8 @@ export function HomeGround() {
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(10, 10);
-    tex.anisotropy = 16;
+    tex.repeat.set(18, 18);
+    tex.anisotropy = 4;
     tex.generateMipmaps = true;
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.magFilter = THREE.LinearFilter;
@@ -207,7 +208,7 @@ export function HomeGround() {
       position={[0, -0.02, 0]}
       receiveShadow
     >
-      <circleGeometry args={[60, 72]} />
+      <circleGeometry args={[110, 64]} />
       <meshStandardMaterial map={texture} color={GRASS} roughness={0.95} />
     </mesh>
   );

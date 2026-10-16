@@ -117,14 +117,24 @@ export function CameraRig(): ReactNode {
     <OrbitControls
       ref={controlsRef}
       makeDefault
+      enablePan
+      enableZoom
+      enableRotate
+      screenSpacePanning
+      zoomToCursor
       enableDamping
-      dampingFactor={0.08}
-      rotateSpeed={0.6}
-      panSpeed={0.8}
-      zoomSpeed={0.8}
-      minDistance={3.5}
-      maxDistance={Math.max(70, overviewDistance(areas.length) * 2)}
-      maxPolarAngle={Math.PI / 2.02}
+      dampingFactor={0.12}
+      rotateSpeed={0.9}
+      panSpeed={1.2}
+      zoomSpeed={1.1}
+      minDistance={2}
+      maxDistance={Math.max(120, overviewDistance(areas.length) * 3)}
+      minPolarAngle={0.05}
+      maxPolarAngle={Math.PI / 2.05}
+      // any user input cancels the automatic fly-to so the camera never fights you
+      onStart={() => {
+        flying.current = false;
+      }}
       target={[HUB_POSITION[0], HUB_POSITION[1] + 2.2, HUB_POSITION[2]]}
     />
   );

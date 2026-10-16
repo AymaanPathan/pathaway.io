@@ -1,5 +1,5 @@
-
-
+/* eslint-disable react-hooks/purity */
+/* eslint-disable react-hooks/set-state-in-effect */
 import {
   memo,
   useCallback,
@@ -53,35 +53,16 @@ import {
 import { BuildingFloors, getFloorPlan } from "./BuildingFloors";
 import type { Area, SkillEvidence } from "../src/types";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 const GITHUB_PATH: string =
   "M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z";
 
 const FALLBACK_LOGIN = "aymaan pathan";
-const ROAD_COLOR = "#4A4A57";
-
+const ROAD_COLOR = "#5A5A66";
 
 function hash01(a: number, b: number, c: number, d: number): number {
   const s = Math.sin(a * 127.1 + b * 311.7 + c * 74.7 + d * 269.5) * 43758.5453;
   return s - Math.floor(s);
 }
-
-
-
-
-
 
 function useGithubTexture(): THREE.CanvasTexture {
   return useMemo(() => {
@@ -117,7 +98,7 @@ function useGithubTexture(): THREE.CanvasTexture {
     ctx.restore();
 
     const tex = new THREE.CanvasTexture(canvas);
-    tex.anisotropy = 16;
+    tex.anisotropy = 4;
     tex.generateMipmaps = true;
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.magFilter = THREE.LinearFilter;
@@ -146,7 +127,7 @@ function useAvatarTexture(url: string | null): THREE.Texture | null {
           return;
         }
         t.colorSpace = THREE.SRGBColorSpace;
-        t.anisotropy = 8;
+        t.anisotropy = 4;
         loaded = t;
         setTex(t);
       },
@@ -163,11 +144,6 @@ function useAvatarTexture(url: string | null): THREE.Texture | null {
 
   return tex;
 }
-
-
-
-
-
 
 function CityFloor({ radius }: { radius: number }): ReactNode {
   const plazaR = radius + BUILDING_W / 2 + 1.1;
@@ -214,8 +190,6 @@ function CityFloor({ radius }: { radius: number }): ReactNode {
     </group>
   );
 }
-
-
 
 interface TreeItem {
   pos: [number, number, number];
@@ -279,9 +253,6 @@ function CityTrees({
     const outerR = plazaR + 0.25 + 2.0 + 1.7;
     const out: TreeItem[] = [];
 
-    
-    
-    
     for (let i = 0; i < n; i++) {
       const a = getBuildingAngle(i + 0.5, n);
       out.push({
@@ -293,9 +264,9 @@ function CityTrees({
         s: 1.0 + hash01(i, 1, 2, 3) * 0.4,
       });
     }
-    
-    for (let i = 0; i < n * 2; i++) {
-      const a = getBuildingAngle(i * 0.5 + 0.25, n);
+
+    for (let i = 0; i < n; i++) {
+      const a = getBuildingAngle(i + 0.25, n);
       out.push({
         pos: [
           HUB_POSITION[0] + Math.cos(a) * outerR,
@@ -349,10 +320,6 @@ function CityTrees({
     </group>
   );
 }
-
-
-
-
 
 function AvatarBadge({
   y,
@@ -428,7 +395,6 @@ function CityHub(): ReactNode {
 
   return (
     <group position={HUB_POSITION}>
-      
       <OutlinedCylinder
         args={[HUB_RADIUS, HUB_RADIUS + 0.12, HUB_PODIUM_H, 48]}
         position={[0, HUB_PODIUM_H / 2, 0]}
@@ -447,7 +413,6 @@ function CityHub(): ReactNode {
         />
       </mesh>
 
-      
       <OutlinedCylinder
         args={[0.8, 1.0, pedestalH, 28]}
         position={[0, HUB_PODIUM_H + pedestalH / 2, 0]}
@@ -477,11 +442,6 @@ function CityHub(): ReactNode {
     </group>
   );
 }
-
-
-
-
-
 
 function Bridge({ area, index }: { area: Area; index: number }): ReactNode {
   const { constructions, focusedAreaId } = useWorld();
@@ -526,7 +486,6 @@ function Bridge({ area, index }: { area: Area; index: number }): ReactNode {
       rotation={[0, span.angleY, 0]}
     >
       <group ref={growRef}>
-        
         <OutlinedBox
           args={[BRIDGE_W, DECK_THICKNESS, L]}
           position={[0, deckY, L / 2]}
@@ -534,7 +493,6 @@ function Bridge({ area, index }: { area: Area; index: number }): ReactNode {
           thickness={1.03}
         />
 
-        
         <mesh ref={laneRef} position={[0, BRIDGE_Y + 0.006, L / 2]}>
           <boxGeometry args={[0.2, 0.012, Math.max(0.1, L - 0.4)]} />
           <meshStandardMaterial
@@ -545,7 +503,6 @@ function Bridge({ area, index }: { area: Area; index: number }): ReactNode {
           />
         </mesh>
 
-        
         {[-1, 1].map((side) => (
           <mesh
             key={side}
@@ -557,7 +514,6 @@ function Bridge({ area, index }: { area: Area; index: number }): ReactNode {
           </mesh>
         ))}
 
-        
         {Array.from({ length: pierCount }).map((_, i) => (
           <OutlinedCylinder
             key={i}
@@ -571,13 +527,6 @@ function Bridge({ area, index }: { area: Area; index: number }): ReactNode {
     </group>
   );
 }
-
-
-
-
-
-
-
 
 const WINDOW_STEP = 0.85;
 
@@ -679,9 +628,6 @@ function BuildingWindows({
   );
 }
 
-
-
-
 function RoofLandmark({
   archetype,
   accent,
@@ -725,15 +671,6 @@ function RoofLandmark({
   );
 }
 
-
-
-
-
-
-
-
-
-
 interface BuildingBodyProps {
   area: Area;
   index: number;
@@ -771,12 +708,11 @@ const BuildingBody = memo(function BuildingBody({
   );
 
   const upperH = Math.max(0.2, height - LOBBY_H);
-  
+
   const showSolidUpper = !hasFloors || !isFocused;
 
   return (
     <>
-      
       <OutlinedBox
         args={[BUILDING_W + 1.8, 0.1, BUILDING_W + 1.8]}
         position={[0, 0.05, 0]}
@@ -784,7 +720,6 @@ const BuildingBody = memo(function BuildingBody({
         thickness={1.015}
       />
 
-      
       <OutlinedBox
         args={[BUILDING_W, LOBBY_H, BUILDING_W]}
         position={[0, LOBBY_H / 2, 0]}
@@ -798,7 +733,6 @@ const BuildingBody = memo(function BuildingBody({
         thickness={1.03}
       />
 
-      
       {showSolidUpper && (
         <OutlinedBox
           args={[BUILDING_W, upperH, BUILDING_W]}
@@ -823,7 +757,6 @@ const BuildingBody = memo(function BuildingBody({
         showFront={!(hasFloors && isFocused)}
       />
 
-      
       <OutlinedBox
         args={[BUILDING_W + 0.3, 0.2, BUILDING_W + 0.3]}
         position={[0, height + 0.1, 0]}
@@ -832,7 +765,6 @@ const BuildingBody = memo(function BuildingBody({
       />
       <RoofLandmark archetype={archetype} accent={hue.roof} y={height + 0.2} />
 
-      
       <OutlinedBox
         args={[1.5, DECK_THICKNESS, LANDING_DEPTH + 0.05]}
         position={[
@@ -865,11 +797,6 @@ const BuildingBody = memo(function BuildingBody({
   );
 });
 
-
-
-
-
-
 function Building({ area, index }: { area: Area; index: number }): ReactNode {
   const {
     focusArea,
@@ -886,7 +813,7 @@ function Building({ area, index }: { area: Area; index: number }): ReactNode {
 
   const height = getBuildingHeight(area.skillCount, area.evidenceCount);
   const span = useMemo(() => getBridgeSpan(area.position), [area.position]);
-  
+
   const facingY = span.angleY + Math.PI;
 
   const [hovered, setHovered] = useState(false);
@@ -911,8 +838,6 @@ function Building({ area, index }: { area: Area; index: number }): ReactNode {
     );
   });
 
-  
-  
   const [, setTick] = useState(0);
   const pulseTs = pulses[area.id] || 0;
   const showPulse = pulseTs > 0 && Date.now() - pulseTs < 1300;
@@ -962,7 +887,6 @@ function Building({ area, index }: { area: Area; index: number }): ReactNode {
         </group>
       </group>
 
-      
       {isFocused || hovered ? (
         <Html
           position={[0, labelY, 0]}
@@ -1070,6 +994,5 @@ export function DeveloperCity(): ReactNode {
     </group>
   );
 }
-
 
 export const DeveloperHome = DeveloperCity;

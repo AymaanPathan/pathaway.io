@@ -1,50 +1,17 @@
-
+/* eslint-disable react-refresh/only-export-components */
 import { type ReactNode } from "react";
 import * as THREE from "three";
 import { HUB_POSITION } from "./mockGraph";
 import { INK } from "./Theme";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 export const BUILDING_W = 3.0;
-export const BUILDING_GAP = 2.6;
+export const BUILDING_GAP = 7.5; // clear space between towers (was 2.6)
 export const BUILDING_SPACING = BUILDING_W + BUILDING_GAP;
 
-
-export const MIN_RING_RADIUS = 9;
-
+export const MIN_RING_RADIUS = 15;
 
 export const HUB_RADIUS = 3.2;
 export const HUB_PODIUM_H = 1.1;
-
-
 
 export const BRIDGE_Y = HUB_PODIUM_H + 0.03;
 export const BRIDGE_W = 0.95;
@@ -54,47 +21,35 @@ export const LANDING_DEPTH = 0.7;
 
 export const MIN_BUILDING_H = 4.4;
 
-
-
-
-
 export const MAX_FLOORS = 6;
 export const LOBBY_H = BRIDGE_Y + 1.6;
 export const FLOOR_H = 1.2;
 export const ROOF_PAD = 0.2;
-
 
 export function getRingRadius(total: number): number {
   if (total <= 1) return MIN_RING_RADIUS;
   return Math.max(MIN_RING_RADIUS, (total * BUILDING_SPACING) / (2 * Math.PI));
 }
 
-
-
 export function getBuildingAngle(index: number, total: number): number {
   return Math.PI / 4 + (index / Math.max(total, 1)) * Math.PI * 2;
 }
-
-
-
 
 export function getBuildingHeight(
   skillCount?: number | null,
   evidenceCount?: number | null,
 ): number {
-  
-  
   const floors = Math.min(Math.max(skillCount ?? 2, 1), MAX_FLOORS);
   const evidence = Math.min(Math.max(evidenceCount ?? 0, 0), 200) / 200;
   return LOBBY_H + floors * FLOOR_H + ROOF_PAD + evidence * 1.4;
 }
 
 export interface BridgeSpan {
-  start: [number, number, number]; 
-  end: [number, number, number]; 
+  start: [number, number, number];
+  end: [number, number, number];
   length: number;
-  angleY: number; 
-  ux: number; 
+  angleY: number;
+  ux: number;
   uz: number;
 }
 
@@ -121,9 +76,6 @@ export function getBridgeSpan(
   };
 }
 
-
-
-
 export function computeRoomLayout(count: number): [number, number, number][] {
   if (count <= 0) return [];
   const radius = getRingRadius(count);
@@ -139,7 +91,6 @@ export function computeRoomLayout(count: number): [number, number, number][] {
   return out;
 }
 
-
 export function buildCurve(
   fromPos: [number, number, number],
   toPos: [number, number, number],
@@ -151,18 +102,11 @@ export function buildCurve(
   return new THREE.QuadraticBezierCurve3(start, mid, end);
 }
 
-
-
-
-
-
-
-
 let celGradient: THREE.DataTexture | null = null;
 function getCelGradient(): THREE.DataTexture {
   if (!celGradient) {
     const data = new Uint8Array([
-      90, 90, 90, 255, 175, 175, 175, 255, 255, 255, 255, 255,
+      120, 120, 120, 255, 190, 190, 190, 255, 238, 238, 238, 255,
     ]);
     const tex = new THREE.DataTexture(data, 3, 1, THREE.RGBAFormat);
     tex.magFilter = THREE.NearestFilter;
@@ -203,7 +147,6 @@ export function getOutlineMaterial(color: string): THREE.MeshBasicMaterial {
   return m;
 }
 
-
 const flatCache = new Map<string, THREE.MeshLambertMaterial>();
 export function getFlatMaterial(
   color: string,
@@ -222,7 +165,6 @@ export function getFlatMaterial(
   }
   return m;
 }
-
 
 const basicCache = new Map<string, THREE.MeshBasicMaterial>();
 export function getBasicMaterial(
@@ -271,8 +213,6 @@ export function cachedSphere(
   return g as THREE.SphereGeometry;
 }
 
-
-
 export const noRaycast = (): void => undefined;
 
 interface BaseProps {
@@ -286,9 +226,6 @@ interface BaseProps {
   emissive?: string;
   emissiveIntensity?: number;
 }
-
-
-
 
 export function OutlinedBox({
   args,
@@ -377,7 +314,6 @@ export function OutlinedSphere({
   );
 }
 
-
 export type RoomArchetype =
   | "frontend"
   | "backend"
@@ -392,8 +328,6 @@ interface ArchetypeRule {
   archetype: RoomArchetype;
   keywords: string[];
 }
-
-
 
 const ARCHETYPE_RULES: ArchetypeRule[] = [
   {
@@ -526,7 +460,6 @@ export function getSkillPropShape(skillName: string): SkillPropShape {
   return "generic";
 }
 
-
 interface DressingProps {
   accent: string;
 }
@@ -569,7 +502,7 @@ function ShippingCrateStack({ accent }: DressingProps): ReactNode {
         color="#ffffff"
         thickness={1.03}
       />
-      
+
       <mesh position={[0, 0.02, 0.28]}>
         <boxGeometry args={[0.5, 0.03, 0.1]} />
         <meshStandardMaterial color={INK} roughness={0.6} />
@@ -710,7 +643,6 @@ export function CategorySetDressing({
     case "frontend":
     case "generic":
     default:
-      
       return null;
   }
 
@@ -720,29 +652,6 @@ export function CategorySetDressing({
     </group>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 const DEPTH_SCALE: Record<string, number> = {
   insufficient_evidence: 0.65,
