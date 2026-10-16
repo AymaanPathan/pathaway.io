@@ -13,6 +13,9 @@ import {
   RefreshCw,
   Send,
   Trash2,
+  X,
+  Sparkles,
+  ArrowRight,
 } from "lucide-react";
 
 /* ---------- tokens ---------- */
@@ -232,6 +235,22 @@ type Outcome = {
   summary: string;
 };
 
+type MissionLearningResult = {
+  evaluationStored: boolean;
+  evidenceStatus: "updated" | "not_verified" | "no_evidence" | "repository_missing";
+  learning: LearningPipelineResult | null;
+};
+
+type LearningPipelineResult = {
+  detected: number;
+  reviewed: number;
+  accepted: number;
+  skippedExisting: number;
+  rejected: Array<{ demonstrationId: string; reason: string }>;
+  experiencesUpdated: number;
+  capabilityRollupsUpdated: number;
+};
+
 type RunView = {
   runId: string;
   missionId: string;
@@ -242,6 +261,8 @@ type RunView = {
   envRequest: Array<{ name: string; reason: string }>;
   envInfo: { filled: string[]; provided: string[] };
   outcome: Outcome | null;
+  /** Backend result from the verified mission-to-knowledge-graph pipeline. */
+  learning?: MissionLearningResult | null;
   testCode: string;
   infra: boolean;
   error: string;
@@ -359,7 +380,13 @@ details[open] > summary::before{content:"▾ ";}
 .pm-pop{animation:pm-pop .45s ease-out both}
 @keyframes pm-reveal{0%{transform:translateX(-6px);opacity:0}100%{transform:none;opacity:1}}
 .pm-reveal{animation:pm-reveal .35s ease-out both}
-@media (prefers-reduced-motion: reduce){.pm-pop,.pm-reveal{animation:none}}
+@keyframes pm-graph-draw{to{stroke-dashoffset:0}}
+@keyframes pm-graph-node{0%{opacity:0;transform:translateY(12px) scale(.94)}70%{transform:translateY(-2px) scale(1.01)}100%{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes pm-graph-pulse{0%,100%{filter:drop-shadow(0 0 0 rgba(109,231,174,0))}50%{filter:drop-shadow(0 0 12px rgba(109,231,174,.55))}}
+.pm-graph-edge{stroke-dasharray:9 8;stroke-dashoffset:180;animation:pm-graph-draw 1.15s cubic-bezier(.22,.8,.25,1) forwards}
+.pm-graph-node{opacity:0;animation:pm-graph-node .55s cubic-bezier(.2,.8,.2,1) forwards}
+.pm-graph-glow{animation:pm-graph-pulse 2.4s ease-in-out infinite}
+@media (prefers-reduced-motion: reduce){.pm-pop,.pm-reveal,.pm-graph-edge,.pm-graph-node,.pm-graph-glow{animation:none!important;opacity:1;stroke-dashoffset:0}}
 `;
 
 /* ---------- helpers ---------- */
@@ -1485,6 +1512,175 @@ function ResultPanel({ run, spec }: { run: RunView; spec: Spec }) {
   );
 }
 
+/** Full-screen explanation of how a passing mission feeds Pathway's existing graph. */
+function GraphUpdateReveal({
+  mission,
+  run,
+  onClose,
+}: {
+  mission: Mission;
+  run: RunView;
+  onClose: () => void;
+}) {
+  const learning = run.learning;
+  const result = learning?.learning;
+  const updated = learning?.evidenceStatus === "updated";
+  const nodes = [
+    { x: 70, y: 170, title: "Developer", sub: "existing identity", kind: "source" },
+    { x: 255, y: 90, title: "Commit", sub: short(run.headSha || run.head || "verified"), kind: "commit" },
+    { x: 440, y: 170, title: "FileChange", sub: `${result?.detected ?? 0} detected`, kind: "file" },
+    { x: 625, y: 90, title: "Demonstration", sub: `${result?.accepted ?? 0} accepted`, kind: "demo" },
+    { x: 810, y: 170, title: "Experience", sub: `${result?.experiencesUpdated ?? 0} updated`, kind: "experience" },
+    { x: 995, y: 90, title: "Capability", sub: `${result?.capabilityRollupsUpdated ?? 0} rollups`, kind: "capability" },
+  ];
+  const edgePairs = [[120, 145, 210, 105], [300, 105, 395, 145], [485, 145, 580, 105], [670, 105, 765, 145], [855, 145, 950, 105]];
+  const headline = updated
+    ? "Your graph is learning from this mission"
+    : learning?.evidenceStatus === "no_evidence"
+      ? "Mission passed. No new code evidence was extracted."
+      : learning?.evidenceStatus === "repository_missing"
+        ? "Mission passed. The repository link needs attention."
+        : learning?.evidenceStatus === "not_verified"
+          ? "Mission passed. Graph evidence was not promoted."
+          : "Mission passed. Graph update status is unavailable.";
+  const description = updated
+    ? "The verified commit is connected to code-level changes. Accepted demonstrations feed experience aggregates and capability rollups, enriching the same developer graph Pathway uses for future recommendations."
+    : "The evaluation succeeded, but the response does not confirm a complete knowledge-graph update. This view separates the mission result from evidence that was actually persisted.";
+  const statusLabel = updated ? "GRAPH UPDATED" : "EVALUATION PASSED";
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Mission complete: knowledge graph update"
+      className="fixed inset-0 z-[100] overflow-y-auto" style={{ background: "#090d14", color: "#edf4f7" }}>
+      <div className="mx-auto flex min-h-screen w-full max-w-[1500px] flex-col px-4 py-5 sm:px-7 sm:py-7">
+        <header className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl"
+              style={{ background: updated ? "#173b30" : "#303044", border: "1px solid #39544f" }}>
+              {updated ? <Sparkles size={22} color="#78e5b1" /> : <Check size={22} color="#f5c542" />}
+            </div>
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[.22em]" style={{ color: "#93a8b4" }}>
+                pathway.io · mission lifecycle
+              </p>
+              <h1 className="mt-1 text-xl font-bold sm:text-2xl" style={{ fontFamily: DISPLAY }}>{headline}</h1>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close graph animation"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-white/20 text-white/80 transition hover:bg-white/10">
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="mt-5 flex flex-wrap items-center gap-2">
+          <span className="rounded-full px-3 py-1 text-[10px] font-bold tracking-[.16em]"
+            style={{ background: updated ? "#173b30" : "#302b1d", color: updated ? "#8ef0bd" : "#f5d979", border: "1px solid #3a514c" }}>
+            {statusLabel}
+          </span>
+          <span className="rounded-full border border-white/15 px-3 py-1 text-[11px]" style={{ color: "#a9b8c2" }}>{mission.spec.title}</span>
+          {run.headSha && <span className="rounded-full border border-white/15 px-3 py-1 text-[11px]" style={{ color: "#a9b8c2", fontFamily: MONO }}>commit {short(run.headSha)}</span>}
+        </div>
+
+        <p className="mt-4 max-w-4xl text-sm leading-relaxed sm:text-[15px]" style={{ color: "#aab9c4" }}>{description}</p>
+
+        <section className="mt-6 flex-1 rounded-3xl border p-3 sm:p-5 lg:p-7"
+          style={{ borderColor: "#253440", background: "radial-gradient(ellipse at 50% 45%, #14232b 0%, #0d141d 58%, #0a0f16 100%)" }}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-[.18em]" style={{ color: "#7f9aab" }}>Evidence propagation</p>
+              <p className="mt-1 text-sm" style={{ color: "#c4d0d7" }}>From your verified code change to the capability model</p>
+            </div>
+            <span className="flex items-center gap-2 text-[11px]" style={{ color: updated ? "#7ce5b1" : "#e8d18a" }}>
+              <span className="h-2 w-2 rounded-full" style={{ background: updated ? "#68e3a7" : "#e8c75e" }} />
+              {updated ? "Accepted evidence path" : "Illustrative graph path"}
+            </span>
+          </div>
+
+          <div className="mt-5 hidden lg:block">
+            <svg viewBox="0 0 1065 260" role="img" aria-label="Animated knowledge graph from developer to commit, file changes, demonstrations, experience, and capability" className="h-auto w-full overflow-visible">
+              <defs>
+                <linearGradient id="pm-edge-gradient" x1="0%" x2="100%">
+                  <stop offset="0%" stopColor="#4f9f91" /><stop offset="100%" stopColor={updated ? "#7be7b1" : "#e5c766"} />
+                </linearGradient>
+              </defs>
+              {edgePairs.map(([x1, y1, x2, y2], i) => (
+                <g key={i}>
+                  <path d={`M ${x1} ${y1} C ${x1 + 25} ${y1 - 8}, ${x2 - 25} ${y2 + 8}, ${x2} ${y2}`}
+                    fill="none" stroke="#29424b" strokeWidth="7" strokeLinecap="round" />
+                  <path d={`M ${x1} ${y1} C ${x1 + 25} ${y1 - 8}, ${x2 - 25} ${y2 + 8}, ${x2} ${y2}`}
+                    fill="none" stroke="url(#pm-edge-gradient)" strokeWidth="2.5" strokeLinecap="round"
+                    className="pm-graph-edge" style={{ animationDelay: `${i * 180}ms` }} />
+                  <circle r="4" fill={updated ? "#83efb7" : "#f5d879"}>
+                    <animateMotion dur={`${2.4 + i * 0.15}s`} repeatCount="indefinite" begin={`${i * 0.2}s`}
+                      path={`M ${x1} ${y1} C ${x1 + 25} ${y1 - 8}, ${x2 - 25} ${y2 + 8}, ${x2} ${y2}`} />
+                  </circle>
+                </g>
+              ))}
+              {nodes.map((node, i) => (
+                <g key={node.kind} className="pm-graph-node" style={{ animationDelay: `${0.18 + i * 0.23}s` }}>
+                  <rect x={node.x - 63} y={node.y - 37} width="126" height="74" rx="15"
+                    fill={i === 5 && updated ? "#163c30" : "#111e28"}
+                    stroke={i === 5 && updated ? "#79e7b0" : "#3b5662"} strokeWidth={i === 5 && updated ? "2" : "1.2"} />
+                  <circle cx={node.x - 45} cy={node.y - 17} r="4" fill={updated ? "#79e7b0" : "#e5c766"} />
+                  <text x={node.x} y={node.y + 2} fill="#f1f6f8" textAnchor="middle" fontSize="12" fontWeight="700">{node.title}</text>
+                  <text x={node.x} y={node.y + 19} fill="#91a8b4" textAnchor="middle" fontSize="9.5">{node.sub}</text>
+                </g>
+              ))}
+              <text x="70" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">IDENTITY</text>
+              <text x="255" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">SOURCE</text>
+              <text x="440" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">CODE PROVENANCE</text>
+              <text x="625" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">CAPABILITY EVIDENCE</text>
+              <text x="810" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">AGGREGATION</text>
+              <text x="995" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">GROWTH MODEL</text>
+            </svg>
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:hidden">
+            {nodes.map((node, i) => (
+              <div key={node.kind} className="pm-graph-node rounded-2xl border p-4"
+                style={{ animationDelay: `${0.15 + i * 0.18}s`, borderColor: "#334a55", background: "#111e28" }}>
+                <div className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full" style={{ background: updated ? "#79e7b0" : "#e5c766" }} />
+                  <span className="font-semibold">{node.title}</span>
+                </div>
+                <p className="mt-1 pl-[18px] text-xs" style={{ color: "#91a8b4" }}>{node.sub}</p>
+                {i < nodes.length - 1 && <div className="mt-3 flex items-center gap-1 text-[10px]" style={{ color: "#7ce5b1" }}><ArrowRight size={12} /> connected to next stage</div>}
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {[
+              { label: "Evaluation audit", value: learning?.evaluationStored ? "Stored" : "Not confirmed", note: "Mission result + changed files" },
+              { label: "Accepted demonstrations", value: result ? String(result.accepted) : "—", note: result ? `${result.reviewed} reviewed · ${result.skippedExisting} already known` : "Learning result not returned" },
+              { label: "Experience aggregates", value: result ? String(result.experiencesUpdated) : "—", note: "Updated from accepted evidence" },
+              { label: "Capability rollups", value: result ? String(result.capabilityRollupsUpdated) : "—", note: "Recalculated capability summaries" },
+            ].map((stat) => (
+              <div key={stat.label} className="rounded-2xl border p-4" style={{ borderColor: "#2b414b", background: "#101a23" }}>
+                <p className="text-[10px] font-bold uppercase tracking-[.14em]" style={{ color: "#7f9aab" }}>{stat.label}</p>
+                <p className="mt-2 text-2xl font-bold" style={{ fontFamily: DISPLAY, color: updated ? "#8aefba" : "#f0d47a" }}>{stat.value}</p>
+                <p className="mt-1 text-[11px] leading-snug" style={{ color: "#91a8b4" }}>{stat.note}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <footer className="mt-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+          <p className="max-w-2xl text-xs leading-relaxed" style={{ color: "#8499a5" }}>
+            {updated
+              ? `${result?.accepted ?? 0} new demonstration(s) accepted; ${result?.rejected.length ?? 0} rejected; ${result?.capabilityRollupsUpdated ?? 0} capability rollup(s) recalculated. These are backend-reported counts.`
+              : "The animation explains the graph pipeline. It does not treat a passing test result alone as proof that learning evidence was written."}
+          </p>
+          <button type="button" onClick={onClose}
+            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-6 py-3 text-sm font-bold transition hover:brightness-110"
+            style={{ background: "#f5c542", color: "#11140f" }}>
+            Continue to mission results <ArrowRight size={16} />
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 function GateMark({ ok }: { ok: boolean | null }) {
   const [ch, color] =
     ok === true ? ["✓", GREEN] : ok === false ? ["✕", RED] : ["–", MUTED];
@@ -1525,8 +1721,10 @@ export default function MissionPage() {
   const [commitsNote, setCommitsNote] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncedAt, setSyncedAt] = useState("");
+  const [showGraphReveal, setShowGraphReveal] = useState(false);
 
   const started = useRef(false);
+  const celebratedRun = useRef("");
   const lastGoal = useRef("");
 
   const loadEvaluation = async (id: string) => {
@@ -1712,6 +1910,15 @@ export default function MissionPage() {
   /* poll a live run */
   const runId = run?.runId ?? "";
   const runStatus = run?.status ?? "done";
+
+  /* Show the graph reveal once when a completed run arrives, including after reload. */
+  useEffect(() => {
+    if (!runId || runStatus !== "done" || run?.outcome?.verdict !== "completed") return;
+    if (celebratedRun.current === runId) return;
+    celebratedRun.current = runId;
+    setShowGraphReveal(true);
+  }, [runId, runStatus, run?.outcome?.verdict]);
+
   useEffect(() => {
     if (!missionId || !runId) return;
     if (runStatus !== "running" && runStatus !== "needs_env") return;
@@ -2814,6 +3021,14 @@ export default function MissionPage() {
             </div>
           </main>
         </div>
+      )}
+
+      {showGraphReveal && mission && run?.outcome?.verdict === "completed" && (
+        <GraphUpdateReveal
+          mission={mission}
+          run={run}
+          onClose={() => setShowGraphReveal(false)}
+        />
       )}
     </div>
   );
