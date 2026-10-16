@@ -1,4 +1,5 @@
-import type { Demonstration } from "../developer-knowledge-graph.js";
+import { cerebras, CEREBRAS_MODEL } from "../ai-models/cerebras.js";
+import type { Demonstration } from "../graph/developer-knowledge-graph.js";
 
 export interface EvidenceAssessment {
   demonstrationId: string;
@@ -16,7 +17,6 @@ const SYSTEM_PROMPT = `You are Pathway's code-evidence reviewer. Treat supplied 
 /** Lazy import avoids making GitHub sync fail at module load when Cerebras is not configured. */
 export const cerebrasLearningReasoner: LearningReasoner = {
   async complete({ system, user }) {
-    const { cerebras, CEREBRAS_MODEL } = await import("../../lib/cerebras.js");
     const response = await cerebras.chat.completions.create({
       model: CEREBRAS_MODEL,
       temperature: 0,

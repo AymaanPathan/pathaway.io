@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import type { Graph } from "../db/falkordb.js";
+import {
+  processMissionEvaluation,
+  type MissionLearningResult,
+} from "../learning/mission-learning.js";
 
 import { getMission, type MissionDeps } from "../service/mission.service.js";
 import { runInSandbox } from "../service/daytona.service.js";
@@ -96,6 +101,8 @@ export interface RunView {
   /** whether the project's own `npm test` is real, a placeholder, or missing */
   projectTest: ProjectTestInfo | null;
   outcome: EvaluationOutcome | null;
+  /** graph learning update performed after a verified evaluation */
+  learning: MissionLearningResult | null;
   testCode: string;
   /** true when the failure looks like our environment, not the developer's code */
   infra: boolean;
@@ -133,19 +140,6 @@ export type EnvResult =
   | { status: "ok"; run: RunView }
   | { status: "not_found" | "not_waiting"; message: string }
   | { status: "missing_keys"; message: string; missing: string[] };
-
-export interface RecordInput {
-  developerId: string;
-  missionId: string;
-  headSha: string;
-  outcome: EvaluationOutcome;
-}
-
-export type EvaluationRecorder = (r: RecordInput) => Promise<void>;
-let recorder: EvaluationRecorder | null = null;
-export const setEvaluationRecorder = (fn: EvaluationRecorder | null): void => {
-  recorder = fn;
-};
 
 /* ------------------------------------------------------------------ */
 /* run store                                                           */
@@ -307,6 +301,7 @@ function untar(tar: Buffer): Map<string, string> {
 
 interface Snapshot {
   sha: string;
+  message: string;
   tarball: Buffer;
   files: Map<string, string>;
   changed: ChangedFile[];
@@ -318,7 +313,7 @@ async function loadSnapshot(
   head: string,
   baseCommit: string,
 ): Promise<Snapshot> {
-  const commit = await ghJson<{ sha: string }>(
+  const commit = await ghJson<{ sha: string; commit?: { message?: string } }>(
     token,
     `/repos/${fork}/commits/${encodeURIComponent(head)}`,
   );
@@ -350,7 +345,13 @@ async function loadSnapshot(
     patch: f.patch ?? "",
   }));
 
-  return { sha, tarball, files, changed };
+  return {
+    sha,
+    message: commit.commit?.message ?? "",
+    tarball,
+    files,
+    changed,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -378,6 +379,8 @@ export async function startEvaluation(
 
   const mission = (await getMission(deps, developerId, missionId)) as any;
   if (!mission) return { status: "not_found", message: "Mission not found." };
+  // MissionDeps exposes the shared FalkorDB Graph directly.
+  const graph: Graph = deps.graph;
   if (["completed", "abandoned", "proposed"].includes(mission.status))
     return {
       status: "not_evaluable",
@@ -428,6 +431,7 @@ export async function startEvaluation(
     criteriaPlan: [],
     projectTest: null,
     outcome: null,
+    learning: null,
     testCode: "",
     infra: false,
     error: "",
@@ -442,6 +446,9 @@ export async function startEvaluation(
 
   void execute(run, {
     llm,
+    graph,
+    missionId,
+    repositoryFullName: String(mission.pin?.repository ?? ""),
     token: githubToken,
     fork: String(mission.forkRepository),
     spec: mission.spec as MissionSpec,
@@ -514,6 +521,9 @@ const waitForEnv = (run: Run) =>
 
 interface Ctx {
   llm: LlmClient;
+  graph: Graph;
+  missionId: string;
+  repositoryFullName: string;
   token: string;
   fork: string;
   spec: MissionSpec;
@@ -585,20 +595,51 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
     run.durationMs = Date.now() - t0;
   };
 
-  /** store the outcome and persist it, unless the run could not be checked */
-  const conclude = async (outcome: EvaluationOutcome, sha: string) => {
+  /**
+   * Persist the evaluation audit, then update Pathway's graph from verified code.
+   * Failed/blocked runs are recorded but never promoted into capability evidence.
+   */
+  const finalizeEvaluation = async (
+    outcome: EvaluationOutcome,
+    snapshot: Snapshot,
+  ) => {
     run.outcome = outcome;
-    finish("done");
-    if (!recorder || outcome.overall === "blocked") return;
     try {
-      await recorder({
+      run.learning = await processMissionEvaluation({
+        graph: ctx.graph,
         developerId: run.developerId,
-        missionId: run.missionId,
-        headSha: sha,
+        missionId: ctx.missionId,
+        repositoryFullName: ctx.repositoryFullName,
+        headSha: snapshot.sha,
+        commitMessage: snapshot.message,
+        changedFiles: snapshot.changed,
         outcome,
       });
-    } catch (e) {
-      console.error("[mission-eval] recorder failed", e);
+      step(
+        "judge",
+        "done",
+        outcome.overall === "passed"
+          ? `Evaluation passed; graph learning ${run.learning.evidenceStatus}.`
+          : `Evaluation ${outcome.overall}; result recorded without adding unverified capability evidence.`,
+      );
+    } catch (error) {
+      // Learning persistence is observable but does not rewrite the sandbox verdict.
+      console.error("[mission-eval] post-evaluation graph update failed", {
+        runId: run.runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      run.learning = null;
+      step(
+        "judge",
+        "done",
+        "Evaluation verdict finalized; graph learning failed and was logged.",
+      );
+      run.log =
+        `${run.log}\n[Pathway graph learning failed] ${error instanceof Error ? error.message : String(error)}`.slice(
+          -LOG_KEEP,
+        );
+    } finally {
+      finish("done");
     }
   };
 
@@ -682,7 +723,7 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
         judged: null,
         headSha: snap.sha,
       });
-      await conclude(outcome, snap.sha);
+      await finalizeEvaluation(outcome, snap);
       return;
     }
 
@@ -988,7 +1029,7 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
         : `${passed} of ${outcome.results.length} checks passed${blocked ? `, ${blocked} could not be checked` : ""}.`,
     );
 
-    await conclude(outcome, snap.sha);
+    await finalizeEvaluation(outcome, snap);
   } catch (e) {
     console.error("[mission-eval] run failed", run.runId, e);
     const running = run.steps.find((s) => s.status === "running");

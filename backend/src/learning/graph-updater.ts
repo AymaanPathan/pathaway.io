@@ -28,6 +28,7 @@ export async function upsertDemonstrations(
   developerId: string,
   demonstrations: Demonstration[],
   buildId: string,
+  options: { source?: "github" | "mission"; missionId?: string } = {},
 ): Promise<number> {
   if (!demonstrations.length) return 0;
 
@@ -51,6 +52,8 @@ export async function upsertDemonstrations(
     change_intent: demo.intent,
     commit_subject: demo.commitSubject,
     created_at: demo.createdAt,
+    source: options.source ?? "github",
+    mission_id: options.missionId ?? null,
   }));
   await writeBatches(
     graph,
@@ -66,7 +69,8 @@ export async function upsertDemonstrations(
         x.end_line = item.end_line, x.snippet = item.snippet,
         x.permalink = item.permalink, x.change_intent = item.change_intent,
         x.commit_subject = item.commit_subject, x.created_at = item.created_at,
-        x.developer_id = $developer_id, x.build_id = $build_id
+        x.developer_id = $developer_id, x.build_id = $build_id,
+        x.source = item.source, x.mission_id = item.mission_id
     RETURN count(x) AS n`,
     nodeRows,
     { developer_id: developerId, build_id: buildId },
@@ -126,4 +130,27 @@ export async function findExistingDemonstrationIds(
     }
   }
   return existing;
+}
+
+/** Promote previously accepted evidence when its exact commit is later verified by a mission. */
+export async function markDemonstrationsAsMissionEvidence(
+  graph: Graph,
+  ids: string[],
+  missionId: string,
+): Promise<number> {
+  if (!ids.length || !missionId) return 0;
+  let updated = 0;
+  for (let index = 0; index < ids.length; index += BATCH_SIZE) {
+    const batch = ids.slice(index, index + BATCH_SIZE);
+    const result = await graph.query(
+      `MATCH (x:Demonstration) WHERE x.id IN $ids
+       SET x.source = "mission", x.mission_id = $mission_id
+       RETURN count(x) AS n`,
+      { params: { ids: batch, mission_id: missionId } },
+    );
+    updated += Number(
+      (result.data?.[0] as { n?: unknown } | undefined)?.n ?? 0,
+    );
+  }
+  return updated;
 }

@@ -1,5 +1,4 @@
 import type { Graph } from "../db/falkordb.js";
-import type { Demonstration } from "../graph/developer-knowledge-graph.js";
 import {
   extractEvidence,
   type LearningContext,
@@ -13,6 +12,7 @@ import {
 import { validateEvidence } from "./evidence-validator.js";
 import {
   findExistingDemonstrationIds,
+  markDemonstrationsAsMissionEvidence,
   upsertDemonstrations,
 } from "./graph-updater.js";
 import { updateExperiences } from "./experience-updater.js";
@@ -26,6 +26,9 @@ export interface LearningPipelineInput {
   contextByCommit: Map<string, LearningContext>;
   reasoner?: LearningReasoner;
   buildId?: string;
+  /** Verified mission evidence is retained across full GitHub graph rebuilds. */
+  source?: "github" | "mission";
+  missionId?: string;
 }
 export interface LearningPipelineResult {
   detected: number;
@@ -62,6 +65,13 @@ export async function runLearningPipeline(
     detected.map((demo) => demo.id),
   );
   const candidates = detected.filter((demo) => !existing.has(demo.id));
+  if (input.source === "mission" && input.missionId && existing.size) {
+    await markDemonstrationsAsMissionEvidence(
+      graph,
+      [...existing],
+      input.missionId,
+    );
+  }
   if (!candidates.length) {
     return {
       detected: detected.length,
@@ -85,7 +95,10 @@ export async function runLearningPipeline(
     assessments,
   );
   if (validation.valid.length) {
-    await upsertDemonstrations(graph, developerId, validation.valid, buildId);
+    await upsertDemonstrations(graph, developerId, validation.valid, buildId, {
+      source: input.source,
+      missionId: input.missionId,
+    });
   }
 
   // Aggregates are rebuilt from graph evidence, so repeated syncs don't inflate counts.

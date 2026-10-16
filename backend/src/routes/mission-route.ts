@@ -350,7 +350,7 @@ export function missionRoutes(deps: MissionDeps): Router {
 
   router.get(
     "/:id/evaluate/:runId",
-    guard("evaluate-poll", async (req, res, developerId) => {
+    guard("evaluate-poll", async (req, res, developerId, rid) => {
       const run = getRun(
         developerId,
         String(req.params.id),
@@ -359,6 +359,15 @@ export function missionRoutes(deps: MissionDeps): Router {
       if (!run) {
         res.status(404).json({ error: "run not found" });
         return;
+      }
+      if (run.learning) {
+        log(rid, "evaluation graph learning", {
+          status: run.learning.evidenceStatus,
+          accepted: run.learning.learning?.accepted ?? 0,
+          experiencesUpdated: run.learning.learning?.experiencesUpdated ?? 0,
+          capabilityRollupsUpdated:
+            run.learning.learning?.capabilityRollupsUpdated ?? 0,
+        });
       }
       res.json({ run });
     }),
