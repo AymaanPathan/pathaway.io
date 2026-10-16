@@ -838,6 +838,16 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
           plan,
           tarball: snap.tarball,
           testContent: testCode,
+          missionText: [
+            spec.objective,
+            ...spec.steps,
+            ...spec.criteria.map(
+              (criterion) => `${criterion.description} ${criterion.how}`,
+            ),
+            spec.scope.startPath,
+            ...spec.scope.modifyPaths,
+            ...spec.scope.createPaths,
+          ].join("\n"),
           env: resolved.env,
           onStep: step,
           // the developer writes no tests: run only the mission test file

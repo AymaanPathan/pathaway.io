@@ -21,7 +21,7 @@ import {
 export const RUNNER_SUPPORTS_BROWSER = false;
 
 /** Bump when the generator or reviewer prompts change: stored test files are then rewritten. */
-export const TEST_GEN_VERSION = "2";
+export const TEST_GEN_VERSION = "5";
 
 export interface Availability {
   ok: boolean;
@@ -357,19 +357,22 @@ Rules:
 6. No real network, no real credentials, no child_process, no process.exit, no fs writes. Use vi.useFakeTimers() for TTL/time behaviour when needed. NEVER call vi.runAllTimers() or vi.runAllTimersAsync() before asserting an intermediate-time condition. Advance only the intended interval with await vi.advanceTimersByTimeAsync(ms), then assert. Restore real timers in afterEach.
 7. In "module" mode: the file lives at <packageRoot>/__mission__/mission.test.ts. Import the developer's code with a relative path such as "../src/foo" (no extension). Use vi.resetModules() and dynamic import() inside tests when mocks must be registered before the module loads. Packages listed in DATA.mocks must be mocked, never called for real. Set no env yourself; the harness provides placeholder env values.
 8. In "http" mode: the server is already running (with DATA.services provisioned). Call it with fetch using process.env.MISSION_BASE_URL (never a hard-coded host). Do not import the developer's code. Every criterion is checked through HTTP.
-9. Keep it simple: 2 or 3 small tests per criterion, each fast, independent and deterministic. Give every it() an explicit timeout as its last argument, e.g. it("...", async () => { ... }, 8000). Mock only what is needed.
-10. Do NOT read or import any test file of the developer.
+9. ROUTE DISCOVERY: DATA.routes is a deterministic index extracted from the repository's imports, router mounts and route declarations. Prefer a route whose method, path, handler and behaviour match the criterion. A mounted route's public path is the concatenation of all mount prefixes and its local route path. Do not call a router's local path as if it were a public path when a mount prefix is shown. If a matching route is listed, use that exact method and path; do not guess a path from the criterion alone. If no route matches because the mission asks for a new endpoint, use the route path explicitly stated by the mission or the implementation's declared contract and say so in a scenario comment.
+10. AUTHENTICATION: the isolated HTTP evaluation runtime bypasses common, identifiable auth-guard middleware when the mission is NOT about authentication/authorization. Do not add login flows, hunt for test users, invent credentials, or add auth setup just to reach an unrelated feature. Do not test auth behavior for an unrelated mission. If the mission itself concerns authentication, authorization, sessions, JWTs, or permissions, the runtime leaves middleware untouched and tests the real auth behavior.
+11. If a criterion requires importing project source in an HTTP-mode test (for example, checking middleware configuration directly), use paths relative to a test file located at <project-root>/__mission__/mission.test.ts. For a backend project, imports such as ../src/middleware/rateLimiter are valid from that location. Never assume the test file is inside the separate mission-runner directory.
+11. Keep it simple: 2 or 3 small tests per criterion, each fast, independent and deterministic. Give every it() an explicit timeout as its last argument, e.g. it("...", async () => { ... }, 8000). Mock only what is needed.
+12. Do NOT read or import any test file of the developer.
 
 SCENARIO DESIGN (the usual reason a correct solution fails a bad test):
-11. Above every it() write two comment lines: "// SCENARIO: <the states the test creates, in order>" and "// REACHABLE: <why the code can really reach those states with the values you chose>". Trace the pushed code to make sure the REACHABLE line is true before you write the test.
-12. Choose parameter values that make the behaviour under test possible. Read how the code uses every constructor and function parameter. Never pass 0, negative, empty or "irrelevant" values for anything that controls time, expiry, capacity, limits, ordering, retries or counts, unless the criterion is about that very value. (An object built with a time-to-live of 0 has entries that are already expired, so it can never produce a hit and can never test one.) Use realistic non-zero values, and cross a time boundary on purpose with fake timers.
-13. When a criterion is about a special state (in flight, expired, locked, retrying, concurrent, full), the test must first drive the code into that state through public calls, then check the behaviour. Work out from the code which exact call sequence produces that state. If a state can only be reached one way, use that way.
-14. Pending promises: create controllable promises with a helper defined inside the test file:
+13. Above every it() write two comment lines: "// SCENARIO: <the states the test creates, in order>" and "// REACHABLE: <why the code can really reach those states with the values you chose>". Trace the pushed code to make sure the REACHABLE line is true before you write the test.
+14. Choose parameter values that make the behaviour under test possible. Read how the code uses every constructor and function parameter. Never pass 0, negative, empty or "irrelevant" values for anything that controls time, expiry, capacity, limits, ordering, retries or counts, unless the criterion is about that very value. (An object built with a time-to-live of 0 has entries that are already expired, so it can never produce a hit and can never test one.) Use realistic non-zero values, and cross a time boundary on purpose with fake timers.
+15. When a criterion is about a special state (in flight, expired, locked, retrying, concurrent, full), the test must first drive the code into that state through public calls, then check the behaviour. Work out from the code which exact call sequence produces that state. If a state can only be reached one way, use that way.
+16. Pending promises: create controllable promises with a helper defined inside the test file:
    function deferred<T>() { let resolve!: (v: T) => void; let reject!: (e: unknown) => void; const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; }); return { promise, resolve, reject }; }
    Start the call under test WITHOUT awaiting it, perform the other steps, call resolve(...), and only then await the call. Never await a promise that only your own later lines can settle. Never attach properties to a promise and never read .resolve from one.
-15. Assert observable behaviour first (return values, call counts, thrown errors). Only when a criterion is literally about an internal structure may you read it with (instance as any).<name>, and only names that appear verbatim in the pushed code.
-16. Every test must be able to FAIL: assert something a naive or missing implementation would get wrong. Before the decisive assertion, assert the precondition as a control (for example that a value really was cached before the pressure that should evict it), so the test cannot pass by coincidence.
-17. With spies, assert exact call counts. When a count spans several phases, assert deltas or reset the spy, and re-derive the expected number from the exact sequence you wrote, one call at a time.
+17. Assert observable behaviour first (return values, call counts, thrown errors). Only when a criterion is literally about an internal structure may you read it with (instance as any).<name>, and only names that appear verbatim in the pushed code.
+18. Every test must be able to FAIL: assert something a naive or missing implementation would get wrong. Before the decisive assertion, assert the precondition as a control (for example that a value really was cached before the pressure that should evict it), so the test cannot pass by coincidence.
+19. With spies, assert exact call counts. When a count spans several phases, assert deltas or reset the spy, and re-derive the expected number from the exact sequence you wrote, one call at a time.
 
 Reply with ONLY the TypeScript file in a single \`\`\`ts code block. No explanation.`;
 
@@ -386,8 +389,313 @@ function systemPrompt(testPlan: MissionTestPlan): string {
   return `${BASE_RULES}\n\nSTRATEGY RULES:\n${guides}`;
 }
 
+/**
+ * Build a conservative route index from repository source. It follows relative
+ * imports and simple Express-style app.use(prefix, router) mounts, including
+ * nested mounts. This is prompt evidence, not a claim that every JS syntax is
+ * statically understood; unresolved mounts are explicitly marked.
+ */
+export interface DiscoveredHttpRoute {
+  method: string;
+  path: string;
+  localPath: string;
+  file: string;
+  mountChain: string[];
+  authClues: string[];
+  evidence: string;
+}
+
+function normaliseSourcePath(value: string): string {
+  const parts: string[] = [];
+  for (const part of value.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return parts.join("/");
+}
+
+function resolveRelativeSource(
+  from: string,
+  specifier: string,
+  files: Map<string, string>,
+): string | null {
+  if (!specifier.startsWith(".")) return null;
+  const base = normaliseSourcePath(
+    `${from.slice(0, Math.max(0, from.lastIndexOf("/")) + 1)}${specifier}`,
+  );
+  const candidates = [base];
+  // TS projects commonly write runtime imports ending in .js while the checked-in
+  // source is .ts; resolve those pairs as NodeNext/ESM projects do.
+  const sourceBase = base.replace(/\.(?:mjs|cjs|js|jsx)$/i, "");
+  if (sourceBase !== base) candidates.push(sourceBase);
+  for (const root of [base, sourceBase]) {
+    candidates.push(
+      ...[".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"].map(
+        (ext) => `${root}${ext}`,
+      ),
+    );
+    candidates.push(
+      ...["index.ts", "index.tsx", "index.js", "index.jsx"].map(
+        (name) => `${root}/${name}`,
+      ),
+    );
+  }
+  return candidates.find((candidate) => files.has(candidate)) ?? null;
+}
+
+function importedBindings(
+  file: string,
+  source: string,
+  files: Map<string, string>,
+): Map<string, string> {
+  const bindings = new Map<string, string>();
+  const add = (name: string, specifier: string) => {
+    const target = resolveRelativeSource(file, specifier, files);
+    if (target) bindings.set(name, target);
+  };
+  for (const match of source.matchAll(
+    /import\s+([\s\S]*?)\s+from\s*["']([^"']+)["']/g,
+  )) {
+    const clause = match[1].trim();
+    if (!clause.startsWith("{")) {
+      const name = clause.split(/[\s,]/)[0];
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) add(name, match[2]);
+    }
+    const named = /\{([^}]+)\}/.exec(clause)?.[1];
+    if (named)
+      for (const item of named.split(",")) {
+        const bits = item.trim().split(/\s+as\s+/);
+        const local = (bits[1] ?? bits[0]).trim();
+        if (/^[A-Za-z_$][\w$]*$/.test(local)) add(local, match[2]);
+      }
+  }
+  for (const match of source.matchAll(
+    /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*["']([^"']+)["']\s*\)/g,
+  ))
+    add(match[1], match[2]);
+  return bindings;
+}
+
+export function discoverHttpRoutes(
+  repository: Map<string, string>,
+): DiscoveredHttpRoute[] {
+  const files = new Map(
+    [...repository.entries()].map(([p, c]) => [normaliseSourcePath(p), c]),
+  );
+  const bindingsByFile = new Map<string, Map<string, string>>();
+  for (const [file, source] of files)
+    bindingsByFile.set(file, importedBindings(file, source, files));
+
+  type Mount = {
+    parent: string;
+    target: string;
+    prefix: string;
+    evidence: string;
+  };
+  const mounts: Mount[] = [];
+  for (const [file, source] of files) {
+    const bindings = bindingsByFile.get(file)!;
+    for (const match of source.matchAll(
+      /\b([A-Za-z_$][\w$]*)\.use\(\s*["']([^"']*)["']\s*,\s*(?:[A-Za-z_$][\w$]*\s*,\s*)*([A-Za-z_$][\w$]*)\s*\)/g,
+    )) {
+      const target = bindings.get(match[3]);
+      if (target)
+        mounts.push({
+          parent: file,
+          target,
+          prefix: match[2],
+          evidence: match[0].slice(0, 240),
+        });
+    }
+  }
+
+  const inheritedAuthFor = (
+    target: string,
+    seen = new Set<string>(),
+  ): string[] => {
+    if (seen.has(target) || seen.size > 8) return [];
+    const nextSeen = new Set(seen);
+    nextSeen.add(target);
+    const found = new Set<string>();
+    for (const mount of mounts.filter((item) => item.target === target)) {
+      for (const clue of mount.evidence.match(
+        /requireAuth|authenticate|isAuthenticated|authMiddleware|verifyToken|passport\.authenticate|authorize|session|jwt|protect/gi,
+      ) ?? [])
+        found.add(clue.toLowerCase());
+      for (const clue of inheritedAuthFor(mount.parent, nextSeen))
+        found.add(clue);
+    }
+    return [...found].slice(0, 6);
+  };
+
+  const routes: DiscoveredHttpRoute[] = [];
+  for (const [file, source] of files) {
+    // Route declarations on router/app-like objects; ignore common non-route objects.
+    for (const match of source.matchAll(
+      /\b([A-Za-z_$][\w$]*)\.(get|post|put|patch|delete|options|head|all)\(\s*["']([^"']*)["']/g,
+    )) {
+      const routeObject = match[1];
+      const routerLike =
+        /^(app|router|api|server|routes?)$/i.test(routeObject) ||
+        new RegExp(
+          `(?:const|let|var)\\s+${escapeRe(routeObject)}\\s*=\\s*(?:express\\.)?Router\\s*\\(`,
+        ).test(source);
+      if (!routerLike) continue;
+      const method = match[2].toUpperCase();
+      const localPath = match[3];
+      if (!localPath.startsWith("/") && localPath !== "*") continue;
+      const lineStart = source.lastIndexOf("\n", match.index ?? 0) + 1;
+      const lineEndRaw = source.indexOf("\n", match.index ?? 0);
+      const declaration = source
+        .slice(
+          lineStart,
+          lineEndRaw < 0
+            ? Math.min(source.length, (match.index ?? 0) + 500)
+            : lineEndRaw,
+        )
+        .trim();
+      const nearby = source.slice(
+        Math.max(0, (match.index ?? 0) - 240),
+        Math.min(source.length, (match.index ?? 0) + 900),
+      );
+      const authClues = [
+        ...new Set([
+          ...inheritedAuthFor(file),
+          ...(
+            nearby.match(
+              /requireAuth|authenticate|isAuthenticated|authMiddleware|verifyToken|passport\.authenticate|authorize|session|jwt|protect/gi,
+            ) ?? []
+          ).map((x) => x.toLowerCase()),
+        ]),
+      ].slice(0, 6);
+      const chains: string[][] = [];
+      const walk = (target: string, prefix: string[], seen: Set<string>) => {
+        if (seen.has(target) || seen.size > 8) {
+          chains.push(prefix);
+          return;
+        }
+        const nextSeen = new Set(seen);
+        nextSeen.add(target);
+        const parents = mounts.filter((m) => m.target === target);
+        if (!parents.length) {
+          chains.push(prefix);
+          return;
+        }
+        for (const mount of parents)
+          walk(mount.parent, [mount.prefix, ...prefix], nextSeen);
+      };
+      walk(file, [], new Set());
+      const uniqueChains = chains.length ? chains : [[]];
+      for (const chain of uniqueChains.slice(0, 3)) {
+        const prefixes = chain.filter(Boolean);
+        const fullPath = `/${[...prefixes, localPath]
+          .map((p) => p.replace(/^\/+|\/+$/g, ""))
+          .filter(Boolean)
+          .join("/")}`.replace(/\/{2,}/g, "/");
+        routes.push({
+          method,
+          path: fullPath,
+          localPath,
+          file,
+          mountChain: prefixes,
+          authClues,
+          evidence: declaration.slice(0, 260),
+        });
+      }
+    }
+  }
+  // Express's router.route("/x").get/post(...) form is common too.
+  for (const [file, source] of files) {
+    for (const match of source.matchAll(
+      /\.route\(\s*["']([^"']+)["']\s*\)([\s\S]{0,260}?)(?=;|\n\s*\w+\.|$)/g,
+    )) {
+      const routePrefix = source.slice(
+        Math.max(0, (match.index ?? 0) - 80),
+        match.index ?? 0,
+      );
+      const routeObject = /([A-Za-z_$][\w$]*)\s*$/.exec(routePrefix)?.[1] ?? "";
+      const routerLike =
+        /^(app|router|api|server|routes?)$/i.test(routeObject) ||
+        new RegExp(
+          `(?:const|let|var)\\s+${escapeRe(routeObject)}\\s*=\\s*(?:express\\.)?Router\\s*\\(`,
+        ).test(source);
+      if (!routerLike) continue;
+      const localPath = match[1];
+      const chainText = match[2];
+      const methods = [
+        ...chainText.matchAll(
+          /\.(get|post|put|patch|delete|options|head|all)\s*\(/g,
+        ),
+      ].map((m) => m[1].toUpperCase());
+      if (!localPath.startsWith("/")) continue;
+      for (const method of methods) {
+        const chains: string[][] = [];
+        const walk = (target: string, prefix: string[], seen: Set<string>) => {
+          if (seen.has(target) || seen.size > 8) {
+            chains.push(prefix);
+            return;
+          }
+          const nextSeen = new Set(seen);
+          nextSeen.add(target);
+          const parents = mounts.filter((m) => m.target === target);
+          if (!parents.length) {
+            chains.push(prefix);
+            return;
+          }
+          for (const mount of parents)
+            walk(mount.parent, [mount.prefix, ...prefix], nextSeen);
+        };
+        walk(file, [], new Set());
+        for (const chain of (chains.length ? chains : [[]]).slice(0, 3)) {
+          const prefixes = chain.filter(Boolean);
+          const path = `/${[...prefixes, localPath]
+            .map((p) => p.replace(/^\/+|\/+$/g, ""))
+            .filter(Boolean)
+            .join("/")}`.replace(/\/{2,}/g, "/");
+          const nearby = source.slice(
+            match.index ?? 0,
+            Math.min(source.length, (match.index ?? 0) + 900),
+          );
+          const authClues = [
+            ...new Set([
+              ...inheritedAuthFor(file),
+              ...(
+                nearby.match(
+                  /requireAuth|authenticate|isAuthenticated|authMiddleware|verifyToken|passport\.authenticate|authorize|session|jwt|protect/gi,
+                ) ?? []
+              ).map((x) => x.toLowerCase()),
+            ]),
+          ].slice(0, 6);
+          routes.push({
+            method,
+            path,
+            localPath,
+            file,
+            mountChain: prefixes,
+            authClues,
+            evidence: match[0].slice(0, 260),
+          });
+        }
+      }
+    }
+  }
+
+  const unique = new Map<string, DiscoveredHttpRoute>();
+  for (const route of routes)
+    unique.set(`${route.method} ${route.path} ${route.file}`, route);
+  return [...unique.values()]
+    .sort(
+      (a, b) =>
+        a.path.localeCompare(b.path) || a.method.localeCompare(b.method),
+    )
+    .slice(0, 60);
+}
+
 function renderGenerateUser(input: GenerateInput): string {
   const { spec, plan, testPlan, profile, mocks, code, changed } = input;
+  const routeSource = input.repoFiles ?? code;
+  const routes = plan.mode === "http" ? discoverHttpRoutes(routeSource) : [];
   const sources = [...code.entries()].filter(([p]) => !TEST_FILE.test(p));
   const files = sources
     .slice(0, 8)
@@ -422,6 +730,7 @@ function renderGenerateUser(input: GenerateInput): string {
         ? mocks.filter((m) => m.kind === "module-mock").map((m) => m.name)
         : [],
     services: plan.mode === "http" ? plan.serviceSetup.map((s) => s.name) : [],
+    routes,
   };
   return `DATA:\n${JSON.stringify(data)}\n\nPUSHED CODE\n${files || "(no source files found)"}`;
 }
@@ -490,7 +799,7 @@ export function validateTestCode(
 
 const REVIEW_SYSTEM = `You review ONE vitest file that was written to grade a developer's coding mission. A bad test is costly: it fails a correct solution (the developer can then never finish) or it passes a wrong one. You run nothing; you trace by reading.
 
-You get the acceptance criteria, the pushed code and the test file. The pushed code may be incomplete or wrong: use it only to learn real signatures and the existing behaviour of code the mission does not change (for example how a TTL, size or limit parameter is used). Judge each test against the CRITERION, never against whether the pushed code happens to pass.
+You get the acceptance criteria, pushed code, a DATA.routes index and the test file. The pushed code may be incomplete or wrong: use it only to learn real signatures and the existing behaviour of code the mission does not change (for example how a TTL, size or limit parameter is used). Judge each test against the CRITERION, never against whether the pushed code happens to pass. For HTTP tests, compare method/path with DATA.routes and account for every router mount prefix. If the mission is unrelated to auth, do not add login/session setup: the isolated sandbox runtime bypasses common identifiable auth guards. If the mission tests auth/authorization, keep the real middleware and exercise it.
 
 For EVERY it(), trace it line by line and decide:
 A. REACHABLE: can the states the test sets up really occur? Check each parameter value against how the code uses it (a TTL of 0 makes entries expire at birth; capacity values change what gets evicted; fake timers must be advanced to cross an expiry). An assertion that depends on a state the setup cannot produce is defective.
@@ -509,6 +818,8 @@ export interface ReviewResult {
 
 function renderReviewUser(input: GenerateInput, testCode: string): string {
   const { spec, plan, testPlan, code } = input;
+  const routes =
+    plan.mode === "http" ? discoverHttpRoutes(input.repoFiles ?? code) : [];
   const sources = [...code.entries()].filter(([p]) => !TEST_FILE.test(p));
   const files = sources
     .slice(0, 8)
@@ -523,6 +834,7 @@ function renderReviewUser(input: GenerateInput, testCode: string): string {
       .map((c) => ({ id: c.id, description: c.description, how: c.how })),
     contract: spec.contract ?? null,
     scope: spec.scope,
+    routes,
   };
   return `DATA:\n${JSON.stringify(data)}\n\nPUSHED CODE\n${files || "(no source files found)"}\n\nTEST FILE\n\`\`\`ts\n${clip(testCode, 16000)}\n\`\`\``;
 }

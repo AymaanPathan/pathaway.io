@@ -168,7 +168,26 @@ export function missionRoutes(deps: MissionDeps): Router {
         return;
       }
 
-      const result = await createMission(deps, { developerId, goalId });
+      // Private repos (and repos the server token can't see) return 404 for
+      // anonymous / server-token requests. Read the repository with the
+      // developer's own GitHub token so their repos are visible.
+      const userToken = await getGithubToken(developerId);
+      let createDeps: MissionDeps = deps;
+
+      if (userToken) {
+        createDeps = {
+          ...deps,
+          inspector: githubInspector({ token: userToken }),
+        };
+        log(rid, "create using developer GitHub token");
+      } else {
+        log(
+          rid,
+          "create: no developer GitHub token, falling back to server inspector (private repos will 404)",
+        );
+      }
+
+      const result = await createMission(createDeps, { developerId, goalId });
 
       log(rid, `create result status=${result.status}`, {
         reason: result.reason,

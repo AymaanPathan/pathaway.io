@@ -26,6 +26,76 @@ const BOOT_TRIES_FRONTEND = 180;
 
 // Sandboxes report the HOST cpu count while the container has a small memory
 // limit. This preload makes Node see a single CPU so build workers are not OOM-killed.
+const AUTH_BYPASS_PATH = "/tmp/pathway-mission-auth-bypass.cjs";
+
+/**
+ * Test-only preload used only for HTTP missions unrelated to auth. It replaces
+ * identifiable auth guards with a tiny identity middleware while leaving rate
+ * limiters, validation, business logic and all other middleware intact.
+ */
+const AUTH_BYPASS_JS = String.raw`const Module = require("node:module");
+const originalLoad = Module._load;
+const patched = new WeakSet();
+const authName = /auth|authenticate|authori[sz]|verify.?token|jwt|passport|require.?login|is.?logged.?in|protect.?route|permission.?check|ensure.?auth/i;
+const authBody = /authorization|bearer\s|jwt\s*\.\s*verify|req\s*\.\s*(?:user|auth)|isAuthenticated|unauthorized|not authenticated|invalid token/i;
+function isAuthGuard(fn) {
+  if (typeof fn !== "function") return false;
+  const name = fn.name || "";
+  if (authName.test(name)) return true;
+  if (/^(?:anonymous|middleware|bound )/i.test(name)) {
+    try { return authBody.test(Function.prototype.toString.call(fn).slice(0, 1800)); } catch {}
+  }
+  return false;
+}
+function bypass(req, res, next) {
+  if (req) {
+    if (!req.user) req.user = { id: "pathway-test-user", userId: "pathway-test-user", role: "admin" };
+    if (!req.auth) req.auth = { userId: "pathway-test-user", role: "admin" };
+    if (typeof req.isAuthenticated !== "function") req.isAuthenticated = () => true;
+  }
+  return next();
+}
+function replace(value) {
+  if (Array.isArray(value)) return value.map(replace);
+  return isAuthGuard(value) ? bypass : value;
+}
+function patchContainer(container) {
+  if (!container || (typeof container !== "object" && typeof container !== "function") || patched.has(container)) return container;
+  patched.add(container);
+  for (const method of ["use", "get", "post", "put", "patch", "delete", "options", "head", "all"]) {
+    if (typeof container[method] !== "function") continue;
+    const original = container[method];
+    try {
+      container[method] = function (...args) {
+        const mapped = args.map(replace);
+        return original.apply(this, mapped);
+      };
+    } catch {}
+  }
+  if (typeof container.route === "function") {
+    const originalRoute = container.route;
+    try {
+      container.route = function (...args) { return patchContainer(originalRoute.apply(this, args)); };
+    } catch {}
+  }
+  return container;
+}
+function wrapExpress(express) {
+  if (typeof express !== "function" || express.__pathwayAuthBypassWrapped) return express;
+  function wrappedExpress(...args) { return patchContainer(express(...args)); }
+  Object.setPrototypeOf(wrappedExpress, express);
+  Object.assign(wrappedExpress, express);
+  wrappedExpress.Router = function (...args) { return patchContainer(express.Router(...args)); };
+  wrappedExpress.__pathwayAuthBypassWrapped = true;
+  return wrappedExpress;
+}
+Module._load = function (request, parent, isMain) {
+  const loaded = originalLoad.call(this, request, parent, isMain);
+  if (request === "express") return wrapExpress(loaded);
+  return loaded;
+};
+`;
+
 const LIMIT_CPUS_JS = `const os = require("os");
 const real = os.cpus;
 os.cpus = () => real.call(os).slice(0, 1);
@@ -59,9 +129,11 @@ const NPM_ENV: Record<string, string> = {
 const RUNNER_INSTALL =
   "npm install --no-audit --no-fund --no-progress vitest@2";
 
-// http mode: the test lives in its own folder and talks to the booted server.
+// HTTP tests live under projectDir/__mission__ so source imports such as
+// ../src/middleware/foo resolve relative to the repository, not mission-runner.
+// Vitest itself remains installed in the separate runner folder.
 const HTTP_RUNNER_CONFIG = `import { defineConfig } from "vitest/config";
-export default defineConfig({ test: { include: ["mission.test.ts"], testTimeout: 20000, hookTimeout: 20000, environment: "node" } });
+export default defineConfig({ test: { include: ["__mission__/mission.test.ts"], testTimeout: 20000, hookTimeout: 20000, environment: "node" } });
 `;
 // module mode: the test lives inside the project (__mission__/) so vi.mock()
 // resolves the project's own node_modules.
@@ -1426,11 +1498,13 @@ export async function runInSandbox(opts: {
   plan: ExecutionPlan;
   tarball: Buffer;
   testContent: string;
+  /** Mission wording is used to avoid bypassing middleware when auth itself is under test. */
+  missionText?: string;
   /** resolved env (user-provided + generated). Values are redacted from the log. */
   env: Record<string, string>;
   onStep: StepReporter;
 }): Promise<SandboxResult> {
-  const { plan, tarball, testContent, env, onStep } = opts;
+  const { plan, tarball, testContent, env, onStep, missionText = "" } = opts;
   if (!process.env.DAYTONA_API_KEY)
     throw new MissionError(
       "The test sandbox is not configured on the server (DAYTONA_API_KEY is missing).",
@@ -1588,9 +1662,18 @@ export async function runInSandbox(opts: {
         Buffer.from(HTTP_RUNNER_CONFIG, "utf8"),
         `${runnerDir}/vitest.config.mts`,
       );
+      // Keep the runner dependency-isolated, but place the test beside the
+      // repository so relative imports like ../src/middleware/rateLimiter
+      // resolve against the actual project instead of /home/daytona/src.
+      await step(
+        sandbox,
+        `mkdir -p ${shq(`${projectDir}/__mission__`)}`,
+        home,
+        10,
+      );
       await sandbox.fs.uploadFile(
         Buffer.from(testContent, "utf8"),
-        `${runnerDir}/mission.test.ts`,
+        `${projectDir}/__mission__/mission.test.ts`,
       );
       const runner = await step(
         sandbox,
@@ -1785,6 +1868,22 @@ export async function runInSandbox(opts: {
       Buffer.from(LIMIT_CPUS_JS, "utf8"),
       LIMIT_CPUS_PATH,
     );
+    const authIsMission =
+      /\b(auth|authenticat(?:e|ion)|authori[sz](?:e|ation)|oauth|\bjwt\b|\b(?:bearer|access|refresh)\s+token\b|\bpermission(?:s)?\b|\baccess control\b|\bsession(?:s)?\b|\blogin\b|\blogout\b|\bcredential(?:s)?\b|\bidentity\b)/i.test(
+        missionText,
+      );
+    const bypassUnrelatedAuth = plan.track === "backend" && !authIsMission;
+    if (bypassUnrelatedAuth) {
+      await sandbox.fs.uploadFile(
+        Buffer.from(AUTH_BYPASS_JS, "utf8"),
+        AUTH_BYPASS_PATH,
+      );
+      dlog(
+        "test-only auth bypass enabled for unrelated HTTP mission; identifiable auth guards only",
+      );
+    } else if (authIsMission) {
+      dlog("auth-related mission detected; auth middleware bypass is disabled");
+    }
 
     onStep(
       "server",
@@ -1812,11 +1911,27 @@ export async function runInSandbox(opts: {
         plan.startCommand,
       );
       dlog(`boot attempt ${attempt + 1}/${MAX_HEAL + 1}`);
+      // The application is started only inside this disposable sandbox. For
+      // unrelated missions, a preload bypasses identifiable auth guards only;
+      // auth-related missions keep the original middleware untouched. Preserve
+      // an explicit NODE_ENV supplied by the project/environment.
+      const existingNodeOptions = bootEnv.NODE_OPTIONS?.trim();
+      const serverEnv = {
+        ...bootEnv,
+        NODE_ENV:
+          bootEnv.NODE_ENV ??
+          (plan.track === "frontend" ? "production" : "test"),
+        ...(bypassUnrelatedAuth
+          ? {
+              NODE_OPTIONS: `${existingNodeOptions ? `${existingNodeOptions} ` : ""}--require=${AUTH_BYPASS_PATH}`,
+            }
+          : {}),
+      };
       srv = await startServer(
         sandbox,
         plan.startCommand,
         projectDir,
-        bootEnv,
+        serverEnv,
         dlog,
         bootTries,
       );
@@ -1877,16 +1992,25 @@ export async function runInSandbox(opts: {
       ...env,
       MISSION_BASE_URL: `http://127.0.0.1:${srv.port}`,
     };
+    // Run with the repository as Vitest's root so the test's relative imports
+    // resolve from projectDir/__mission__. Keep the Vitest installation and
+    // JSON result file in mission-runner, outside the developer's repository.
+    const resultsPath = `${runnerDir}/${plan.resultsFile}`;
+    const commandWithResults = plan.testCommand.replace(
+      /--outputFile\.json=(?:"[^"]*"|'[^']*'|\S+)/,
+      `--outputFile.json=${shq(resultsPath)}`,
+    );
+    const httpTestCommand = `${commandWithResults} --root ${shq(projectDir)} --config ${shq(`${runnerDir}/vitest.config.mts`)}`;
     const test = await step(
       sandbox,
-      `${exportsOf(testEnv)}; ${plan.testCommand}`,
+      `${exportsOf(testEnv)}; ${httpTestCommand}`,
       runnerDir,
       TEST_TIMEOUT_S,
     );
     dlog(
       `tests exit=${test.exitCode} timedOut=${test.timedOut} in ${secs(test.ms)}s`,
     );
-    log += block("run tests", plan.testCommand, test.out);
+    log += block("run tests", httpTestCommand, test.out);
     log += block(
       "server output after tests",
       "tail /tmp/server.log",
@@ -1905,7 +2029,7 @@ export async function runInSandbox(opts: {
       infra: false,
       installExit: install.exitCode,
       testExit: test.exitCode,
-      resultsRaw: await readResults(`${runnerDir}/${plan.resultsFile}`),
+      resultsRaw: await readResults(resultsPath),
       devTests: dev,
     });
   } finally {

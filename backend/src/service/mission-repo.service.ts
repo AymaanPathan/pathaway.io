@@ -85,8 +85,20 @@ export function githubInspector(
 
   async function getJson<T>(path: string): Promise<T> {
     const res = await get(path);
-    if (res.status < 200 || res.status >= 300)
-      throw new Error(`GitHub ${res.status} for ${path}`);
+    if (res.status < 200 || res.status >= 300) {
+      // GitHub answers 404 (not 401/403) for private repos the token can't see
+      const hint =
+        res.status === 404
+          ? token
+            ? " (repository not found, or this token has no access to it: private repo needs the `repo` scope)"
+            : " (no GitHub token was used: private repositories return 404 without one)"
+          : res.status === 401
+            ? " (GitHub token is invalid or expired: reconnect GitHub)"
+            : res.status === 403
+              ? " (forbidden or rate limited)"
+              : "";
+      throw new Error(`GitHub ${res.status} for ${path}${hint}`);
+    }
     return JSON.parse(res.text) as T;
   }
 
