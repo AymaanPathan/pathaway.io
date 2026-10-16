@@ -1,5 +1,5 @@
-import type { LlmClient } from "../agents/goal-agent.js";
-import type { MissionSpec } from "../graph/mission-graph.js";
+import { extractJson, type LlmClient } from "../agents/goal-agent.js";
+import type { MissionSpec, Row } from "../graph/mission-graph.js";
 import type {
   ChangedFile,
   ExecutionPlan,
@@ -15,9 +15,13 @@ import {
   ask,
   clip,
   escapeRe,
+  txt,
 } from "./utils.js";
 
 export const RUNNER_SUPPORTS_BROWSER = false;
+
+/** Bump when the generator or reviewer prompts change: stored test files are then rewritten. */
+export const TEST_GEN_VERSION = "2";
 
 export interface Availability {
   ok: boolean;
@@ -180,6 +184,147 @@ export function runStaticChecks(
 }
 
 /* ------------------------------------------------------------------ */
+/* what the developer's files really export                            */
+/* ------------------------------------------------------------------ */
+
+/** Names a source file exports. Guides the LLM and catches invented imports. */
+export function exportsOf(src: string): string[] {
+  const out = new Set<string>();
+  for (const m of src.matchAll(
+    /export\s+(?:declare\s+)?(?:async\s+)?(?:function\*?|class|const|let|var|enum|interface|type)\s+([A-Za-z_$][\w$]*)/g,
+  ))
+    out.add(m[1]);
+  for (const m of src.matchAll(/export\s*(?:type\s*)?\{([^}]*)\}/g))
+    for (const part of m[1].split(",")) {
+      const n = part
+        .trim()
+        .replace(/^type\s+/, "")
+        .split(/\s+as\s+/)
+        .pop()
+        ?.trim();
+      if (n) out.add(n);
+    }
+  if (/export\s+default\b/.test(src)) out.add("default");
+  return [...out];
+}
+
+function joinPath(base: string, rel: string): string {
+  const parts = base.split("/").filter(Boolean);
+  for (const seg of rel.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(seg);
+  }
+  return parts.join("/");
+}
+
+const stem = (p: string): string => p.replace(/\.(tsx?|jsx?|mjs|cjs)$/, "");
+
+const testDir = (root: string): string =>
+  root ? `${root}/__mission__` : "__mission__";
+
+/** Resolves an import written in <root>/__mission__/mission.test.ts to a repo file. */
+function resolveRel(
+  specifier: string,
+  root: string,
+  repo: Map<string, string>,
+): string | null {
+  const target = joinPath(testDir(root), specifier);
+  const base = stem(target);
+  const exts = [
+    "",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    "/index.ts",
+    "/index.tsx",
+    "/index.js",
+  ];
+  for (const t of [target, base])
+    for (const x of exts) if (repo.has(`${t}${x}`)) return `${t}${x}`;
+  return null;
+}
+
+/**
+ * Problems with the relative imports of a module-mode test: files that do not
+ * exist, or names the file does not export. These are "soft": a file or export
+ * the mission asks the developer to create may legitimately be missing, so
+ * they only trigger a rewrite, they never stop the run on the last attempt.
+ */
+export function importProblems(
+  code: string,
+  plan: ExecutionPlan,
+  spec: MissionSpec,
+  repo: Map<string, string>,
+): string[] {
+  if (plan.mode !== "module" || !repo.size) return [];
+  const root = plan.root;
+  const scopeStems = new Set(
+    [
+      spec.scope.startPath,
+      ...spec.scope.modifyPaths,
+      ...spec.scope.createPaths,
+    ].map(stem),
+  );
+  const out: string[] = [];
+
+  const paths = new Set<string>();
+  for (const m of code.matchAll(
+    /(?:from\s*|import\(\s*|vi\.(?:mock|doMock)\(\s*)["'](\.{1,2}\/[^"']+)["']/g,
+  ))
+    paths.add(m[1]);
+
+  for (const sp of paths) {
+    if (/\.(json|css|svg|png|jpg|html)$/.test(sp)) continue;
+    if (resolveRel(sp, root, repo)) continue;
+    const t = stem(joinPath(testDir(root), sp));
+    // a file the mission tells the developer to create: its absence is the developer's gap
+    if (scopeStems.has(t) || scopeStems.has(`${t}/index`)) continue;
+    out.push(
+      `the test imports "${sp}" but no such file exists in the repository; use only real paths from DATA.exports`,
+    );
+  }
+
+  const named = [
+    /import\s+(?:type\s+)?(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*["'](\.{1,2}\/[^"']+)["']/g,
+    /\{([^}]*)\}\s*=\s*await\s+import\(\s*["'](\.{1,2}\/[^"']+)["']\s*\)/g,
+  ];
+  for (const re of named)
+    for (const m of code.matchAll(re)) {
+      const file = resolveRel(m[2], root, repo);
+      if (!file) continue;
+      const src = repo.get(file) ?? "";
+      if (!src || /export\s*\*/.test(src)) continue;
+      const have = new Set(exportsOf(src));
+      const want = m[1]
+        .split(",")
+        .map((n) =>
+          n
+            .trim()
+            .replace(/^type\s+/, "")
+            .split(/\s+as\s+|\s*:\s*/)[0]
+            .trim(),
+        )
+        .filter(Boolean);
+      const missing = want.filter((n) => !have.has(n));
+      if (missing.length)
+        out.push(
+          `"${m[2]}" does not export ${missing.join(", ")}; it exports: ${[...have].join(", ") || "nothing"}`,
+        );
+    }
+  return out.slice(0, 5);
+}
+
+/** true when at least one sandboxed criterion must prove a library is used */
+export const testPlanNeedsMechanism = (testPlan: MissionTestPlan): boolean =>
+  testPlan.criteria.some(
+    (c) => testPlan.sandboxCriteria.includes(c.id) && c.needsMechanism,
+  );
+
+/* ------------------------------------------------------------------ */
 /* sandbox strategies: LLM writes one vitest file                      */
 /* ------------------------------------------------------------------ */
 
@@ -191,22 +336,40 @@ export interface GenerateInput {
   mocks: MockPlan[];
   /** pushed code: path -> content (changed + scope files) */
   code: Map<string, string>;
+  /** every text file of the repository, used to verify the imports of the generated test */
+  repoFiles?: Map<string, string>;
   changed: ChangedFile[];
+  /** why the previous version of the test file could not run, so the rewrite fixes it */
+  feedback?: string;
   timeoutMs?: number;
 }
 
-const BASE_RULES = `You write ONE vitest test file that verifies a developer's mission, based ONLY on the mission's acceptance criteria and the developer's pushed code.
+const BASE_RULES = `You write ONE vitest test file for a developer's mission. The developer was shown ONLY the mission's objective, steps, contract and acceptance criteria. Your tests must check exactly that, so what the developer was told and what the tests check are the same thing.
+
+A wrong test is the worst outcome: it makes a correct solution fail, and the developer can then never finish the mission. A test that passes a wrong solution is nearly as bad. Take the time to trace every scenario through the code before you write it.
 
 Rules:
 1. Import { describe, it, expect, vi, beforeEach, afterEach } from "vitest". TypeScript.
-2. Create exactly one top-level describe per criterion listed in DATA.criteria, titled "AC1: <short behaviour>", "AC2: ...". Every test for that criterion lives inside it. The AC id MUST be the first token of the title. Do not write tests for criteria that are not listed.
-3. Follow the strategy given for each criterion (see STRATEGY RULES). Test the BEHAVIOUR in the criterion and PROVE THE MECHANISM: when the contract names a library or service, mock that library's client or inject a fake and assert the calls it received. A test that a plain in-memory Map would pass is invalid.
-4. Use only the exported functions, classes, routes and names that really exist in the pushed code you are given. Never invent an API. If the code exposes a factory or accepts an injected client, use that.
-5. No real network, no real credentials, no child_process, no process.exit, no fs writes. Use vi.useFakeTimers() for TTL/time behaviour when needed. For timing behaviour, NEVER call vi.runAllTimers() or vi.runAllTimersAsync() before asserting an intermediate-time condition: they drain future timers and destroy the timing window. Advance only the intended interval with await vi.advanceTimersByTimeAsync(ms), then assert. Flush immediate promise microtasks with await Promise.resolve() only when needed; do not drain future timers to make a promise settle.
-6. In "module" mode: the file lives at <packageRoot>/__mission__/mission.test.ts. Import the developer's code with a relative path such as "../src/foo" (no extension). Use vi.resetModules() and dynamic import() inside tests when mocks must be registered before the module loads. Packages listed in DATA.mocks must be mocked, never called for real. Set no env yourself; the harness provides placeholder env values.
-7. In "http" mode: the server is already running (with DATA.services provisioned). Call it with fetch using process.env.MISSION_BASE_URL (never a hard-coded host). Do not import the developer's code. Every criterion is checked through HTTP.
-8. Keep each test fast (< 5s), independent, and deterministic. At least 2 tests per criterion that has check "test" or "command", 1 or more for "review".
-9. Do NOT read or import the developer's own test file.
+2. Create exactly one top-level describe per criterion listed in DATA.criteria, titled "AC1: <the criterion's description, shortened>", "AC2: ...". The id MUST be the first token of the title and must be exactly the "id" given in DATA.criteria. Every test for that criterion lives inside it. Do not write tests for criteria that are not listed.
+3. Test EXACTLY what the criterion states and nothing more. Each criterion has a "how" field: it describes the scenario the developer was told will be checked, so build your test from it. Never assert behaviour that no criterion mentions. If the criterion does not fix a value (an error message, a field name, a log line, a key format), assert loosely (type, truthiness, toContain, a regex) and never an exact string you invented. A correct implementation that follows the criteria must pass. If the pushed code does not do what the criterion says, the test must FAIL: never bend an assertion to match what the code happens to do.
+4. Use only exports, routes and names that really exist in the pushed code (see DATA.exports and PUSHED CODE). Read the real signatures and call them exactly as defined. Never invent an API. If the code exposes a factory or accepts an injected client, use that. If the mission asks the developer to create something that does not exist yet, import it from the path in DATA.scope; the test will then fail, which is correct.
+5. PROVE THE MECHANISM: when the contract names a library or service, mock that library's client (vi.mock("<package>", ...)) or inject a fake, and assert the calls it received. A test a plain in-memory Map would pass is invalid.
+6. No real network, no real credentials, no child_process, no process.exit, no fs writes. Use vi.useFakeTimers() for TTL/time behaviour when needed. NEVER call vi.runAllTimers() or vi.runAllTimersAsync() before asserting an intermediate-time condition. Advance only the intended interval with await vi.advanceTimersByTimeAsync(ms), then assert. Restore real timers in afterEach.
+7. In "module" mode: the file lives at <packageRoot>/__mission__/mission.test.ts. Import the developer's code with a relative path such as "../src/foo" (no extension). Use vi.resetModules() and dynamic import() inside tests when mocks must be registered before the module loads. Packages listed in DATA.mocks must be mocked, never called for real. Set no env yourself; the harness provides placeholder env values.
+8. In "http" mode: the server is already running (with DATA.services provisioned). Call it with fetch using process.env.MISSION_BASE_URL (never a hard-coded host). Do not import the developer's code. Every criterion is checked through HTTP.
+9. Keep it simple: 2 or 3 small tests per criterion, each fast, independent and deterministic. Give every it() an explicit timeout as its last argument, e.g. it("...", async () => { ... }, 8000). Mock only what is needed.
+10. Do NOT read or import any test file of the developer.
+
+SCENARIO DESIGN (the usual reason a correct solution fails a bad test):
+11. Above every it() write two comment lines: "// SCENARIO: <the states the test creates, in order>" and "// REACHABLE: <why the code can really reach those states with the values you chose>". Trace the pushed code to make sure the REACHABLE line is true before you write the test.
+12. Choose parameter values that make the behaviour under test possible. Read how the code uses every constructor and function parameter. Never pass 0, negative, empty or "irrelevant" values for anything that controls time, expiry, capacity, limits, ordering, retries or counts, unless the criterion is about that very value. (An object built with a time-to-live of 0 has entries that are already expired, so it can never produce a hit and can never test one.) Use realistic non-zero values, and cross a time boundary on purpose with fake timers.
+13. When a criterion is about a special state (in flight, expired, locked, retrying, concurrent, full), the test must first drive the code into that state through public calls, then check the behaviour. Work out from the code which exact call sequence produces that state. If a state can only be reached one way, use that way.
+14. Pending promises: create controllable promises with a helper defined inside the test file:
+   function deferred<T>() { let resolve!: (v: T) => void; let reject!: (e: unknown) => void; const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; }); return { promise, resolve, reject }; }
+   Start the call under test WITHOUT awaiting it, perform the other steps, call resolve(...), and only then await the call. Never await a promise that only your own later lines can settle. Never attach properties to a promise and never read .resolve from one.
+15. Assert observable behaviour first (return values, call counts, thrown errors). Only when a criterion is literally about an internal structure may you read it with (instance as any).<name>, and only names that appear verbatim in the pushed code.
+16. Every test must be able to FAIL: assert something a naive or missing implementation would get wrong. Before the decisive assertion, assert the precondition as a control (for example that a value really was cached before the pressure that should evict it), so the test cannot pass by coincidence.
+17. With spies, assert exact call counts. When a count spans several phases, assert deltas or reset the spy, and re-derive the expected number from the exact sequence you wrote, one call at a time.
 
 Reply with ONLY the TypeScript file in a single \`\`\`ts code block. No explanation.`;
 
@@ -225,11 +388,16 @@ function systemPrompt(testPlan: MissionTestPlan): string {
 
 function renderGenerateUser(input: GenerateInput): string {
   const { spec, plan, testPlan, profile, mocks, code, changed } = input;
-  const files = [...code.entries()]
-    .filter(([p]) => !TEST_FILE.test(p))
-    .slice(0, 6)
-    .map(([p, c]) => `FILE ${p}\n\`\`\`\n${clip(c, 7000)}\n\`\`\``)
+  const sources = [...code.entries()].filter(([p]) => !TEST_FILE.test(p));
+  const files = sources
+    .slice(0, 8)
+    .map(([p, c]) => `FILE ${p}\n\`\`\`\n${clip(c, 12000)}\n\`\`\``)
     .join("\n\n");
+  const exportsIndex: Record<string, string[]> = {};
+  for (const [p, c] of sources) {
+    const names = exportsOf(c);
+    if (names.length) exportsIndex[p] = names;
+  }
   const ids = new Set(testPlan.sandboxCriteria);
   const data = {
     mode: plan.mode,
@@ -237,6 +405,7 @@ function renderGenerateUser(input: GenerateInput): string {
     framework: profile.framework,
     packageRoot: plan.root || "(repository root)",
     objective: spec.objective,
+    steps: spec.steps,
     criteria: spec.criteria
       .filter((c) => ids.has(c.id))
       .map((c) => ({
@@ -246,6 +415,7 @@ function renderGenerateUser(input: GenerateInput): string {
       })),
     contract: spec.contract ?? null,
     scope: spec.scope,
+    exports: exportsIndex,
     changedFiles: changed.map((c) => `${c.status} ${c.path}`),
     mocks:
       plan.mode === "module"
@@ -261,6 +431,7 @@ export function extractTestCode(raw: string): string {
   return (m ? m[1] : raw).trim();
 }
 
+/** Hard rules: a test file that breaks one of them is never run. */
 export function validateTestCode(
   code: string,
   spec: MissionSpec,
@@ -274,7 +445,7 @@ export function validateTestCode(
   if (!/from\s+["']vitest["']/.test(code))
     errors.push('must import from "vitest"');
   for (const id of sandboxIds)
-    if (!new RegExp(`describe\\(\\s*["'\`]${id}\\b`).test(code))
+    if (!new RegExp(`describe\\(\\s*["'\`]${escapeRe(id)}\\b`).test(code))
       errors.push(`missing describe("${id}: ...")`);
   if (/child_process|process\.exit|execSync|spawnSync|writeFileSync/.test(code))
     errors.push("forbidden API (child_process / process.exit / fs writes)");
@@ -282,17 +453,26 @@ export function validateTestCode(
     errors.push("external network call");
   if (plan.mode === "http" && !code.includes("MISSION_BASE_URL"))
     errors.push("http mode tests must use process.env.MISSION_BASE_URL");
-  // A common false-negative source: runAllTimersAsync drains the entire fake
-  // timer queue, so a test cannot then assert that something is still pending
-  // at an intermediate timestamp.
   if (
     /vi\.useFakeTimers\s*\(/.test(code) &&
     /vi\.runAllTimers(?:Async)?\s*\(/.test(code)
-  ) {
+  )
     errors.push(
       "timing tests must not drain all fake timers before intermediate-time assertions; use await vi.advanceTimersByTimeAsync(ms) for each intended interval",
     );
-  }
+  if (/\b(?:it|test|describe)\.(?:only|skip|todo)\s*\(/.test(code))
+    errors.push("it.only / it.skip / it.todo are not allowed");
+  if (/\bas\s+any\s*\)?\s*\.\s*resolve\b/.test(code))
+    errors.push(
+      "never attach or read .resolve on a promise; create controllable promises with a deferred() helper and await the call only after resolving",
+    );
+  if (/expect\(\s*true\s*\)\s*\.toBe\(\s*true\s*\)/.test(code))
+    errors.push("trivial assertion expect(true).toBe(true)");
+  const itCount = (code.match(/\b(?:it|test)\s*\(/g) ?? []).length;
+  const expectCount = (code.match(/\bexpect(?:\.\w+)?\s*\(/g) ?? []).length;
+  if (itCount === 0) errors.push("the file contains no tests");
+  else if (expectCount < itCount)
+    errors.push("some tests have no assertion: every it() needs an expect()");
   const lib = spec.contract?.library;
   if (lib && plan.mode === "module" && needsMechanism) {
     const token = lib.toLowerCase().replace(/^@[^/]+\//, "");
@@ -304,7 +484,90 @@ export function validateTestCode(
   return errors;
 }
 
-/** Writes the vitest file for every sandbox criterion of the plan. Returns code null after 3 rejected attempts. */
+/* ------------------------------------------------------------------ */
+/* reviewer: reads the finished test file before it is ever run        */
+/* ------------------------------------------------------------------ */
+
+const REVIEW_SYSTEM = `You review ONE vitest file that was written to grade a developer's coding mission. A bad test is costly: it fails a correct solution (the developer can then never finish) or it passes a wrong one. You run nothing; you trace by reading.
+
+You get the acceptance criteria, the pushed code and the test file. The pushed code may be incomplete or wrong: use it only to learn real signatures and the existing behaviour of code the mission does not change (for example how a TTL, size or limit parameter is used). Judge each test against the CRITERION, never against whether the pushed code happens to pass.
+
+For EVERY it(), trace it line by line and decide:
+A. REACHABLE: can the states the test sets up really occur? Check each parameter value against how the code uses it (a TTL of 0 makes entries expire at birth; capacity values change what gets evicted; fake timers must be advanced to cross an expiry). An assertion that depends on a state the setup cannot produce is defective.
+B. TERMINATES: does any await wait for a promise that only later lines of the same test can settle? Does the test rely on properties attached to a promise? Defective.
+C. FAITHFUL: does it assert only what the criterion states? Would a correct implementation of the criterion pass it? Invented exact strings, extra behaviours, spy counts that are wrong when you recount them call by call, or wrong ordering expectations are defective.
+D. DISCRIMINATING: would it also pass for an implementation that ignores the criterion, or for the code before the change? Then it is defective.
+E. COMPLETE: do the tests under a describe exercise the behaviour the criterion actually states? If the decisive behaviour is never exercised, report it once for that describe with test "(describe)".
+
+Be precise and conservative. Report a test as defective only when you can name the line and the reason. Never report style issues.
+
+Reply with JSON only: {"tests":[{"ac":"AC1","test":"<it title>","defective":false,"problem":""}]}. For a defective test, "problem" is one or two sentences: what is wrong and how to fix it.`;
+
+export interface ReviewResult {
+  defects: string[];
+}
+
+function renderReviewUser(input: GenerateInput, testCode: string): string {
+  const { spec, plan, testPlan, code } = input;
+  const sources = [...code.entries()].filter(([p]) => !TEST_FILE.test(p));
+  const files = sources
+    .slice(0, 8)
+    .map(([p, c]) => `FILE ${p}\n\`\`\`\n${clip(c, 12000)}\n\`\`\``)
+    .join("\n\n");
+  const ids = new Set(testPlan.sandboxCriteria);
+  const data = {
+    mode: plan.mode,
+    objective: spec.objective,
+    criteria: spec.criteria
+      .filter((c) => ids.has(c.id))
+      .map((c) => ({ id: c.id, description: c.description, how: c.how })),
+    contract: spec.contract ?? null,
+    scope: spec.scope,
+  };
+  return `DATA:\n${JSON.stringify(data)}\n\nPUSHED CODE\n${files || "(no source files found)"}\n\nTEST FILE\n\`\`\`ts\n${clip(testCode, 16000)}\n\`\`\``;
+}
+
+/**
+ * Second pair of eyes on a freshly written test file. Never blocks on its own
+ * failure: when the reviewer is unavailable the file is accepted and the
+ * post-run audit still protects the developer.
+ */
+export async function reviewMissionTest(
+  llm: LlmClient,
+  input: GenerateInput,
+  testCode: string,
+  timeoutMs: number,
+): Promise<ReviewResult> {
+  try {
+    const raw = await ask(
+      llm,
+      REVIEW_SYSTEM,
+      renderReviewUser(input, testCode),
+      1800,
+      true,
+      timeoutMs,
+    );
+    const root = (extractJson(raw) ?? {}) as Row;
+    const tests = Array.isArray(root.tests) ? (root.tests as Row[]) : [];
+    const defects = tests
+      .filter((t) => t && t.defective === true && txt(t.problem))
+      .map(
+        (t) =>
+          `${txt(t.ac) || "?"} "${clip(txt(t.test), 90)}": ${clip(txt(t.problem), 320)}`,
+      );
+    return { defects: defects.slice(0, 6) };
+  } catch {
+    return { defects: [] };
+  }
+}
+
+/**
+ * Writes the vitest file for every sandbox criterion of the plan.
+ * Returns code null after 3 attempts that broke a hard rule. Import problems
+ * and reviewer findings trigger a rewrite on the first two attempts only: on
+ * the last one the file is accepted (a missing export is then most likely the
+ * developer's gap, and the post-run audit still guards against a faulty test).
+ */
 export async function generateMissionTest(
   llm: LlmClient,
   input: GenerateInput,
@@ -312,34 +575,51 @@ export async function generateMissionTest(
   const timeoutMs =
     input.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
   const system = systemPrompt(input.testPlan);
-  const user = renderGenerateUser(input);
-  const needsMechanism = input.testPlan.criteria.some(
-    (c) => input.testPlan.sandboxCriteria.includes(c.id) && c.needsMechanism,
-  );
+  const baseUser = renderGenerateUser(input);
+  const user = input.feedback
+    ? `${baseUser}\n\nA previous version of this test file was found defective:\n${input.feedback}\nWrite a corrected file. Re-trace every scenario through the code and fix each point.`
+    : baseUser;
+  const needsMechanism = testPlanNeedsMechanism(input.testPlan);
+  const repo = input.repoFiles ?? input.code;
   let errors: string[] = [];
-  let previous = "";
   for (let attempt = 0; attempt < 3; attempt++) {
+    const last = attempt === 2;
     const prompt =
       attempt === 0
         ? user
-        : `${user}\n\nYour previous file was rejected:\n${errors.map((e) => `- ${e}`).join("\n")}\n\nReturn the corrected full file only.`;
+        : `${user}\n\nYour previous file was rejected:\n${errors.map((e) => `- ${e}`).join("\n")}\n\nRe-trace the affected scenarios and return the corrected full file only.`;
+    let raw: string;
     try {
-      previous = await ask(llm, system, prompt, 6000, false, timeoutMs);
+      raw = await ask(llm, system, prompt, 8000, false, timeoutMs);
     } catch (e) {
       errors = [
         `LLM call failed: ${e instanceof Error ? e.message : String(e)}`,
       ];
       break;
     }
-    const code = extractTestCode(previous);
-    errors = validateTestCode(
+    const code = extractTestCode(raw);
+    const hard = validateTestCode(
       code,
       input.spec,
       input.plan,
       input.testPlan.sandboxCriteria,
       needsMechanism,
     );
-    if (errors.length === 0) return { code, attempts: attempt + 1, errors: [] };
+    if (hard.length) {
+      errors = hard;
+      continue;
+    }
+    const soft = importProblems(code, input.plan, input.spec, repo);
+    if (soft.length && !last) {
+      errors = soft;
+      continue;
+    }
+    const review = await reviewMissionTest(llm, input, code, timeoutMs);
+    if (review.defects.length && !last) {
+      errors = review.defects.map((d) => `reviewer: ${d}`);
+      continue;
+    }
+    return { code, attempts: attempt + 1, errors: [] };
   }
   return { code: null, attempts: 3, errors };
 }

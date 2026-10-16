@@ -15,14 +15,32 @@ import type {
   SandboxFacts,
   TestCase,
 } from "./types.js";
-import { TEST_FILE, ask, clip, norm, txt } from "./utils.js";
+import { TEST_FILE, ask, clip, escapeRe, txt } from "./utils.js";
 
-export function parseVitestResults(raw: string | null): {
+/**
+ * Reads the vitest JSON report. `ids` are the criterion ids the test file was
+ * asked to use as describe titles; a test belongs to the id its title starts with.
+ */
+export function parseVitestResults(
+  raw: string | null,
+  ids: string[] = [],
+): {
   cases: TestCase[];
   parsed: boolean;
   suiteError: string;
 } {
   if (!raw) return { cases: [], parsed: false, suiteError: "" };
+
+  const idOf = (name: string): string | null => {
+    for (const id of ids)
+      if (new RegExp(`^\\s*${escapeRe(id)}(?![\\w])`, "i").test(name))
+        return id;
+    for (const id of ids)
+      if (new RegExp(`(^|[^\\w])${escapeRe(id)}(?![\\w])`, "i").test(name))
+        return id;
+    return /\b(AC\d+)\b/i.exec(name)?.[1]?.toUpperCase() ?? null;
+  };
+
   try {
     const j = JSON.parse(raw);
     const cases: TestCase[] = [];
@@ -33,7 +51,6 @@ export function parseVitestResults(raw: string | null): {
         suiteError = clip(String(file.message ?? ""), 1500);
       for (const a of assertions) {
         const name = String(a.fullName ?? a.title ?? "");
-        const id = /\b(AC\d+)\b/i.exec(name)?.[1]?.toUpperCase() ?? null;
         const status =
           a.status === "passed"
             ? "passed"
@@ -41,7 +58,7 @@ export function parseVitestResults(raw: string | null): {
               ? "failed"
               : "skipped";
         cases.push({
-          id,
+          id: idOf(name),
           name: clip(name, 200),
           status,
           message: clip(String((a.failureMessages ?? []).join("\n")), 700),
@@ -55,7 +72,7 @@ export function parseVitestResults(raw: string | null): {
 }
 
 /* ------------------------------------------------------------------ */
-/* judge (LLM: evidence + explanation only)                            */
+/* judge: only suggests a fix for criteria that FAILED                 */
 /* ------------------------------------------------------------------ */
 
 export interface JudgeInput {
@@ -71,43 +88,25 @@ export interface JudgeInput {
 
 export interface JudgedCriterion {
   id: string;
-  mechanismPresent: boolean;
-  quote: string;
-  reasoning: string;
   fix: string;
 }
 
 export interface Judged {
-  summary: string;
   criteria: JudgedCriterion[];
-  issues: EvalIssue[];
-  nextSteps: string[];
 }
 
-const JUDGE_SYSTEM = `You are the evaluator of a developer mission. Tests were already executed and their results are given. You do NOT decide pass/fail; code does. Your job is to find evidence and explain.
+const JUDGE_SYSTEM = `You help a developer fix a mission. The platform already ran its own tests and decided pass or fail. You do NOT decide anything and you do NOT restate results.
 
-You describe the CURRENT STATE of the developer's code against the acceptance criteria. DATA.commit says what the push changed. Never imply that the push broke something unless a test result says so; you have no earlier results to compare with. If DATA.commit.relevant is false, say there is no relevant implementation change yet.
+For every acceptance criterion whose tests FAILED, give ONE concrete instruction for what to change in the developer's code (file and behaviour), based on the failing test name and its error message and on the code you are given. Stay strictly inside the acceptance criteria: never ask for anything the criteria do not state. Never mention writing tests or a test script; the platform owns the tests. Skip criteria that passed.
 
-IMPORTANT: The platform generates and runs its own private mission tests. The developer is NOT required to add test files or a package.json test script. Never report missing developer tests, recommend adding tests, or treat the absence of a test script as a problem. Only discuss actual mission-test failures or implementation problems.
-
-For each acceptance criterion:
-- mechanismPresent: does the developer's diff/code really implement the mechanism the criterion and contract require (the named library or service actually used, not a stub, local Map or hard-coded value)?
-- quote: ONE verbatim fragment (12-200 chars) copied from the DIFF or CODE you were given that shows it. Empty string if there is none. Never invent a quote.
-- reasoning: 1-3 sentences, concrete, referencing failing test names and error messages when tests failed.
-- fix: when the criterion is not satisfied, ONE concrete instruction for what to change (file + behaviour). Empty when it is fine.
-
-Also return: summary (2-4 sentences, plain language to the developer, about the current state), issues (up to 6, each {title, detail, file?}, most important first, only real problems: failing tests, missing pieces, sandbox problems that are the developer's fault), nextSteps (up to 5 imperative steps, empty when everything passed).
-If the sandbox failed to install or boot, explain the most likely cause from the log tail and say whether it looks like the developer's project or the environment. A criterion with status "blocked" could not be checked: do not call it a failure of the developer's code.
-
-Reply with JSON only:
-{"summary":"","criteria":[{"id":"AC1","mechanismPresent":true,"quote":"","reasoning":"","fix":""}],"issues":[{"title":"","detail":"","file":""}],"nextSteps":[""]}`;
+Reply with JSON only: {"criteria":[{"id":"AC1","fix":""}]}`;
 
 function renderJudgeUser(input: JudgeInput): string {
-  const { spec, testPlan, changed, code, tests, staticTests, facts } = input;
-  let budget = 22_000;
+  const { spec, changed, tests, staticTests, facts } = input;
+  let budget = 18_000;
   const diff = changed
     .map((c) => {
-      const body = clip(c.patch || "(no textual patch)", 3500);
+      const body = clip(c.patch || "(no textual patch)", 3000);
       budget -= body.length;
       return budget > 0 ? `DIFF ${c.status} ${c.path}\n${body}` : "";
     })
@@ -116,36 +115,11 @@ function renderJudgeUser(input: JudgeInput): string {
   const data = {
     objective: spec.objective,
     criteria: spec.criteria,
-    strategies: testPlan.criteria.map((c) => ({
-      id: c.id,
-      strategy: c.strategy,
-      available: c.available,
-      unavailableReason: c.unavailableReason,
-    })),
-    commit: testPlan.commit,
     contract: spec.contract ?? null,
-    outOfScope: spec.scope.outOfScope,
-    missionTests: [...staticTests, ...tests].map((t) => ({
-      ac: t.id,
-      test: t.name,
-      status: t.status,
-      error: t.message,
-    })),
-    missionTestRan: facts.missionTestRan,
+    failingTests: [...staticTests, ...tests]
+      .filter((t) => t.status === "failed")
+      .map((t) => ({ ac: t.id, test: t.name, error: clip(t.message, 500) })),
     suiteError: facts.suiteError,
-    sandboxFailedAt: facts.failedAt ?? null,
-    sandboxLooksLikeEnvironment: facts.infra,
-    timedOut: facts.timedOut,
-    developerTests: {
-      ran: facts.devTests.ran,
-      exit: facts.devTests.exit,
-      outputTail: clip(
-        facts.devTests.out.split("\n").slice(-25).join("\n"),
-        1800,
-      ),
-    },
-    logTail: facts.failedAt ? clip(facts.logTail, 2500) : "",
-    filesWithCode: [...code.keys()].slice(0, 12),
   };
   return `DATA:\n${JSON.stringify(data)}\n\n${diff}`;
 }
@@ -161,41 +135,165 @@ export async function judgeMission(
       llm,
       JUDGE_SYSTEM,
       renderJudgeUser(input),
-      2600,
+      1200,
       true,
       timeoutMs,
     );
     const root = (extractJson(raw) ?? {}) as Row;
-    const criteria = (Array.isArray(root.criteria) ? root.criteria : []).map(
-      (c: Row) => ({
+    const criteria = (Array.isArray(root.criteria) ? root.criteria : [])
+      .map((c: Row) => ({
         id: txt(c.id).toUpperCase(),
-        mechanismPresent: c.mechanismPresent === true,
-        quote: txt(c.quote),
-        reasoning: clip(txt(c.reasoning), 500),
         fix: clip(txt(c.fix), 300),
-      }),
-    );
-    const issues = (Array.isArray(root.issues) ? root.issues : [])
-      .slice(0, 6)
-      .map((i: Row) => ({
-        title: clip(txt(i.title), 120),
-        detail: clip(txt(i.detail), 400),
-        ...(txt(i.file) ? { file: txt(i.file) } : {}),
       }))
-      .filter((i: EvalIssue) => i.title);
-    const nextSteps = (Array.isArray(root.nextSteps) ? root.nextSteps : [])
-      .slice(0, 5)
-      .map((s: unknown) => clip(txt(s), 200))
-      .filter(Boolean);
-    return {
-      summary: clip(txt(root.summary), 700),
-      criteria,
-      issues,
-      nextSteps,
-    };
+      .filter((c: JudgedCriterion) => c.id && c.fix);
+    return { criteria };
   } catch {
     return null;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* audit: is a failing test fair to the developer?                     */
+/* ------------------------------------------------------------------ */
+
+export interface AuditInput {
+  spec: MissionSpec;
+  testPlan: MissionTestPlan;
+  /** the mission test file that was run */
+  testCode: string;
+  code: Map<string, string>;
+  changed: ChangedFile[];
+  /** the failed cases, in the order they are numbered for the auditor */
+  failures: TestCase[];
+  timeoutMs?: number;
+}
+
+export interface AuditedFailure {
+  /** index into AuditInput.failures */
+  n: number;
+  verdict: "code_wrong" | "test_wrong";
+  reason: string;
+  fix: string;
+}
+
+const AUDIT_SYSTEM = `A platform ran machine-written tests against a developer's pushed code and some tests FAILED. Machine-written tests are sometimes wrong, and a wrong test must never be blamed on the developer. For every failing test decide who is at fault by tracing the test line by line through the pushed code. Never decide from the error message alone.
+
+Answer "test_wrong" when ANY of these holds:
+- the test sets up a state the code cannot reach (for example entries that expire at birth because a TTL is 0, a capacity that makes the scenario impossible, a missing fake-timer advance, a precondition the earlier lines never create);
+- the test waits for something its own later lines would settle (a timeout or deadlock), or reads a property that does not exist on the object it was attached to;
+- it asserts something the criterion does not state (an invented string, an extra behaviour), or a spy count that is wrong when you recount it call by call;
+- its decisive assertion contradicts the plain meaning of the criterion.
+
+Answer "code_wrong" ONLY when the scenario is a fair, reachable test of the criterion AND you can name the specific behaviour in the pushed code that contradicts the criterion. Quote the offending line or function in "reason". If the code is missing the behaviour altogether, that is code_wrong.
+
+A "Test timed out" error is either a deadlocked test or code that never settles: trace which one.
+
+Reply with JSON only: {"failures":[{"n":0,"verdict":"test_wrong","reason":"one or two sentences","fix":"for test_wrong: how the test must change; empty for code_wrong"}]}`;
+
+function renderAuditUser(input: AuditInput): string {
+  const { spec, testPlan, testCode, code, failures } = input;
+  const ids = new Set(testPlan.sandboxCriteria);
+  const files = [...code.entries()]
+    .filter(([p]) => !TEST_FILE.test(p))
+    .slice(0, 8)
+    .map(([p, c]) => `FILE ${p}\n\`\`\`\n${clip(c, 12000)}\n\`\`\``)
+    .join("\n\n");
+  const data = {
+    objective: spec.objective,
+    criteria: spec.criteria
+      .filter((c) => ids.has(c.id))
+      .map((c) => ({ id: c.id, description: c.description, how: c.how })),
+    contract: spec.contract ?? null,
+    failures: failures.map((t, n) => ({
+      n,
+      ac: t.id,
+      test: t.name,
+      error: clip(t.message, 600),
+    })),
+  };
+  return `DATA:\n${JSON.stringify(data)}\n\nPUSHED CODE\n${files || "(no source files found)"}\n\nTEST FILE\n\`\`\`ts\n${clip(testCode, 16000)}\n\`\`\``;
+}
+
+/**
+ * Returns one verdict per failing test, or null when the auditor is
+ * unavailable (the results are then left exactly as they are). A test the
+ * auditor does not mention, or calls test_wrong without a reason, stays the
+ * developer's: only a stated reason can excuse a failure.
+ */
+export async function auditFailures(
+  llm: LlmClient,
+  input: AuditInput,
+): Promise<AuditedFailure[] | null> {
+  if (!input.failures.length) return [];
+  const timeoutMs =
+    input.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
+  try {
+    const raw = await ask(
+      llm,
+      AUDIT_SYSTEM,
+      renderAuditUser(input),
+      1800,
+      true,
+      timeoutMs,
+    );
+    const root = (extractJson(raw) ?? {}) as Row;
+    const list = Array.isArray(root.failures) ? (root.failures as Row[]) : [];
+    return input.failures.map((_, n) => {
+      const hit = list.find((f) => Number(f?.n) === n);
+      const reason = clip(txt(hit?.reason), 400);
+      const fix = clip(txt(hit?.fix), 400);
+      const excused = txt(hit?.verdict) === "test_wrong" && reason !== "";
+      return {
+        n,
+        verdict: excused ? "test_wrong" : "code_wrong",
+        reason,
+        fix,
+      } as AuditedFailure;
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Criteria whose every failing test was judged unfair. One genuinely failing
+ * test keeps the criterion failed. Returns id -> why.
+ */
+export function disputedFrom(
+  failures: TestCase[],
+  audit: AuditedFailure[],
+): Record<string, string> {
+  const byId = new Map<string, AuditedFailure[]>();
+  failures.forEach((t, n) => {
+    if (!t.id) return;
+    const v = audit.find((a) => a.n === n) ?? {
+      n,
+      verdict: "code_wrong" as const,
+      reason: "",
+      fix: "",
+    };
+    byId.set(t.id, [...(byId.get(t.id) ?? []), v]);
+  });
+  const out: Record<string, string> = {};
+  for (const [id, vs] of byId)
+    if (vs.every((v) => v.verdict === "test_wrong"))
+      out[id] = clip(vs.map((v) => v.reason).join(" "), 500);
+  return out;
+}
+
+/** What the test writer is told when its file was judged unfair. */
+export function auditFeedback(
+  failures: TestCase[],
+  audit: AuditedFailure[],
+): string {
+  return audit
+    .filter((a) => a.verdict === "test_wrong")
+    .map((a) => {
+      const t = failures[a.n];
+      return `- ${t?.id ?? "?"} "${clip(t?.name ?? "", 90)}" failed with "${clip((t?.message ?? "").split("\n")[0], 160)}". Problem: ${a.reason}${a.fix ? ` Fix: ${a.fix}` : ""}`;
+    })
+    .join("\n")
+    .slice(0, 1600);
 }
 
 /* ------------------------------------------------------------------ */
@@ -226,7 +324,7 @@ export function scopeWarnings(
 }
 
 /* ------------------------------------------------------------------ */
-/* verdict (code decides)                                              */
+/* verdict (code decides, from the test results only)                  */
 /* ------------------------------------------------------------------ */
 
 export interface VerdictInput {
@@ -240,8 +338,11 @@ export interface VerdictInput {
   /** results of the in-process static checks */
   staticTests: TestCase[];
   facts: SandboxFacts;
+  /** optional fix suggestions; never changes a verdict */
   judged: Judged | null;
   headSha: string;
+  /** criteria whose failing tests were judged unfair (id -> why): reported as blocked, never as failed */
+  disputed?: Record<string, string>;
 }
 
 /** An empty facts object for runs that never started a sandbox. */
@@ -257,14 +358,31 @@ export const noSandboxFacts = (): SandboxFacts => ({
 });
 
 /**
- * Errors that mean the developer's own file is broken when the generated test loads it.
- * "Cannot find module" is deliberately not here: it can equally be a wrong import in the
- * generated test, so it is reported as blocked.
+ * Errors that mean the developer's own code is why the test file could not load:
+ * a missing export, a syntax error, or a relative import of a file the mission
+ * asked the developer to create (imports of files that exist are checked before
+ * the run). Anything else means the generated test file is at fault.
  */
 const DEV_LOAD_ERROR =
-  /(does not provide an export|SyntaxError|ReferenceError|Unexpected token|Transform failed)/i;
+  /(does not provide an export|SyntaxError|ReferenceError|Unexpected token|Transform failed|Failed to resolve import ["']\.{1,2}\/|Cannot find module ["']\.{1,2}\/)/i;
 const ENGINE_ERROR =
   /(vitest\.config|__mission__\/vitest|Cannot find package 'vitest')/i;
+
+export const isDevLoadFault = (message: string): boolean =>
+  DEV_LOAD_ERROR.test(message) && !ENGINE_ERROR.test(message);
+
+/** First line of the code that imports the contract library, or "" when none does. */
+function libraryImportLine(lib: string, code: Map<string, string>): string {
+  const re = new RegExp(
+    `(from\\s+|require\\(\\s*|import\\(\\s*)["']${escapeRe(lib)}(/[^"']*)?["']`,
+  );
+  for (const [path, body] of code) {
+    if (TEST_FILE.test(path)) continue;
+    const line = body.split("\n").find((l) => re.test(l));
+    if (line) return clip(line.trim(), 200);
+  }
+  return "";
+}
 
 interface Classified {
   status: CriterionStatus;
@@ -278,7 +396,6 @@ function classify(
   mechanismOk: boolean,
 ): Classified {
   const { testPlan, staticTests, tests, facts } = input;
-  const judgeAvailable = input.judged !== null;
   const lines: string[] = [];
   const done = (status: CriterionStatus, cause: OutcomeCause): Classified => ({
     status,
@@ -311,18 +428,6 @@ function classify(
     }
     if (mine.some((t) => t.status !== "passed"))
       return done("failed", "static_failed");
-    // with a contract library the import check above already proves the mechanism;
-    // a review criterion without one needs the judge's verified quote
-    if (cp.needsMechanism && !cp.library && !mechanismOk) {
-      if (!judgeAvailable) {
-        lines.push(
-          "The evaluator could not review the code this time. Run the evaluation again.",
-        );
-        return done("blocked", "judge_unavailable");
-      }
-      lines.push("The code does not show what this criterion requires.");
-      return done("failed", "mechanism_missing");
-    }
     return done("passed", "ok");
   }
 
@@ -344,13 +449,12 @@ function classify(
   }
   if (!facts.missionTestRan) {
     if (facts.suiteError) {
-      const devFault =
-        DEV_LOAD_ERROR.test(facts.suiteError) &&
-        !ENGINE_ERROR.test(facts.suiteError);
+      const devFault = isDevLoadFault(facts.suiteError);
+      const first = clip(facts.suiteError.split("\n")[0], 200);
       lines.push(
         devFault
-          ? `The mission tests could not load your code: ${clip(facts.suiteError.split("\n")[0], 200)}`
-          : `The mission test file could not run: ${clip(facts.suiteError.split("\n")[0], 200)}. This may be a mismatch between the generated test and your exports, or the environment.`,
+          ? `The mission tests could not load your code: ${first}`
+          : `The mission test file could not run: ${first}. This is a problem on the evaluator's side, not in your code. Run the evaluation again.`,
       );
       return done(
         devFault ? "failed" : "blocked",
@@ -372,6 +476,13 @@ function classify(
     );
     return done("blocked", "no_tests");
   }
+  const unfair = input.disputed?.[cp.id];
+  if (unfair && mine.some((t) => t.status === "failed")) {
+    lines.push(
+      `The evaluator's own test for this criterion was reviewed and judged faulty: ${clip(unfair, 300)} This is not caused by your code. Run the evaluation again; the test will be rewritten.`,
+    );
+    return done("blocked", "test_invalid");
+  }
   for (const t of mine)
     lines.push(
       t.status === "passed"
@@ -384,15 +495,9 @@ function classify(
     return done("failed", "tests_failed");
   if (!mine.some((t) => t.status === "passed"))
     return done("blocked", "no_tests");
-  if (cp.needsMechanism && !mechanismOk) {
-    if (!judgeAvailable) {
-      lines.push(
-        "The tests passed, but the evaluator could not verify the mechanism in your code this time. Run the evaluation again.",
-      );
-      return done("blocked", "judge_unavailable");
-    }
+  if (!mechanismOk) {
     lines.push(
-      `The code does not show the required mechanism${cp.library ? ` (${cp.library})` : ""}.`,
+      `The tests passed, but no source file imports the required library${cp.library ? ` (${cp.library})` : ""}.`,
     );
     return done("failed", "mechanism_missing");
   }
@@ -415,28 +520,23 @@ export function finalizeVerdict(input: VerdictInput): EvaluationOutcome {
   const commit: CommitReport = testPlan.commit;
   const projectTest: ProjectTestInfo = profile.projectTest;
 
-  const evidenceText = norm(
-    [...changed.map((c) => c.patch), ...[...code.values()]].join("\n"),
-  );
-
   /* ---- per criterion ---- */
   const results: CriterionOutcome[] = testPlan.criteria.map((cp) => {
-    const j = judged?.criteria.find((x) => x.id === cp.id);
-    const quote = j?.quote ?? "";
-    const quoteFound = quote.length >= 8 && evidenceText.includes(norm(quote));
-    const mechanismOk = Boolean(j?.mechanismPresent) && quoteFound;
+    const lib = cp.needsMechanism ? cp.library : null;
+    const importLine = lib ? libraryImportLine(lib, code) : "";
+    const mechanismOk = !lib || importLine !== "";
 
     const { status, cause, lines } = classify(cp, input, mechanismOk);
-    if (j?.reasoning && commit.relevant) lines.push(j.reasoning);
-    if (status !== "passed" && j?.fix && commit.relevant)
-      lines.push(`Fix: ${j.fix}`);
+    const fix = judged?.criteria.find((x) => x.id === cp.id)?.fix ?? "";
+    if (status === "failed" && fix && commit.relevant)
+      lines.push(`Fix: ${fix}`);
 
     const met = status === "passed";
     return {
       id: cp.id,
       met,
-      verified: met && (cp.needsMechanism ? quoteFound : true),
-      quote: quoteFound ? quote : "",
+      verified: met,
+      quote: importLine,
       reasoning: clip(lines.join("\n"), 900),
       status,
       strategy: cp.strategy,
@@ -444,19 +544,18 @@ export function finalizeVerdict(input: VerdictInput): EvaluationOutcome {
     };
   });
 
-  /* ---- gates ---- */
+  /* ---- gates (informational only, they never decide) ---- */
   const developerTestWritten = changed.some(
     (c) =>
       c.status !== "removed" &&
       (c.path === spec.verify.testFile || TEST_FILE.test(c.path)),
   );
-  // npm's placeholder script is not a test run: it is never counted, pass or fail
   const devRan =
     facts.devTests.ran &&
     (projectTest.status === "configured" || projectTest.source === "direct");
   const developerTestsPassed = devRan ? facts.devTests.exit === 0 : null;
 
-  /* ---- issues ---- */
+  /* ---- issues: built from the results, never from LLM opinion ---- */
   const issues: EvalIssue[] = [];
   if (!commit.relevant)
     issues.push({
@@ -490,18 +589,6 @@ export function finalizeVerdict(input: VerdictInput): EvaluationOutcome {
       title: `${r.id} could not be checked`,
       detail: clip(r.reasoning.split("\n").slice(0, 2).join(" "), 400),
     });
-  const evaluatorOwnedTestIssue =
-    /no test file was added|add (?:your )?tests|no working test script|no ["']?test["']? script/i;
-  for (const i of judged?.issues ?? [])
-    if (
-      !evaluatorOwnedTestIssue.test(i.title) &&
-      !evaluatorOwnedTestIssue.test(i.detail) &&
-      !issues.some((x) => x.title === i.title)
-    )
-      issues.push(i);
-  // A missing package.json test script is informational only. The platform
-  // generates and runs its own mission test file, so do not ask the developer
-  // to add a test script or report it as a mission failure.
 
   /* ---- verdict ---- */
   const count = (s: CriterionStatus) =>
@@ -510,10 +597,7 @@ export function finalizeVerdict(input: VerdictInput): EvaluationOutcome {
   const failedN = count("failed");
   const blockedN = count("blocked");
 
-  const allPassed = results.length > 0 && passedN === results.length;
-  // The platform owns mission tests. Developer-authored test files and a
-  // package.json test script are not requirements and must never gate completion.
-  const completed = allPassed;
+  const completed = results.length > 0 && passedN === results.length;
 
   const overall: EvaluationOutcome["overall"] = completed
     ? "passed"
@@ -535,40 +619,44 @@ export function finalizeVerdict(input: VerdictInput): EvaluationOutcome {
 
   const summary = clip(
     completed
-      ? judged?.summary ||
-          `All ${results.length} acceptance criteria passed and the mechanism is visible in your code.`
+      ? `All ${results.length} acceptance criteria passed.`
       : [
           commit.summary,
           repositoryState,
-          overall === "blocked"
-            ? "Some checks could not run because of the evaluation environment, not your code."
+          results.some(
+            (r) => r.status === "blocked" && r.cause !== "no_relevant_change",
+          )
+            ? "Some checks could not be completed because of the evaluation itself, not your code."
             : "",
-          commit.relevant ? judged?.summary : "",
         ]
           .filter(Boolean)
           .join(" "),
     1100,
   );
 
-  const derived: string[] = [];
-  if (!commit.relevant)
-    derived.push(
-      `Implement the mission in ${spec.scope.startPath}, commit and push to your branch.`,
-    );
-  for (const r of results.filter((x) => x.status === "failed"))
-    derived.push(
-      `Make ${r.id} pass: ${clip(r.reasoning.split("\n").pop() ?? "", 160)}`,
-    );
-  if (overall === "blocked")
-    derived.push(
-      "Run the evaluation again; the failure came from the environment.",
-    );
-  const nextSteps = completed
-    ? []
-    : (judged?.nextSteps.length && commit.relevant
-        ? judged.nextSteps.filter((step) => !evaluatorOwnedTestIssue.test(step))
-        : derived
-      ).slice(0, 5);
+  const nextSteps: string[] = [];
+  if (!completed) {
+    if (!commit.relevant)
+      nextSteps.push(
+        `Implement the mission in ${spec.scope.startPath}, commit and push to your branch.`,
+      );
+    for (const r of results.filter((x) => x.status === "failed")) {
+      const fix = judged?.criteria.find((x) => x.id === r.id)?.fix;
+      const firstFail =
+        r.reasoning.split("\n").find((l) => !l.startsWith("PASS")) ?? "";
+      nextSteps.push(
+        fix ? `${r.id}: ${fix}` : `Make ${r.id} pass: ${clip(firstFail, 160)}`,
+      );
+    }
+    if (results.some((r) => r.cause === "test_invalid"))
+      nextSteps.push(
+        "Run the evaluation again: the evaluator's own test was faulty and will be rewritten. Your code was not blamed.",
+      );
+    else if (overall === "blocked")
+      nextSteps.push(
+        "Run the evaluation again; the failure came from the environment.",
+      );
+  }
 
   return {
     verdict: completed ? "completed" : "needs_work",
@@ -583,7 +671,7 @@ export function finalizeVerdict(input: VerdictInput): EvaluationOutcome {
     commit,
     projectTest,
     issues: issues.slice(0, 8),
-    nextSteps,
+    nextSteps: nextSteps.slice(0, 5),
     summary,
     repositoryState,
   };

@@ -1,21 +1,28 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 
 import { getMission, type MissionDeps } from "../service/mission.service.js";
 import { runInSandbox } from "../service/daytona.service.js";
 import {
   MissionError,
+  TEST_GEN_VERSION,
   analyzeRepository,
+  auditFailures,
+  auditFeedback,
+  disputedFrom,
   buildEnvironment,
   buildExecutionPlan,
   finalizeVerdict,
   generateMissionTest,
+  isDevLoadFault,
   judgeMission,
   noSandboxFacts,
   parseVitestResults,
   planMissionTests,
   resolveEnv,
   runStaticChecks,
+  testPlanNeedsMechanism,
+  validateTestCode,
   type ChangedFile,
   type CommitReport,
   type EvalStepId,
@@ -25,6 +32,7 @@ import {
   type SandboxOutcome,
   type StepStatus,
   type StrategyId,
+  type TestCase,
 } from "./mission-evaluation-agent.js";
 import type { LlmClient } from "../agents/goal-agent.js";
 import type { MissionRepoPin, MissionSpec } from "../graph/mission-graph.js";
@@ -148,14 +156,29 @@ const ENV_WAIT_MS = 10 * 60 * 1000;
 const LOG_KEEP = 60_000;
 /** one retry when the sandbox fails for a reason that looks like our environment */
 const SANDBOX_ATTEMPTS = 2;
+/**
+ * The generated test file is rewritten (up to TEST_ROUNDS - 1 times) when it
+ * could not run at all, or when the audit judged a failing test unfair.
+ */
+const TEST_ROUNDS = 3;
 
 const runs = new Map<string, Run>();
+
+/**
+ * The mission test file is generated once per mission and reused for every push,
+ * so the developer is always judged by the same checks. It is only rewritten
+ * when the mission changed, when it could not run, or when asked to regenerate.
+ */
+const testCache = new Map<string, { sig: string; code: string; at: number }>();
+
 const sweep = setInterval(
   () => {
     const now = Date.now();
     for (const [id, r] of runs)
       if (now - r.createdMs > RUN_TTL_MS && r.status !== "running")
         runs.delete(id);
+    for (const [k, v] of testCache)
+      if (now - v.at > 24 * RUN_TTL_MS) testCache.delete(k);
   },
   10 * 60 * 1000,
 );
@@ -344,6 +367,8 @@ export async function startEvaluation(
     missionId: string;
     head: string;
     githubToken: string;
+    /** throw away the stored mission test file and write a new one */
+    regenerate?: boolean;
   },
 ): Promise<StartResult> {
   const { developerId, missionId, head, githubToken } = input;
@@ -422,6 +447,7 @@ export async function startEvaluation(
     spec: mission.spec as MissionSpec,
     pin: mission.pin as MissionRepoPin,
     baseCommit: String(mission.pin?.baseCommit ?? ""),
+    regenerate: input.regenerate === true,
   });
 
   return { status: "started", run: view(run) };
@@ -493,6 +519,7 @@ interface Ctx {
   spec: MissionSpec;
   pin: MissionRepoPin;
   baseCommit: string;
+  regenerate: boolean;
 }
 
 const TEST_FILE = /\.(test|spec)\.[tj]sx?$/;
@@ -711,62 +738,177 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
         .join(" · "),
     );
 
-    /* ---- 4. test strategy registry: generate ---- */
-    let testCode = "";
-    if (testPlan.sandboxCriteria.length) {
-      step(
-        "generate",
-        "running",
-        "Writing a vitest file from the mission's acceptance criteria.",
-      );
-      const gen = await generateMissionTest(llm, {
-        spec,
-        plan,
-        testPlan,
-        profile,
-        mocks: envPlan.mocks,
-        code,
-        changed: snap.changed,
-      });
-      if (!gen.code) {
-        step(
-          "generate",
-          "failed",
-          gen.errors.slice(0, 3).join(" · ") || "No valid test file.",
-        );
-        run.infra = true;
-        run.error =
-          "The evaluator could not produce a valid test file for this mission. This is not caused by your code. Try again.";
-        finish("error");
-        return;
-      }
-      testCode = gen.code;
-      run.testCode = gen.code;
-      const n = (gen.code.match(/\b(it|test)\s*\(/g) ?? []).length;
-      step(
-        "generate",
-        "done",
-        `${n} tests written${gen.attempts > 1 ? ` (after ${gen.attempts} attempts)` : ""}.`,
-      );
-    } else {
-      step("generate", "skipped", "No criterion needs generated tests.");
-    }
     const staticTests = runStaticChecks(spec, testPlan, code, snap.changed);
 
-    /* ---- 5. daytona runner ---- */
+    /* ---- 4 + 5. mission tests: write (or reuse) the file, run it in the sandbox ---- */
+    let testCode = "";
     let sb: SandboxOutcome | null = null;
-    if (testCode) {
-      sb = await runSandbox({
-        plan,
-        tarball: snap.tarball,
-        testContent: testCode,
-        env: resolved.env,
-        onStep: step,
-        // the developer writes no tests: run only the mission test file
-        skipDevTests: true,
-      } as RunInput);
-      run.infra = sb.infra && Boolean(sb.failedAt);
+    let parsed: { cases: TestCase[]; parsed: boolean; suiteError: string } = {
+      cases: [],
+      parsed: false,
+      suiteError: "",
+    };
+    let missionExit: number | null = null;
+    let suiteError = "";
+    /** criteria whose failing tests were judged unfair to the developer (id -> why) */
+    let disputed: Record<string, string> = {};
+
+    if (testPlan.sandboxCriteria.length) {
+      const ids = testPlan.sandboxCriteria;
+      const cacheKey = `${run.developerId}:${run.missionId}`;
+      const sig = createHash("sha1")
+        .update(
+          JSON.stringify([
+            spec.criteria,
+            spec.steps,
+            spec.contract ?? null,
+            plan.mode,
+            ids,
+            TEST_GEN_VERSION,
+          ]),
+        )
+        .digest("hex");
+      let feedback = "";
+
+      for (let round = 1; round <= TEST_ROUNDS; round++) {
+        // verdicts of an earlier round are void once the file was rewritten
+        disputed = {};
+        /* the test file */
+        const cached = testCache.get(cacheKey);
+        const reusable =
+          round === 1 &&
+          !ctx.regenerate &&
+          cached !== undefined &&
+          cached.sig === sig &&
+          validateTestCode(
+            cached.code,
+            spec,
+            plan,
+            ids,
+            testPlanNeedsMechanism(testPlan),
+          ).length === 0;
+
+        if (reusable && cached) {
+          testCode = cached.code;
+          step("generate", "done", "Using the same mission tests as before.");
+        } else {
+          step(
+            "generate",
+            "running",
+            feedback
+              ? "The previous test file could not run. Writing a corrected one."
+              : "Writing a vitest file from the mission's acceptance criteria.",
+          );
+          const gen = await generateMissionTest(llm, {
+            spec,
+            plan,
+            testPlan,
+            profile,
+            mocks: envPlan.mocks,
+            code,
+            repoFiles: snap.files,
+            changed: snap.changed,
+            feedback: feedback || undefined,
+          });
+          if (!gen.code) {
+            step(
+              "generate",
+              "failed",
+              gen.errors.slice(0, 3).join(" · ") || "No valid test file.",
+            );
+            run.infra = true;
+            run.error =
+              "The evaluator could not produce a valid test file for this mission. This is not caused by your code. Try again.";
+            finish("error");
+            return;
+          }
+          testCode = gen.code;
+          testCache.set(cacheKey, { sig, code: gen.code, at: Date.now() });
+          const n = (gen.code.match(/\b(it|test)\s*\(/g) ?? []).length;
+          step(
+            "generate",
+            "done",
+            `${n} tests written${gen.attempts > 1 ? ` (after ${gen.attempts} attempts)` : ""}.`,
+          );
+        }
+        run.testCode = testCode;
+
+        /* the sandbox */
+        sb = await runSandbox({
+          plan,
+          tarball: snap.tarball,
+          testContent: testCode,
+          env: resolved.env,
+          onStep: step,
+          // the developer writes no tests: run only the mission test file
+          skipDevTests: true,
+        } as RunInput);
+        run.infra = sb.infra && Boolean(sb.failedAt);
+
+        parsed = parseVitestResults(sb.resultsRaw, ids);
+        missionExit = sb.missionExit ?? null;
+        // a test process that exited non-zero without producing results is a suite error,
+        // never a silent success
+        suiteError =
+          parsed.suiteError ||
+          (!sb.failedAt &&
+          !parsed.cases.length &&
+          missionExit !== null &&
+          missionExit !== 0
+            ? `The mission test process exited with code ${missionExit} and produced no results.\n${sb.log.slice(-600)}`
+            : "");
+
+        // the file itself is broken (not the developer's code): drop it and write a new one
+        const testBroken =
+          !sb.failedAt &&
+          !parsed.cases.length &&
+          suiteError !== "" &&
+          !isDevLoadFault(suiteError);
+        if (testBroken) {
+          testCache.delete(cacheKey);
+          feedback = suiteError.slice(0, 800);
+          continue;
+        }
+
+        /* ---- audit: a failing test must be fair before it counts against the developer ---- */
+        const failedCases = parsed.cases.filter((t) => t.status === "failed");
+        if (sb.failedAt || !failedCases.length) break;
+
+        step(
+          "judge",
+          "running",
+          "Checking that every failing test is a fair test of your code.",
+        );
+        const audit = await auditFailures(llm, {
+          spec,
+          testPlan,
+          testCode,
+          code,
+          changed: snap.changed,
+          failures: failedCases,
+        });
+        if (!audit) break; // auditor unavailable: results stand as they are
+        const unfair = disputedFrom(failedCases, audit);
+        console.info(
+          `[mission-eval] audit round ${round}: ${audit.filter((a) => a.verdict === "test_wrong").length} of ${audit.length} failing tests judged faulty`,
+        );
+        if (!Object.keys(unfair).length) break;
+
+        // never keep a faulty file for the next push
+        testCache.delete(cacheKey);
+        if (round === TEST_ROUNDS) {
+          disputed = unfair;
+          break;
+        }
+        feedback = auditFeedback(failedCases, audit);
+        step(
+          "generate",
+          "running",
+          "A failing test was unfair to your code. Writing a corrected one.",
+        );
+      }
     } else {
+      step("generate", "skipped", "No criterion needs generated tests.");
       for (const id of [
         "sandbox",
         "install",
@@ -778,27 +920,8 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
         step(id, "skipped", "Not needed: no sandboxed tests.");
     }
 
-    /* ---- 6. result evaluator ---- */
-    step(
-      "judge",
-      "running",
-      "Reading the results and checking your code against the contract.",
-    );
-    const parsed = sb
-      ? parseVitestResults(sb.resultsRaw)
-      : { cases: [], parsed: false, suiteError: "" };
-    const missionExit = sb?.missionExit ?? null;
-    // a test process that exited non-zero without producing results is a suite error,
-    // never a silent success
-    const suiteError =
-      parsed.suiteError ||
-      (sb &&
-      !sb.failedAt &&
-      !parsed.cases.length &&
-      missionExit !== null &&
-      missionExit !== 0
-        ? `The mission test process exited with code ${missionExit} and produced no results.\n${sb.log.slice(-600)}`
-        : "");
+    /* ---- 6. result evaluator: code decides, the LLM only suggests fixes ---- */
+    step("judge", "running", "Reading the test results.");
     const facts: SandboxFacts = sb
       ? {
           sandboxRan: true,
@@ -813,15 +936,22 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
         }
       : noSandboxFacts();
 
-    const judged = await judgeMission(llm, {
-      spec,
-      testPlan,
-      changed: snap.changed,
-      code,
-      tests: parsed.cases,
-      staticTests,
-      facts,
-    });
+    // faulty tests are not the developer's to fix: keep them away from the fix suggestions
+    const judgeCases = parsed.cases.filter((t) => !(t.id && disputed[t.id]));
+    const anyFailed = [...staticTests, ...judgeCases].some(
+      (t) => t.status === "failed",
+    );
+    const judged = anyFailed
+      ? await judgeMission(llm, {
+          spec,
+          testPlan,
+          changed: snap.changed,
+          code,
+          tests: judgeCases,
+          staticTests,
+          facts,
+        })
+      : null;
     const outcome = finalizeVerdict({
       spec,
       testPlan,
@@ -833,6 +963,7 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
       facts,
       judged,
       headSha: snap.sha,
+      disputed,
     });
     run.log = sb ? sb.log.slice(-LOG_KEEP) : "";
     const passed = outcome.results.filter((r) => r.status === "passed").length;

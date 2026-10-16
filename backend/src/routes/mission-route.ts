@@ -307,6 +307,7 @@ export function missionRoutes(deps: MissionDeps): Router {
         missionId,
         head,
         githubToken,
+        regenerate: req.body?.regenerate === true,
       });
 
       log(

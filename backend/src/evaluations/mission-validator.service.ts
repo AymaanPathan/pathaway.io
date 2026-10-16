@@ -93,7 +93,8 @@ export function validateMission(
   if (rawCriteria.length < 3)
     errors.push("exactly 3 acceptance criteria are required");
   const criteria: MissionCriterion[] = rawCriteria.slice(0, 3).map((c, i) => ({
-    id: s(c?.id) || `AC${i + 1}`,
+    // ids are fixed: the test file titles every describe "AC1", "AC2", "AC3"
+    id: `AC${i + 1}`,
     description: clip(s(c?.description), 300),
     check: "test" as const,
     how: clip(

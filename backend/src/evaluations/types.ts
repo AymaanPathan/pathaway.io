@@ -36,7 +36,8 @@ export type StrategyId =
 /**
  * passed:  the criterion was checked and is satisfied
  * failed:  the criterion was checked (or the developer's project broke the check) and is not satisfied
- * blocked: the criterion could not be checked (nothing to test yet, environment problem, unsupported strategy)
+ * blocked: the criterion could not be checked (nothing to test yet, environment problem, unsupported strategy,
+ *          or the evaluator's own test was judged faulty: never blamed on the developer)
  */
 export type CriterionStatus = "passed" | "failed" | "blocked";
 
@@ -52,6 +53,7 @@ export type OutcomeCause =
   | "project_load"
   | "sandbox_infra"
   | "suite_error"
+  | "test_invalid"
   | "judge_unavailable";
 
 export type DataStoreKind =
