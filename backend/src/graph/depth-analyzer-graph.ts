@@ -5439,3 +5439,323 @@ export async function readDeveloperTopicEvidenceGraph(
     },
   };
 }
+// ============================================================
+// TOPIC GRAPH EVIDENCE: everything shown as nodes + edges + hops
+// ============================================================
+
+export type EvidenceNodeKind =
+  | "topic"
+  | "capability"
+  | "demonstration"
+  | "experience"
+  | "repository"
+  | "topic_neighbor";
+
+export interface EvidenceGraphNode {
+  id: string;
+  kind: EvidenceNodeKind;
+  label: string;
+  hop: number;
+  meta: Row;
+}
+export interface EvidenceGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  hop: number;
+  note: string;
+}
+export interface TopicBuild {
+  id: string;
+  kind: "mission" | "build";
+  title: string;
+  technique: string;
+  depth: string;
+  repository: string;
+  path: string;
+  permalink: string;
+  commitSubject: string;
+  createdAt: string;
+  capabilityId: string;
+  capability: string;
+  /** node ids on the route from the topic to this build */
+  routeIds: string[];
+  /** the same route as readable edges */
+  route: Array<{ from: string; type: string; to: string }>;
+}
+export interface TopicGraphTraceStep {
+  name: string;
+  pattern: string;
+  algorithm: string;
+  rows: number;
+  ms: number;
+}
+export interface TopicGraphEvidence {
+  slug: string;
+  nodes: EvidenceGraphNode[];
+  edges: EvidenceGraphEdge[];
+  hopCounts: Record<number, number>;
+  maxHop: number;
+  builds: TopicBuild[];
+  buildTotals: { missions: number; builds: number };
+  backedBy: Array<{ kind: string; count: number }>;
+  metrics: {
+    foundationRank: number | null;
+    bridgeScore: number | null;
+    clusterId: number | null;
+    clusterSize: number;
+    componentId: number | null;
+    componentSize: number;
+  };
+  reach: { prerequisites: number; unlocks: number; related: number; maxPrereqHop: number };
+  trace: TopicGraphTraceStep[];
+}
+
+export async function readTopicGraphEvidence(
+  graph: Graph,
+  developerId: string,
+  slug: string,
+): Promise<TopicGraphEvidence | null> {
+  await ensureDepthSchema(graph);
+  const meta = await readTopicMeta(graph);
+  const head = meta.get(slug);
+  if (!head) return null;
+
+  const trace: TopicGraphTraceStep[] = [];
+  const timed = async (
+    name: string,
+    pattern: string,
+    algorithm: string,
+    query: string,
+    params: Row,
+  ): Promise<Row[]> => {
+    const t0 = Date.now();
+    const r = (await tryRows(graph, name, query, params)) ?? [];
+    trace.push({ name, pattern, algorithm, rows: r.length, ms: Date.now() - t0 });
+    return r;
+  };
+
+  const nodes = new Map<string, EvidenceGraphNode>();
+  const edges = new Map<string, EvidenceGraphEdge>();
+  const node = (id: string, kind: EvidenceNodeKind, label: string, hop: number, m: Row = {}) => {
+    const prev = nodes.get(id);
+    if (!prev || hop < prev.hop) nodes.set(id, { id, kind, label, hop, meta: m });
+  };
+  const edge = (source: string, target: string, type: string, hop: number, note = "") => {
+    const id = `${source}|${type}|${target}`;
+    if (!edges.has(id)) edges.set(id, { id, source, target, type, hop, note });
+  };
+
+  const topicNode = `topic:${slug}`;
+  node(topicNode, "topic", head.name, 0, { slug, domain: head.domain });
+
+  // 1. Topic -MAPS_TO-> Capability
+  const capRows = await timed(
+    "Topic to capabilities",
+    "(Topic)-[:MAPS_TO]->(Capability)",
+    "1-hop traversal",
+    `MATCH (t:Topic {slug: $slug})-[m:MAPS_TO]->(c:Capability)
+     RETURN c.id AS id, coalesce(c.name, "") AS name, m.weight AS weight, coalesce(m.reason, "") AS reason`,
+    { slug },
+  );
+  const capName = new Map<string, string>();
+  for (const r of capRows) {
+    const id = str(r.id);
+    capName.set(id, str(r.name) || id);
+    node(`cap:${id}`, "capability", str(r.name) || id, 1, {
+      weight: r.weight == null ? null : round(num(r.weight), 2),
+    });
+    edge(topicNode, `cap:${id}`, "MAPS_TO", 1, str(r.reason));
+  }
+
+  // 2. Capability <-OF_CAPABILITY- Demonstration -IN_REPOSITORY-> Repository
+  const demoRows = await timed(
+    "Developer demonstrations for the topic",
+    "(Developer)-[:DEMONSTRATED]->(Demonstration)-[:OF_CAPABILITY]->(Capability)<-[:MAPS_TO]-(Topic)",
+    "3-hop traversal anchored on Developer and Topic",
+    `
+    MATCH (:Developer {id: $dev})-[:DEMONSTRATED]->(x:Demonstration)-[:OF_CAPABILITY]->(c:Capability)<-[:MAPS_TO]-(:Topic {slug: $slug})
+    OPTIONAL MATCH (x)-[:IN_REPOSITORY]->(r:Repository)
+    RETURN x.id AS id, c.id AS capability_id,
+           coalesce(x.source, "") AS source,
+           coalesce(x.mission_title, x.technique, "") AS title,
+           coalesce(x.technique, "") AS technique,
+           coalesce(x.depth, "usage") AS depth,
+           coalesce(x.depth_rank, 1) AS depth_rank,
+           coalesce(r.full_name, r.name, "") AS repository,
+           coalesce(x.path, "") AS path,
+           coalesce(x.permalink, "") AS permalink,
+           coalesce(x.commit_subject, "") AS commit_subject,
+           coalesce(x.created_at, "") AS created_at
+    ORDER BY created_at DESC
+    LIMIT 60
+    `,
+    { dev: developerId, slug },
+  );
+  const missions = demoRows.filter((r) => str(r.source) === "mission");
+  const others = demoRows
+    .filter((r) => str(r.source) !== "mission")
+    .sort((a, b) => num(b.depth_rank) - num(a.depth_rank) || str(b.created_at).localeCompare(str(a.created_at)));
+  const shown = [...missions.slice(0, 4), ...others.slice(0, 8 - Math.min(4, missions.length))];
+
+  const builds: TopicBuild[] = [];
+  for (const r of shown) {
+    const id = str(r.id);
+    const capId = str(r.capability_id);
+    const isMission = str(r.source) === "mission";
+    const repo = str(r.repository);
+    const label = cut80(str(r.title) || str(r.technique) || "demonstration");
+    node(`demo:${id}`, "demonstration", label, 2, { mission: isMission, depth: str(r.depth) });
+    edge(`demo:${id}`, `cap:${capId}`, "OF_CAPABILITY", 2);
+    const routeIds = [topicNode, `cap:${capId}`, `demo:${id}`];
+    const route = [
+      { from: head.name, type: "MAPS_TO", to: capName.get(capId) ?? capId },
+      { from: label, type: "OF_CAPABILITY", to: capName.get(capId) ?? capId },
+    ];
+    if (repo) {
+      node(`repo:${repo}`, "repository", repo, 3);
+      edge(`demo:${id}`, `repo:${repo}`, "IN_REPOSITORY", 3);
+      routeIds.push(`repo:${repo}`);
+      route.push({ from: label, type: "IN_REPOSITORY", to: repo });
+    }
+    builds.push({
+      id,
+      kind: isMission ? "mission" : "build",
+      title: label,
+      technique: str(r.technique),
+      depth: str(r.depth),
+      repository: repo,
+      path: str(r.path),
+      permalink: str(r.permalink),
+      commitSubject: str(r.commit_subject),
+      createdAt: str(r.created_at),
+      capabilityId: capId,
+      capability: capName.get(capId) ?? capId,
+      routeIds,
+      route,
+    });
+  }
+  builds.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  // 3. Experience -DEMONSTRATES_CAPABILITY-> Capability
+  const expRows = await timed(
+    "Developer experiences for the topic",
+    "(Developer)-[:EXPERIENCED]->(Experience)-[:DEMONSTRATES_CAPABILITY]->(Capability)<-[:MAPS_TO]-(Topic)",
+    "3-hop traversal",
+    `
+    MATCH (:Developer {id: $dev})-[:EXPERIENCED]->(e:Experience)-[:DEMONSTRATES_CAPABILITY]->(c:Capability)<-[:MAPS_TO]-(:Topic {slug: $slug})
+    RETURN e.id AS id, coalesce(e.technique, "") AS technique, c.id AS capability_id,
+           coalesce(e.evidence_count, 0) AS evidence
+    ORDER BY evidence DESC
+    LIMIT 5
+    `,
+    { dev: developerId, slug },
+  );
+  for (const r of expRows) {
+    const id = str(r.id);
+    node(`exp:${id}`, "experience", cut80(str(r.technique)), 2, { evidence: num(r.evidence) });
+    edge(`exp:${id}`, `cap:${str(r.capability_id)}`, "DEMONSTRATES_CAPABILITY", 2);
+  }
+
+  // 4. Topic taxonomy: BUILDS_ON*1..3 out, *1..2 in, RELATED_TOPIC
+  const t0 = Date.now();
+  const [buildEdges, relatedEdges] = await Promise.all([
+    readTaxonomyEdges(graph, "BUILDS_ON"),
+    readTaxonomyEdges(graph, "RELATED_TOPIC"),
+  ]);
+  const prereq = walkBuildsOn(buildEdges, "out", slug, 3);
+  const unlocks = walkBuildsOn(buildEdges, "in", slug, 2);
+  const related = relatedEdges.filter((e) => e.from === slug).slice(0, 8);
+  trace.push({
+    name: "Topic taxonomy walk",
+    pattern: "(Topic)-[:BUILDS_ON*1..3]->(Topic); (Topic)<-[:BUILDS_ON*1..2]-(Topic); (Topic)-[:RELATED_TOPIC]->(Topic)",
+    algorithm: "Variable-length BFS (breadth-first walk)",
+    rows: prereq.length + unlocks.length + related.length,
+    ms: Date.now() - t0,
+  });
+  const nodeFor = (s: string, hop: number) =>
+    node(`tn:${s}`, "topic_neighbor", meta.get(s)?.name ?? s, hop, { slug: s });
+  for (const n of prereq) {
+    nodeFor(n.slug, n.hops);
+    const prev = n.via.length > 1 ? `tn:${n.via[n.via.length - 2]}` : topicNode;
+    edge(prev, `tn:${n.slug}`, "BUILDS_ON", n.hops, n.edge.reason);
+  }
+  for (const n of unlocks) {
+    nodeFor(n.slug, n.hops);
+    const next = n.via.length > 1 ? `tn:${n.via[n.via.length - 2]}` : topicNode;
+    edge(`tn:${n.slug}`, next, "BUILDS_ON", n.hops, n.edge.reason);
+  }
+  for (const e of related) {
+    nodeFor(e.to, 1);
+    edge(topicNode, `tn:${e.to}`, "RELATED_TOPIC", 1, e.reason);
+  }
+
+  // 5. What the assessment is BACKED_BY (edge counts per evidence kind)
+  const backed = await timed(
+    "Assessment evidence edges",
+    "(DepthAssessment)-[:BACKED_BY]->(FileChange|Demonstration|Experience|Commit)",
+    "1-hop aggregation",
+    `MATCH (a:DepthAssessment {id: $id})-[:BACKED_BY]->(x)
+     RETURN labels(x)[0] AS kind, count(x) AS n ORDER BY n DESC`,
+    { id: assessmentId(developerId, slug) },
+  );
+
+  // 6. Algorithm results written on the Topic node
+  const metricRows = await timed(
+    "Algorithm results on the topic",
+    "(Topic {foundation_rank, bridge_score, cluster_id, component_id})",
+    "algo.pageRank / betweenness / labelPropagation / WCC (precomputed)",
+    `MATCH (t:Topic {slug: $slug})
+     RETURN t.foundation_rank AS pr, t.bridge_score AS bt, t.cluster_id AS cl, t.component_id AS cc`,
+    { slug },
+  );
+  const m = metricRows[0] ?? {};
+  const clusterId = m.cl == null ? null : num(m.cl);
+  const componentId = m.cc == null ? null : num(m.cc);
+  const sizeOf = async (prop: "cluster_id" | "component_id", v: number | null) =>
+    v == null
+      ? 0
+      : num(
+          (
+            (await tryRows(graph, `${prop} size`, `MATCH (t:Topic) WHERE t.${prop} = $v RETURN count(t) AS n`, { v })) ??
+            []
+          )[0]?.n,
+        );
+  const [clusterSize, componentSize] = await Promise.all([
+    sizeOf("cluster_id", clusterId),
+    sizeOf("component_id", componentId),
+  ]);
+
+  const all = [...nodes.values()];
+  const hopCounts: Record<number, number> = {};
+  for (const n of all) if (n.hop > 0) hopCounts[n.hop] = (hopCounts[n.hop] ?? 0) + 1;
+
+  return {
+    slug,
+    nodes: all,
+    edges: [...edges.values()].filter((e) => nodes.has(e.source) && nodes.has(e.target)),
+    hopCounts,
+    maxHop: Math.max(0, ...all.map((n) => n.hop)),
+    builds,
+    buildTotals: { missions: missions.length, builds: others.length },
+    backedBy: backed.map((r) => ({ kind: str(r.kind), count: num(r.n) })),
+    metrics: {
+      foundationRank: m.pr == null ? null : num(m.pr),
+      bridgeScore: m.bt == null ? null : num(m.bt),
+      clusterId,
+      clusterSize,
+      componentId,
+      componentSize,
+    },
+    reach: {
+      prerequisites: prereq.length,
+      unlocks: unlocks.length,
+      related: related.length,
+      maxPrereqHop: Math.max(0, ...prereq.map((n) => n.hops)),
+    },
+    trace,
+  };
+}
+
+const cut80 = (s: string): string => (s.length <= 80 ? s : `${s.slice(0, 79)}…`);

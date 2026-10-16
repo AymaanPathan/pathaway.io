@@ -86,7 +86,7 @@ const envNum = (name: string, fallback: number): number => {
 
 
 export interface DepthLlmRequest {
-  stage: "discover" | "judge" | "synthesize";
+  stage: "discover" | "judge" | "synthesize" | "explain";
   system: string;
   user: string;
   maxTokens?: number;
@@ -2891,3 +2891,78 @@ export type {
   TopicSpec,
 };
 export { levelForScore };
+
+
+// ============================================================
+// PLAIN-LANGUAGE EXPLAINER (turns graph facts into a human story)
+// ============================================================
+
+export interface TopicExplanation {
+  headline: string;
+  summary: string;
+  steps: Array<{ title: string; text: string }>;
+  meaning: string;
+  caveat: string;
+  followups: string[];
+}
+
+const EXPLAIN_SYSTEM = `You are Pathway's explainer. You receive FACTS about ONE topic from a developer's own code and must explain them to a NON-TECHNICAL reader (a recruiter, a manager, or a junior developer).
+
+RULES
+1. Use ONLY the facts given. Never invent projects, numbers, skills, repositories or dates. If a fact is empty or zero, say plainly that nothing was found.
+2. No jargon. Never use these words: PageRank, betweenness, centrality, Cypher, FalkorDB, node, edge, hop, traversal, taxonomy, algorithm, graph query. Say "skill", "real work", "project", "foundation", "related topic" instead.
+3. Short sentences. Write to "you" (the developer) when natural.
+4. Be fair and honest: say what is proven and what is NOT. Low confidence must be stated plainly.
+5. "steps" are 3 or 4 items that walk the reader through the evidence in this order: what was found, which skills it covers, where it fits among other topics, where the work lives. Each text is 1-2 sentences.
+6. "meaning" explains in one sentence what the level means for this person. "caveat" is the single most important limit.
+7. "followups" are 3 short questions the reader could ask next about THIS topic.
+8. Output minified JSON on one line. No commentary, no code fences.
+
+Return ONLY this JSON:
+{"headline":"one short sentence","summary":"2-3 plain sentences","steps":[{"title":"3-5 words","text":""}],"meaning":"","caveat":"","followups":["","",""]}`;
+
+const explainCache = new Map<
+  string,
+  { at: number; value: TopicExplanation }
+>();
+const EXPLAIN_TTL_MS = 10 * 60_000;
+
+export async function explainTopicEvidence(
+  llm: DepthLlm,
+  facts: Row,
+  cacheKey: string,
+): Promise<TopicExplanation | null> {
+  const hit = explainCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < EXPLAIN_TTL_MS) return hit.value;
+
+  const gateway = new LlmGateway(llm, 1, 0, 2);
+  const raw = await gateway.json({
+    stage: "explain",
+    system: EXPLAIN_SYSTEM,
+    user: `FACTS:\n${JSON.stringify(facts)}`,
+    maxTokens: 1400,
+    temperature: 0.2,
+  });
+  if (!raw) return null;
+
+  const steps = asObjects(raw.steps)
+    .slice(0, 4)
+    .map((s) => ({ title: asStr(s.title, 80), text: asStr(s.text, 340) }))
+    .filter((s) => s.title && s.text);
+  const out: TopicExplanation = {
+    headline: asStr(raw.headline, 200),
+    summary: asStr(raw.summary, 600),
+    steps,
+    meaning: asStr(raw.meaning, 300),
+    caveat: asStr(raw.caveat, 300),
+    followups: asList(raw.followups, 3, 140),
+  };
+  if (!out.headline || !out.summary || out.steps.length < 2) return null;
+
+  explainCache.set(cacheKey, { at: Date.now(), value: out });
+  if (explainCache.size > 200) {
+    const oldest = explainCache.keys().next().value;
+    if (oldest) explainCache.delete(oldest);
+  }
+  return out;
+}

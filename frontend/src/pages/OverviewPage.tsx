@@ -662,6 +662,16 @@ const LENSES: Array<{ id: Lens; label: string }> = [
 const WELCOME =
   "Select a topic to see why Pathway rated it that way: the capabilities, implementations and graph relationships behind it. Ask me what supports a level, what a topic builds on, or what remains unproven. Topics I mention glow in the graph.";
 
+const EVIDENCE_ID = "graph-evidence";
+const scrollToEvidence = () =>
+  window.setTimeout(
+    () =>
+      document
+        .getElementById(EVIDENCE_ID)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    80,
+  );
+
 export default function OverviewPage() {
   const navigate = useNavigate();
 
@@ -1748,6 +1758,7 @@ export default function OverviewPage() {
                       onPick={pick}
                       onAsk={askAbout}
                       onClose={closeTopic}
+                      onEvidence={scrollToEvidence}
                     />
                   )}
                 </div>
@@ -1755,6 +1766,18 @@ export default function OverviewPage() {
             </section>
           </aside>
         </div>
+
+        {sel && (
+          <TopicGraphEvidence
+            key={sel}
+            slug={sel}
+            onPick={pick}
+            onAsk={(q) => {
+              window.scrollTo({ top: 0, behavior: "smooth" });
+              void send(q);
+            }}
+          />
+        )}
 
         {stage?.blocks && stage.blocks.length > 0 && (
           <section
@@ -2935,6 +2958,7 @@ function TopicPanel({
   onPick,
   onAsk,
   onClose,
+  onEvidence,
 }: {
   slug: string;
   card: Obj | null;
@@ -2946,6 +2970,7 @@ function TopicPanel({
   onPick: (slug: string) => void;
   onAsk: (name: string) => void;
   onClose: () => void;
+  onEvidence: () => void;
 }) {
   const t = (detail?.topic ?? card ?? {}) as Obj;
   const sc = (detail?.scoring ?? {}) as Obj;
@@ -2989,6 +3014,17 @@ function TopicPanel({
           <X size={14} />
         </button>
       </div>
+
+      {/* jump to the full graph evidence section below the workspace */}
+      <button
+        type="button"
+        onClick={onEvidence}
+        className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] font-black transition-transform hover:-translate-y-0.5"
+        style={{ backgroundColor: YELLOW, ...border }}
+      >
+        <span>See the evidence map behind this rating</span>
+        <ChevronRight size={14} strokeWidth={3} />
+      </button>
 
       {loading && <InlineLoading label="Reading topic…" />}
       {err && (
@@ -3612,5 +3648,943 @@ function Screen({ children }: { children: ReactNode }) {
     >
       <div className="w-full max-w-md">{children}</div>
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------- */
+/* EVIDENCE MAP: plain-English story first, graph second, raw queries last    */
+/* Data: GET /api/topics/:slug/graph  +  POST /api/topics/:slug/explain       */
+/* -------------------------------------------------------------------------- */
+
+const KIND_COLOR: Record<string, string> = {
+  topic: YELLOW,
+  capability: SKY,
+  demonstration: GREEN,
+  experience: PURPLE,
+  repository: CORAL,
+  topic_neighbor: LAVENDER,
+};
+const KIND_LABEL: Record<string, string> = {
+  topic: "This topic",
+  capability: "Skill it covers",
+  demonstration: "Real work",
+  experience: "Experience",
+  repository: "Project",
+  topic_neighbor: "Related topic",
+};
+const KIND_ORDER = [
+  "capability",
+  "demonstration",
+  "experience",
+  "repository",
+  "topic_neighbor",
+];
+const REL_PLAIN: Record<string, string> = {
+  MAPS_TO: "covers skill",
+  OF_CAPABILITY: "shows skill",
+  DEMONSTRATES_CAPABILITY: "shows skill",
+  IN_REPOSITORY: "lives in",
+  BUILDS_ON: "builds on",
+  RELATED_TOPIC: "used with",
+};
+const EW = 780;
+const EH = 560;
+const RINGS = [105, 180, 250];
+
+const nodeR = (n: Obj | undefined): number => {
+  switch (n?.kind) {
+    case "topic":
+      return 26;
+    case "capability":
+      return 17;
+    case "demonstration":
+      return n?.meta?.mission ? 15 : 12;
+    case "experience":
+      return 13;
+    case "repository":
+      return 14;
+    default:
+      return 13;
+  }
+};
+
+/** Rings by distance from the topic: centre, then outward. */
+function evLayout(nodes: Obj[]) {
+  const out = new Map<string, { x: number; y: number }>();
+  const cx = EW / 2;
+  const cy = EH / 2;
+  for (let hop = 0; hop <= 3; hop++) {
+    const ring = nodes
+      .filter((n) => Math.min(3, num(n.hop)) === hop)
+      .sort(
+        (a, b) =>
+          KIND_ORDER.indexOf(asString(a.kind)) -
+            KIND_ORDER.indexOf(asString(b.kind)) ||
+          asString(a.id).localeCompare(asString(b.id)),
+      );
+    ring.forEach((n, i) => {
+      if (hop === 0) {
+        out.set(asString(n.id), { x: cx, y: cy });
+        return;
+      }
+      const a = (i / ring.length) * Math.PI * 2 - Math.PI / 2 + hop * 0.45;
+      const r = RINGS[hop - 1];
+      out.set(asString(n.id), {
+        x: cx + Math.cos(a) * r * 1.35,
+        y: cy + Math.sin(a) * r,
+      });
+    });
+  }
+  return out;
+}
+
+/** One edge, in a sentence a non-engineer can read. */
+function relSentence(e: Obj, nm: (id: string) => string): string {
+  const a = nm(asString(e.source));
+  const b = nm(asString(e.target));
+  switch (asString(e.type)) {
+    case "MAPS_TO":
+      return `${a} is part of the skill “${b}”.`;
+    case "OF_CAPABILITY":
+    case "DEMONSTRATES_CAPABILITY":
+      return `“${a}” is real work that shows the skill “${b}”.`;
+    case "IN_REPOSITORY":
+      return `“${a}” lives in the project ${b}.`;
+    case "BUILDS_ON":
+      return `${a} builds on ${b}.`;
+    case "RELATED_TOPIC":
+      return `${a} is often used together with ${b}.`;
+    default:
+      return `${a} → ${b}`;
+  }
+}
+
+/** The five graph algorithms, translated into questions a person would ask. */
+const ALGO_PLAIN: Record<
+  string,
+  { title: string; question: string; read: (a: Obj, d: Obj) => string }
+> = {
+  pagerank: {
+    title: "How foundational is it?",
+    question: "Do many other topics depend on this one?",
+    read: (_a, d) =>
+      num(d.reach?.unlocks) > 0
+        ? `${num(d.reach.unlocks)} other topic${num(d.reach.unlocks) === 1 ? " is" : "s are"} built on top of this one.`
+        : "Nothing else is built on top of it. It is a specialised skill, not a foundation.",
+  },
+  betweenness: {
+    title: "Does it connect different areas?",
+    question: "Does this topic link separate parts of your skills?",
+    read: (a) =>
+      num(a.value) > 0
+        ? `Yes. It links separate areas${a.position ? ` (ranks #${num(a.position)} of ${num(a.of)} of your topics)` : ""}, so it is knowledge that transfers.`
+        : "No. It sits inside one area.",
+  },
+  label_propagation: {
+    title: "Which group does it belong to?",
+    question: "Which topics are usually used together with it?",
+    read: (a) =>
+      a.value == null
+        ? "It is not part of a group yet."
+        : `It belongs to a group of ${num(a.of)} related topics.`,
+  },
+  wcc: {
+    title: "Is it connected to the rest?",
+    question: "Is this topic linked to the main web of your skills?",
+    read: (a) =>
+      a.value == null
+        ? "Not computed yet."
+        : `It is linked to ${num(a.of)} topics in total.`,
+  },
+  traversal: {
+    title: "How deep is its learning path?",
+    question: "What does it stand on, and what stands on it?",
+    read: (_a, d) =>
+      `Stands on ${num(d.reach?.prerequisites)} foundation${num(d.reach?.prerequisites) === 1 ? "" : "s"}, has ${num(d.reach?.unlocks)} above it and ${num(d.reach?.related)} related.`,
+  },
+};
+
+function Tile({
+  value,
+  label,
+  hint,
+}: {
+  value: number | string;
+  label: string;
+  hint: string;
+}) {
+  return (
+    <div
+      className="rounded-xl p-3"
+      style={{ backgroundColor: WHITE, ...border }}
+    >
+      <div
+        className="text-[24px] font-black leading-none"
+        style={{ fontFamily: DISPLAY_FONT }}
+      >
+        {value}
+      </div>
+      <div className="mt-1 text-[13px] font-black">{label}</div>
+      <div className="text-[12px] leading-4 text-neutral-700">{hint}</div>
+    </div>
+  );
+}
+
+function TopicGraphEvidence({
+  slug,
+  onPick,
+  onAsk,
+}: {
+  slug: string;
+  onPick: (slug: string) => void;
+  onAsk: (question: string) => void;
+}) {
+  const [data, setData] = useState<Obj | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [lit, setLit] = useState<Set<string>>(new Set());
+  const [picked, setPicked] = useState<Obj | null>(null);
+  const [tech, setTech] = useState(false);
+  const [story, setStory] = useState<Obj | null>(null);
+  const [storySrc, setStorySrc] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    setErr(null);
+    setPicked(null);
+    setLit(new Set());
+    setStory(null);
+    setStorySrc("");
+    const enc = encodeURIComponent(slug);
+    (async () => {
+      try {
+        const d = await getJson(`/api/topics/${enc}/graph`);
+        if (!live) return;
+        setData(d);
+        // instant, always-available story; the agent upgrades it below
+        setStory((d.plain?.story ?? null) as Obj | null);
+        setStorySrc("graph");
+        setLoading(false);
+        setAiBusy(true);
+        const r = await call(`/api/topics/${enc}/explain`, "POST", {});
+        if (!live) return;
+        if (r.ok && r.data.story) {
+          setStory(r.data.story as Obj);
+          setStorySrc(asString(r.data.source));
+        }
+      } catch (e) {
+        if (live)
+          setErr(
+            e instanceof Error ? e.message : "Failed to load graph evidence.",
+          );
+      } finally {
+        if (live) {
+          setLoading(false);
+          setAiBusy(false);
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [slug]);
+
+  const nodes = useMemo(() => asArray<Obj>(data?.nodes), [data]);
+  const edges = useMemo(() => asArray<Obj>(data?.edges), [data]);
+  const pos = useMemo(() => evLayout(nodes), [nodes]);
+  const byId = useMemo(
+    () => new Map(nodes.map((n) => [asString(n.id), n] as [string, Obj])),
+    [nodes],
+  );
+
+  // duplicate names ("Retry with exponential backoff" x 9) get numbered
+  const names = useMemo(() => {
+    const count = new Map<string, number>();
+    nodes.forEach((n) => {
+      const l = asString(n.label);
+      count.set(l, (count.get(l) ?? 0) + 1);
+    });
+    const seen = new Map<string, number>();
+    const out = new Map<string, string>();
+    nodes.forEach((n) => {
+      const l = asString(n.label);
+      if ((count.get(l) ?? 0) > 1) {
+        const k = (seen.get(l) ?? 0) + 1;
+        seen.set(l, k);
+        out.set(asString(n.id), `${l} (${k})`);
+      } else out.set(asString(n.id), l);
+    });
+    return out;
+  }, [nodes]);
+  const nm = (id: string) => names.get(id) ?? asString(byId.get(id)?.label);
+
+  // picking a node fades everything that is not directly connected to it
+  const focus = useMemo(() => {
+    if (!picked) return null;
+    const pid = asString(picked.id);
+    const s = new Set<string>([pid]);
+    edges.forEach((e) => {
+      if (e.source === pid) s.add(asString(e.target));
+      if (e.target === pid) s.add(asString(e.source));
+    });
+    return s;
+  }, [picked, edges]);
+
+  if (loading)
+    return (
+      <section
+        id={EVIDENCE_ID}
+        className="mt-6 rounded-2xl p-4"
+        style={{ backgroundColor: CARD, ...border }}
+      >
+        <InlineLoading label="Collecting the evidence behind this rating…" />
+      </section>
+    );
+  if (err || !data)
+    return (
+      <section
+        id={EVIDENCE_ID}
+        className="mt-6 rounded-2xl p-4"
+        style={{ backgroundColor: CARD, ...border }}
+      >
+        <p className="text-[13px] font-bold" style={{ color: CORAL }}>
+          {err ?? "No evidence available."}
+        </p>
+      </section>
+    );
+
+  const facts = (data.plain?.facts ?? {}) as Obj;
+  const builds = asArray<Obj>(data.builds);
+  const algos = asArray<Obj>(data.algorithms);
+  const trace = asArray<Obj>(data.trace);
+  const backedBy = asArray<Obj>(data.backedBy);
+  const score = (data.score ?? {}) as Obj;
+  const steps = asArray<Obj>(story?.steps);
+  const followups = asArray<string>(story?.followups).slice(0, 3);
+  const litOn = lit.size > 0;
+
+  return (
+    <section
+      id={EVIDENCE_ID}
+      className="mt-6 scroll-mt-20 rounded-2xl p-4"
+      style={{
+        backgroundColor: CARD,
+        ...border,
+        boxShadow: shadow(4),
+        animation: "oslide .25s ease-out both",
+      }}
+    >
+      {/* header */}
+      <div className="mb-3">
+        <p className="text-[12px] font-black uppercase tracking-[.14em] text-neutral-700">
+          Evidence map
+        </p>
+        <h2
+          className="text-[22px] font-black leading-tight"
+          style={{ fontFamily: DISPLAY_FONT }}
+        >
+          {asString(data.topic?.name)}
+        </h2>
+      </div>
+
+      {/* 1. THE AGENT, IN PLAIN ENGLISH */}
+      <div
+        className="rounded-2xl p-4"
+        style={{ backgroundColor: WHITE, ...border }}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span
+              className="flex h-7 w-7 items-center justify-center rounded-full"
+              style={{ backgroundColor: YELLOW, ...border }}
+            >
+              <Sparkles size={14} />
+            </span>
+            <span className="text-[13px] font-black">In plain English</span>
+          </div>
+          <span className="text-[12px] font-bold text-neutral-700">
+            {aiBusy
+              ? "Pathway agent is writing this in simple words…"
+              : storySrc === "llm"
+                ? "Written by the Pathway agent from your graph"
+                : "Summary built from your graph"}
+          </span>
+        </div>
+
+        {story ? (
+          <>
+            <h3
+              className="mt-3 text-[18px] font-black leading-snug"
+              style={{ fontFamily: DISPLAY_FONT }}
+            >
+              {asString(story.headline)}
+            </h3>
+            <p className="mt-1 text-[14px] leading-6 text-neutral-900">
+              {asString(story.summary)}
+            </p>
+
+            <ol className="mt-3 grid gap-3 md:grid-cols-2">
+              {steps.map((s, i) => (
+                <li
+                  key={i}
+                  className="flex gap-3 rounded-xl p-3"
+                  style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
+                >
+                  <span
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[12px] font-black"
+                    style={{ backgroundColor: LAVENDER, ...border }}
+                  >
+                    {i + 1}
+                  </span>
+                  <div>
+                    <div className="text-[13px] font-black">
+                      {asString(s.title)}
+                    </div>
+                    <p className="text-[13px] leading-5 text-neutral-900">
+                      {asString(s.text)}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div
+                className="rounded-xl p-3"
+                style={{ backgroundColor: `${GREEN}22`, border: `2px solid ${INK}` }}
+              >
+                <div className="flex items-center gap-1.5 text-[12px] font-black uppercase tracking-wide">
+                  <CheckCircle2 size={14} color={GREEN} /> What it means
+                </div>
+                <p className="mt-1 text-[13px] leading-5">
+                  {asString(story.meaning)}
+                </p>
+              </div>
+              <div
+                className="rounded-xl p-3"
+                style={{ backgroundColor: `${CORAL}22`, border: `2px solid ${INK}` }}
+              >
+                <div className="flex items-center gap-1.5 text-[12px] font-black uppercase tracking-wide">
+                  <Flame size={14} color={CORAL} /> What is not proven
+                </div>
+                <p className="mt-1 text-[13px] leading-5">
+                  {asString(story.caveat)}
+                </p>
+              </div>
+            </div>
+
+            {followups.length > 0 && (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="text-[12px] font-black text-neutral-700">
+                  Ask the agent:
+                </span>
+                {followups.map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    onClick={() => onAsk(q)}
+                    className="rounded-full px-3 py-1 text-[12px] font-bold transition-transform hover:-translate-y-0.5"
+                    style={{ backgroundColor: LAVENDER, ...border }}
+                  >
+                    {q}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <p className="mt-3 text-[13px] text-neutral-800">
+            No summary available for this topic yet.
+          </p>
+        )}
+      </div>
+
+      {/* 2. AT A GLANCE */}
+      <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Tile
+          value={num(facts.skillsCovered?.length)}
+          label="Skills linked"
+          hint="Wider skills this topic is part of"
+        />
+        <Tile
+          value={num(facts.realWorkLinked)}
+          label="Pieces of real work"
+          hint="Code that shows it in action"
+        />
+        <Tile
+          value={num(facts.missionsLinked)}
+          label="Practice missions"
+          hint="Guided exercises you completed"
+        />
+        <Tile
+          value={num(facts.projectsInvolved)}
+          label="Projects"
+          hint="Repositories the work lives in"
+        />
+      </div>
+
+      {/* 3. THE MAP */}
+      <div
+        className="mt-4 overflow-hidden rounded-xl"
+        style={{ backgroundColor: WHITE, ...border }}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+          <div>
+            <div className="text-[14px] font-black">How it all connects</div>
+            <div className="text-[12px] text-neutral-700">
+              Click any circle to see how it relates to this topic. Closer to the
+              centre means more directly linked.
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {picked && (
+              <Btn onClick={() => setPicked(null)}>
+                <X size={12} /> Clear
+              </Btn>
+            )}
+            <Btn onClick={() => setTech((v) => !v)} bg={tech ? YELLOW : CARD}>
+              {tech ? "Hide" : "Show"} technical labels
+            </Btn>
+          </div>
+        </div>
+
+        <svg
+          viewBox={`0 0 ${EW} ${EH}`}
+          className="block h-auto w-full"
+          role="group"
+          aria-label="Evidence map"
+        >
+          <defs>
+            <marker
+              id="evarrow"
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth="6"
+              markerHeight="6"
+              orient="auto-start-reverse"
+            >
+              <path d="M0,0 L10,5 L0,10 z" fill={INK} />
+            </marker>
+          </defs>
+          {RINGS.map((r) => (
+            <ellipse
+              key={r}
+              cx={EW / 2}
+              cy={EH / 2}
+              rx={r * 1.35}
+              ry={r}
+              fill="none"
+              stroke={INK}
+              strokeOpacity=".14"
+              strokeDasharray="4 6"
+            />
+          ))}
+          {["directly linked", "one step away", "two steps away"].map((t, i) => (
+            <text
+              key={t}
+              x={EW / 2 + 6}
+              y={EH / 2 - RINGS[i] - 4}
+              fontSize="11"
+              fontWeight={800}
+              fill={INK}
+              opacity=".5"
+            >
+              {t}
+            </text>
+          ))}
+
+          {edges.map((e) => {
+            const a = pos.get(asString(e.source));
+            const b = pos.get(asString(e.target));
+            if (!a || !b) return null;
+            const sid = asString(e.source);
+            const tid = asString(e.target);
+            const on = lit.has(sid) && lit.has(tid);
+            const touchesPick =
+              !!picked && (sid === picked.id || tid === picked.id);
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const d = Math.max(Math.hypot(dx, dy), 1);
+            const ra = nodeR(byId.get(sid)) + 2;
+            const rb = nodeR(byId.get(tid)) + 6;
+            const op = litOn ? (on ? 1 : 0.08) : focus ? (touchesPick ? 1 : 0.06) : 0.55;
+            const showText = tech || on || touchesPick;
+            return (
+              <g key={asString(e.id)} opacity={op}>
+                <line
+                  x1={a.x + (dx / d) * ra}
+                  y1={a.y + (dy / d) * ra}
+                  x2={b.x - (dx / d) * rb}
+                  y2={b.y - (dy / d) * rb}
+                  stroke={on || touchesPick ? CORAL : INK}
+                  strokeWidth={on || touchesPick ? 3.2 : 1.3}
+                  markerEnd="url(#evarrow)"
+                />
+                {showText && (
+                  <text
+                    x={(a.x + b.x) / 2}
+                    y={(a.y + b.y) / 2 - 3}
+                    textAnchor="middle"
+                    fontSize="9.5"
+                    fontWeight={800}
+                    fill={INK}
+                    style={{
+                      paintOrder: "stroke",
+                      stroke: WHITE,
+                      strokeWidth: 3,
+                    }}
+                  >
+                    {tech
+                      ? asString(e.type)
+                      : (REL_PLAIN[asString(e.type)] ?? asString(e.type))}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+          {nodes.map((n) => {
+            const p = pos.get(asString(n.id));
+            if (!p) return null;
+            const id = asString(n.id);
+            const r = nodeR(n);
+            const kind = asString(n.kind);
+            const mission = n.meta?.mission === true;
+            const faded = litOn ? !lit.has(id) : focus ? !focus.has(id) : false;
+            return (
+              <g
+                key={id}
+                tabIndex={0}
+                role="button"
+                aria-label={`${KIND_LABEL[kind] ?? kind}: ${nm(id)}`}
+                onClick={() => setPicked(n)}
+                onKeyDown={(ev) =>
+                  (ev.key === "Enter" || ev.key === " ") && setPicked(n)
+                }
+                style={{
+                  cursor: "pointer",
+                  opacity: faded ? 0.15 : 1,
+                  transition: "opacity .25s",
+                }}
+              >
+                {lit.has(id) && (
+                  <circle
+                    cx={p.x}
+                    cy={p.y}
+                    r={r + 9}
+                    fill="none"
+                    stroke={YELLOW}
+                    strokeWidth="3.5"
+                  />
+                )}
+                <circle
+                  cx={p.x}
+                  cy={p.y}
+                  r={r}
+                  fill={KIND_COLOR[kind] ?? CARD}
+                  stroke={INK}
+                  strokeWidth={picked?.id === id ? 4 : 2.2}
+                  strokeDasharray={mission ? "4 3" : undefined}
+                />
+                <text
+                  x={p.x}
+                  y={p.y + r + 13}
+                  textAnchor="middle"
+                  fontSize="10.5"
+                  fontWeight={800}
+                  fill={INK}
+                  style={{
+                    paintOrder: "stroke",
+                    stroke: WHITE,
+                    strokeWidth: 4,
+                    strokeLinejoin: "round",
+                  }}
+                >
+                  {cut(nm(id), 24)}
+                </text>
+              </g>
+            );
+          })}
+        </svg>
+
+        <div
+          className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 text-[12px] font-semibold"
+          style={{ borderTop: `1px solid ${LINE}` }}
+        >
+          {Object.entries(KIND_LABEL).map(([k, l]) => (
+            <span key={k} className="flex items-center gap-1.5">
+              <span
+                className="h-3 w-3 rounded-full"
+                style={{
+                  backgroundColor: KIND_COLOR[k],
+                  border: `1.5px solid ${INK}`,
+                }}
+              />
+              {l}
+            </span>
+          ))}
+          <span className="flex items-center gap-1.5">
+            <span
+              className="h-3 w-3 rounded-full"
+              style={{ border: `2px dashed ${INK}` }}
+            />
+            practice mission
+          </span>
+        </div>
+
+        <div className="px-3 pb-3 text-[13px]" style={{ borderTop: `1px solid ${LINE}` }}>
+          {picked ? (
+            <>
+              <div className="pt-2 font-black">
+                {KIND_LABEL[asString(picked.kind)] ?? asString(picked.kind)}:{" "}
+                {nm(asString(picked.id))}
+              </div>
+              {edges
+                .filter((e) => e.source === picked.id || e.target === picked.id)
+                .slice(0, 6)
+                .map((e) => (
+                  <p
+                    key={asString(e.id)}
+                    className="text-[13px] leading-5 text-neutral-900"
+                  >
+                    • {relSentence(e, nm)}
+                    {e.note ? ` Why: ${asString(e.note)}` : ""}
+                  </p>
+                ))}
+              {picked.kind === "topic_neighbor" && picked.meta?.slug && (
+                <button
+                  type="button"
+                  onClick={() => onPick(asString(picked.meta.slug))}
+                  className="mt-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-black"
+                  style={{ backgroundColor: YELLOW, ...border }}
+                >
+                  Open this topic
+                </button>
+              )}
+            </>
+          ) : (
+            <p className="pt-2 text-[13px] text-neutral-700">
+              Tip: click a circle to read, in a sentence, how it connects to this
+              topic.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* 4. THE WORK BEHIND THE RATING */}
+      <div
+        className="mt-4 rounded-xl p-3"
+        style={{ backgroundColor: WHITE, ...border }}
+      >
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[14px] font-black">The work behind this rating</div>
+          <span className="text-[12px] text-neutral-700">
+            Hover a card to light up its path on the map
+          </span>
+        </div>
+        {builds.length === 0 ? (
+          <p className="text-[13px] leading-5 text-neutral-800">
+            No piece of work is linked to this topic in the graph. That means
+            nothing was connected, not that nothing was built.
+          </p>
+        ) : (
+          <div className="grid gap-2 md:grid-cols-2">
+            {builds.map((b) => (
+              <div
+                key={asString(b.id)}
+                onMouseEnter={() => setLit(new Set(asArray<string>(b.routeIds)))}
+                onMouseLeave={() => setLit(new Set())}
+                className="rounded-lg p-2.5"
+                style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <Chip
+                    text={b.kind === "mission" ? "Practice mission" : "Real work"}
+                    background={b.kind === "mission" ? PURPLE : GREEN}
+                    color={WHITE}
+                  />
+                  <span className="text-[11px] font-bold text-neutral-700">
+                    {timeAgo(asString(b.createdAt))}
+                  </span>
+                </div>
+                <div className="mt-1 text-[13px] font-black leading-4">
+                  {asString(b.title)}
+                </div>
+                {b.commitSubject && (
+                  <div className="text-[12px] leading-4 text-neutral-700">
+                    {cut(asString(b.commitSubject), 90)}
+                  </div>
+                )}
+                <p className="mt-1 text-[12px] leading-4 text-neutral-800">
+                  Shows the skill “{asString(b.capability)}”
+                  {b.repository ? ` in ${asString(b.repository)}` : ""}.
+                </p>
+                {b.permalink && (
+                  <a
+                    href={asString(b.permalink)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-1 block text-[12px] font-bold underline"
+                  >
+                    View the code
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 5. HOW STRONG, IN QUESTIONS */}
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <div
+          className="rounded-xl p-3"
+          style={{ backgroundColor: WHITE, ...border }}
+        >
+          <div className="mb-2 text-[14px] font-black">Where it sits among your skills</div>
+          <div className="space-y-3">
+            {algos.map((a) => {
+              const meta = ALGO_PLAIN[asString(a.id)];
+              if (!meta) return null;
+              return (
+                <div key={asString(a.id)}>
+                  <div className="text-[13px] font-black">{meta.title}</div>
+                  <div className="text-[12px] text-neutral-700">
+                    {meta.question}
+                  </div>
+                  {a.norm != null && (
+                    <div
+                      className="mt-1 h-2 overflow-hidden rounded-full"
+                      style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
+                    >
+                      <div
+                        className="h-full"
+                        style={{
+                          width: `${num(a.norm) * 100}%`,
+                          backgroundColor: SKY,
+                        }}
+                      />
+                    </div>
+                  )}
+                  <p className="mt-0.5 text-[13px] leading-5 text-neutral-900">
+                    {meta.read(a, data)}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+          <p className="mt-2 text-[12px] leading-4 text-neutral-700">
+            These describe how topics connect. They do not prove skill on their
+            own.
+          </p>
+        </div>
+
+        <div
+          className="rounded-xl p-3"
+          style={{ backgroundColor: WHITE, ...border }}
+        >
+          <div className="mb-1 flex items-center justify-between text-[14px] font-black">
+            <span>The rating</span>
+            <span className="text-[13px]">{num(score.score)} / 100</span>
+          </div>
+          <div
+            className="h-3 overflow-hidden rounded-full"
+            style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
+          >
+            <div
+              className="h-full"
+              style={{
+                width: `${num(score.score)}%`,
+                backgroundColor: LEVEL_COLOR[asString(score.level)] ?? SKY,
+              }}
+            />
+          </div>
+          <p className="mt-2 text-[13px] leading-5 text-neutral-900">
+            First, Pathway counted the activity in your code and got{" "}
+            <b>{num(score.baseline)}</b>. Then the agent read the actual code
+            and{" "}
+            {num(score.adjustment) === 0
+              ? "agreed with that number"
+              : `moved it ${num(score.adjustment) > 0 ? "up" : "down"} by ${Math.abs(num(score.adjustment))}`}
+            . Confidence is <b>{asString(score.confidence)}</b>
+            {asString(score.confidence) === "low"
+              ? ", because there is not much evidence yet."
+              : "."}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {backedBy.length ? (
+              backedBy.map((b) => (
+                <Chip
+                  key={asString(b.kind)}
+                  text={`${num(b.count)} ${humanize(asString(b.kind)).toLowerCase()} cited`}
+                  background={LAVENDER}
+                />
+              ))
+            ) : (
+              <span className="text-[12px] text-neutral-700">
+                No specific code is cited for this rating.
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 6. ENGINEERS ONLY */}
+      <div className="mt-4">
+        <Fold title="Technical details (for engineers)">
+          <p className="mb-2 text-[12px] leading-4 text-neutral-700">
+            Everything above is computed from these FalkorDB queries and
+            algorithms. You do not need this to understand the rating.
+          </p>
+          <div className="space-y-2">
+            {algos.map((a) => (
+              <div
+                key={asString(a.id)}
+                className="rounded-lg p-2 text-[12px]"
+                style={{ backgroundColor: WHITE, border: `1.5px solid ${INK}` }}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 font-black">
+                  <span>{asString(a.name)}</span>
+                  <span className="text-neutral-700">
+                    {a.value == null
+                      ? "–"
+                      : fix(a.value, a.id === "traversal" ? 0 : 4)}
+                    {a.position ? ` · #${num(a.position)} of ${num(a.of)}` : ""}
+                  </span>
+                </div>
+                <div className="text-neutral-800">{asString(a.reading)}</div>
+                <code className="block break-all text-[11px] text-neutral-600">
+                  {asString(a.call)}
+                </code>
+              </div>
+            ))}
+            {trace.map((t, i) => (
+              <div
+                key={i}
+                className="rounded-lg p-2 text-[12px]"
+                style={{ backgroundColor: WHITE, border: `1.5px solid ${INK}` }}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2 font-black">
+                  <span>{asString(t.name)}</span>
+                  <span className="text-neutral-700">
+                    {num(t.rows)} rows · {num(t.ms)} ms
+                  </span>
+                </div>
+                <code className="block break-all text-[11px] text-neutral-700">
+                  {asString(t.pattern)}
+                </code>
+                <span className="text-[11px] font-bold text-neutral-600">
+                  {asString(t.algorithm)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Fold>
+      </div>
+    </section>
   );
 }

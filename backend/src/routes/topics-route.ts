@@ -5,6 +5,7 @@ import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
 import {
   analyzeDeveloperDepth,
   createDepthLlmFromEnv,
+  explainTopicEvidence,
   reanalyzeTopicDepth,
 } from "../agents/depth-analyzer-agent.js";
 import {
@@ -16,6 +17,7 @@ import {
   findTopicsByText,
   readDeveloperTopicProfile,
   readTopicDepthDetail,
+  readTopicGraphEvidence,
   readTopicPathDetailed,
   slugify,
   type Authenticity,
@@ -398,6 +400,16 @@ const ENDPOINTS = [
     purpose: "Shortest path with typed hops",
   },
   { method: "GET", path: "/api/topics/:slug", purpose: "Topic detail" },
+  {
+    method: "GET",
+    path: "/api/topics/:slug/graph",
+    purpose: "Evidence map with plain-language story",
+  },
+  {
+    method: "POST",
+    path: "/api/topics/:slug/explain",
+    purpose: "Agent explains the evidence in plain English",
+  },
   { method: "POST", path: "/api/topics/analyze", purpose: "Start analysis" },
   { method: "GET", path: "/api/topics/analyze/status", purpose: "Job status" },
   {
@@ -1783,6 +1795,268 @@ function launch(
 }
 
 // ============================================================
+// PLAIN-LANGUAGE STORY (graph facts -> words a normal user understands)
+// ============================================================
+
+interface PlainStory {
+  headline: string;
+  summary: string;
+  steps: Array<{ title: string; text: string }>;
+  meaning: string;
+  caveat: string;
+  followups: string[];
+}
+
+const asRows = (v: unknown): Row[] => (Array.isArray(v) ? (v as Row[]) : []);
+
+const joinList = (items: string[], max = 3): string => {
+  const a = uniq(items.filter(Boolean)).slice(0, max);
+  if (a.length <= 1) return a.join("");
+  return `${a.slice(0, -1).join(", ")} and ${a[a.length - 1]}`;
+};
+
+const cardScore = (d: Dossier, slug: string): number =>
+  d.bySlug.get(slug)?.score ?? 0;
+
+/** Everything the explainer (LLM or deterministic) is allowed to talk about. */
+function plainFacts(card: TopicCard, ev: Row, algorithms: Row[]): Row {
+  const nodes = asRows(ev.nodes);
+  const edges = asRows(ev.edges);
+  const builds = asRows(ev.builds);
+  const topicNode = `topic:${card.slug}`;
+  const label = (id: string) =>
+    str(nodes.find((n) => n.id === id)?.label) || id;
+  const rank = (id: string) => {
+    const a = algorithms.find((x) => x.id === id);
+    return a?.position ? { position: num(a.position), of: num(a.of) } : null;
+  };
+
+  const skills = nodes
+    .filter((n) => n.kind === "capability")
+    .map((n) => str(n.label));
+  const projects = nodes
+    .filter((n) => n.kind === "repository")
+    .map((n) => str(n.label));
+  const buildsOn = edges
+    .filter((e) => e.type === "BUILDS_ON" && e.source === topicNode)
+    .map((e) => label(str(e.target)));
+  const usedBy = edges
+    .filter((e) => e.type === "BUILDS_ON" && e.target === topicNode)
+    .map((e) => label(str(e.source)));
+  const related = edges
+    .filter((e) => e.type === "RELATED_TOPIC" && e.source === topicNode)
+    .map((e) => label(str(e.target)));
+
+  const limitations: string[] = [];
+  if (card.confidence === "low")
+    limitations.push("Confidence is low because there is little evidence.");
+  if (card.authenticity !== "genuine_implementation")
+    limitations.push(
+      "The code looks more like using this than building it from scratch.",
+    );
+  if (card.evidence.commits <= 1 && card.evidence.files > 0)
+    limitations.push("Only one change to the code touches this topic.");
+  if (num(ev.buildTotals?.missions) === 0)
+    limitations.push("No completed practice mission is linked to it.");
+  if (builds.length === 0)
+    limitations.push("No real piece of work is linked to it in the graph.");
+
+  return {
+    topic: card.name,
+    area: card.domainLabel,
+    level: card.levelLabel,
+    levelMeaning: LEVEL_META[card.level].meaning,
+    score: card.score,
+    confidence: card.confidence,
+    authenticity: card.authenticityLabel,
+    filesChecked: card.evidence.files,
+    changesChecked: card.evidence.commits,
+    projectsInvolved: card.evidence.repos,
+    realWorkLinked: builds.length,
+    missionsLinked: num(ev.buildTotals?.missions),
+    examples: builds.slice(0, 4).map((b) => ({
+      title: str(b.title),
+      project: str(b.repository),
+      type: b.kind === "mission" ? "practice mission" : "real work",
+    })),
+    skillsCovered: uniq(skills).slice(0, 6),
+    projects: uniq(projects).slice(0, 5),
+    buildsOn: uniq(buildsOn).slice(0, 5),
+    otherTopicsBuiltOnIt: uniq(usedBy).slice(0, 5),
+    usedTogetherWith: uniq(related).slice(0, 5),
+    relatedGroupSize: num(ev.metrics?.clusterSize),
+    foundationRank: rank("pagerank"),
+    connectorRank: rank("betweenness"),
+    limitations: limitations.slice(0, 4),
+  };
+}
+
+/** Always-available story. Shown instantly and used when the model is down. */
+function plainStory(f: Row): PlainStory {
+  const skills = f.skillsCovered as string[];
+  const buildsOn = f.buildsOn as string[];
+  const usedBy = f.otherTopicsBuiltOnIt as string[];
+  const related = f.usedTogetherWith as string[];
+  const projects = f.projects as string[];
+  const examples = f.examples as Array<{ title: string; project: string }>;
+  const work = num(f.realWorkLinked);
+
+  const built =
+    f.authenticity === "Genuine implementation"
+      ? "The code suggests you built this yourself."
+      : "The code suggests you use this well, but did not build the mechanism yourself.";
+
+  const found = work
+    ? `${work} piece${work === 1 ? "" : "s"} of real work ${work === 1 ? "is" : "are"} linked to this topic${examples[0] ? `, for example “${examples[0].title}”` : ""}.`
+    : "No piece of real work is linked to this topic yet.";
+
+  const fit: string[] = [];
+  if (buildsOn.length) fit.push(`It builds on ${joinList(buildsOn)}.`);
+  if (usedBy.length) fit.push(`${joinList(usedBy)} build on it.`);
+  if (related.length) fit.push(`It is often used with ${joinList(related)}.`);
+
+  const files = num(f.filesChecked);
+  const projectCount = num(f.projectsInvolved);
+
+  return {
+    headline: `${f.topic}: ${String(f.level).toLowerCase()} level, ${f.confidence} confidence`,
+    summary: `Pathway checked ${files} file${files === 1 ? "" : "s"} across ${f.changesChecked} change${num(f.changesChecked) === 1 ? "" : "s"} in ${projectCount} project${projectCount === 1 ? "" : "s"} and rated your ${f.topic} skill as ${String(f.level).toLowerCase()}. ${built}`,
+    steps: [
+      { title: "What we found", text: found },
+      {
+        title: "Skills it covers",
+        text: skills.length
+          ? `This topic is part of ${joinList(skills)}.`
+          : "No wider skill is linked to this topic yet.",
+      },
+      {
+        title: "Where it fits",
+        text: fit.length
+          ? fit.join(" ")
+          : "It is not yet connected to other topics in your graph.",
+      },
+      {
+        title: "Where the work lives",
+        text: projects.length
+          ? `The work sits in ${joinList(projects)}.`
+          : "No project is linked to the work yet.",
+      },
+    ],
+    meaning: String(f.levelMeaning),
+    caveat:
+      (f.limitations as string[])[0] ??
+      "The graph shows activity and connections, not a test of ability.",
+    followups: [
+      `What would take my ${f.topic} to the next level?`,
+      `Show me the work behind ${f.topic}`,
+      `What does ${f.topic} build on?`,
+    ],
+  };
+}
+
+async function buildGraphPayload(d: Dossier, slug: string) {
+  const card = d.bySlug.get(slug);
+  if (!card) return null;
+  const graph = await getGraphForDeveloper(d.developerId);
+  const ev = await readTopicGraphEvidence(graph, d.developerId, slug);
+  if (!ev) return null;
+
+  const posOf = (pick: (c: TopicCard) => number | null) => {
+    const ranked = d.cards
+      .map((c) => ({ slug: c.slug, v: pick(c) }))
+      .filter((x): x is { slug: string; v: number } => x.v != null)
+      .sort((a, b) => b.v - a.v);
+    const i = ranked.findIndex((x) => x.slug === slug);
+    return { position: i < 0 ? null : i + 1, of: ranked.length };
+  };
+
+  const algorithms = [
+    {
+      id: "pagerank",
+      name: "PageRank",
+      call: "CALL algo.pageRank('Topic', 'BUILDS_ON')",
+      property: "Topic.foundation_rank",
+      value: card.graph.foundationRank,
+      norm: card.graph.foundationRankNorm,
+      ...posOf((c) => c.graph.foundationRank),
+      reading: `${ev.reach.unlocks} topic(s) build on this one within 2 hops.`,
+    },
+    {
+      id: "betweenness",
+      name: "Betweenness centrality",
+      call: "CALL algo.betweenness({nodeLabels:['Topic'], relationshipTypes:['BUILDS_ON','RELATED_TOPIC']})",
+      property: "Topic.bridge_score",
+      value: card.graph.bridgeScore,
+      norm: card.graph.bridgeScoreNorm,
+      ...posOf((c) => c.graph.bridgeScore),
+      reading:
+        "How often this topic sits on a shortest path between two others.",
+    },
+    {
+      id: "label_propagation",
+      name: "Label propagation",
+      call: "CALL algo.labelPropagation({relationshipTypes:['RELATED_TOPIC']})",
+      property: "Topic.cluster_id",
+      value: ev.metrics.clusterId,
+      norm: null,
+      position: null,
+      of: ev.metrics.clusterSize,
+      reading:
+        ev.metrics.clusterId == null
+          ? "Not in a community (no RELATED_TOPIC edges)."
+          : `Community ${ev.metrics.clusterId} with ${ev.metrics.clusterSize} topics.`,
+    },
+    {
+      id: "wcc",
+      name: "Weakly connected components",
+      call: "CALL algo.WCC({relationshipTypes:['BUILDS_ON','RELATED_TOPIC']})",
+      property: "Topic.component_id",
+      value: ev.metrics.componentId,
+      norm: null,
+      position: null,
+      of: ev.metrics.componentSize,
+      reading:
+        ev.metrics.componentId == null
+          ? "Not computed."
+          : `Component ${ev.metrics.componentId} with ${ev.metrics.componentSize} topics.`,
+    },
+    {
+      id: "traversal",
+      name: "Variable-length traversal",
+      call: "(t)-[:BUILDS_ON*1..3]->(f); (t)<-[:BUILDS_ON*1..2]-(u)",
+      property: null,
+      value: ev.reach.maxPrereqHop,
+      norm: null,
+      position: null,
+      of: 0,
+      reading: `${ev.reach.prerequisites} foundation(s) up to ${ev.reach.maxPrereqHop} hops down, ${ev.reach.unlocks} topic(s) above, ${ev.reach.related} related.`,
+    },
+  ];
+
+  const base = {
+    ...ev,
+    topic: mini(card),
+    algorithms,
+    score: {
+      score: card.score,
+      level: card.level,
+      baseline: card.baselineScore,
+      adjustment: card.scoreDelta,
+      confidence: card.confidence,
+      authenticity: card.authenticity,
+      evidence: card.evidence,
+      graphSupport: {
+        demonstrations: ev.buildTotals.missions + ev.buildTotals.builds,
+        missions: ev.buildTotals.missions,
+        citedEdges: ev.backedBy.reduce((n, b) => n + b.count, 0),
+      },
+    },
+  };
+  const facts = plainFacts(card, base as unknown as Row, algorithms);
+  return { ...base, plain: { facts, story: plainStory(facts) } };
+}
+
+// ============================================================
 // ROUTES
 // ============================================================
 
@@ -2252,6 +2526,79 @@ topicsRouter.post(
     } catch (err) {
       console.error("POST /api/topics/:slug/reanalyze failed:", err);
       return res.status(500).json({ error: "Failed to start re-analysis" });
+    }
+  },
+);
+
+// ---- evidence map: graph + plain-language story ----------------------------------
+
+topicsRouter.get(
+  "/api/topics/:slug/graph",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const slug = slugify(str(req.params.slug));
+    if (!SLUG.test(slug))
+      return res.status(400).json({ error: "Invalid topic slug." });
+    try {
+      const d = await dossierFor(req);
+      if (!d) return res.status(404).json(NOT_SYNCED);
+      const payload = await buildGraphPayload(d, slug);
+      if (!payload)
+        return res
+          .status(404)
+          .json({ error: `No assessment for topic "${slug}".` });
+      return res.json(payload);
+    } catch (err) {
+      console.error("GET /api/topics/:slug/graph failed:", err);
+      return res.status(500).json({ error: "Failed to build graph evidence" });
+    }
+  },
+);
+
+/**
+ * The agent: rewrites the graph facts as a plain-English explanation.
+ * Facts are rebuilt on the server (never trusted from the client).
+ * Falls back to the deterministic story if the model is unavailable.
+ */
+topicsRouter.post(
+  "/api/topics/:slug/explain",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const slug = slugify(str(req.params.slug));
+    if (!SLUG.test(slug))
+      return res.status(400).json({ error: "Invalid topic slug." });
+    try {
+      const d = await dossierFor(req);
+      if (!d) return res.status(404).json(NOT_SYNCED);
+      const payload = await buildGraphPayload(d, slug);
+      if (!payload)
+        return res
+          .status(404)
+          .json({ error: `No assessment for topic "${slug}".` });
+
+      const facts = payload.plain.facts;
+      let story: PlainStory = payload.plain.story;
+      let source: "llm" | "graph" = "graph";
+      try {
+        const llm = createDepthLlmFromEnv();
+        const cacheKey = `${d.developerId}:${slug}:${cardScore(d, slug)}:${JSON.stringify(facts).length}`;
+        const out = await explainTopicEvidence(llm, facts, cacheKey);
+        if (out) {
+          story = {
+            ...out,
+            followups: out.followups.length
+              ? out.followups
+              : payload.plain.story.followups,
+          };
+          source = "llm";
+        }
+      } catch (err) {
+        console.error("explain: model unavailable, using graph story:", err);
+      }
+      return res.json({ story, source });
+    } catch (err) {
+      console.error("POST /api/topics/:slug/explain failed:", err);
+      return res.status(500).json({ error: "Failed to explain topic" });
     }
   },
 );
