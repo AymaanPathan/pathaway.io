@@ -5,10 +5,10 @@ import {
   type EvidenceInput,
 } from "../graph/developer-knowledge-graph.js";
 
-export interface LearningFileChange extends EvidenceInput {}
-export interface LearningContext extends EvidenceContext {}
+export type LearningFileChange = EvidenceInput;
+export type LearningContext = EvidenceContext;
 
-/** Reuses Pathway's existing deterministic detector rules; no second taxonomy is created. */
+/** Reuses Pathway's deterministic detectors; this module does not define a second taxonomy. */
 export function extractEvidence(
   fileChanges: LearningFileChange[],
   contextByCommit: Map<string, LearningContext>,
@@ -20,7 +20,6 @@ export function extractEvidence(
     );
     if (!context) continue;
     for (const demonstration of extractDemonstrations(change, context)) {
-      // Stable detector IDs make repeat processing idempotent.
       byId.set(demonstration.id, demonstration);
     }
   }

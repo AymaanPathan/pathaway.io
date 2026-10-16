@@ -1,16 +1,28 @@
 import type { Graph } from "../db/falkordb.js";
 import type { Demonstration } from "../graph/developer-knowledge-graph.js";
 
-const depthRank: Record<string, number> = { usage: 1, implementation: 2, strong: 3 };
-const BATCH_SIZE = 250;
+const DEPTH_RANK: Record<string, number> = {
+  usage: 1,
+  implementation: 2,
+  strong: 3,
+};
+const BATCH_SIZE = 200;
+type Param = string | number | boolean | null;
 
-async function writeBatches(graph: Graph, query: string, rows: Record<string, string | number | boolean | null>[], extra: Record<string, unknown> = {}) {
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    await graph.query(query, { params: { ...extra, batch: rows.slice(i, i + BATCH_SIZE) } });
+async function writeBatches(
+  graph: Graph,
+  query: string,
+  rows: Array<Record<string, Param>>,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  for (let index = 0; index < rows.length; index += BATCH_SIZE) {
+    await graph.query(query, {
+      params: { ...extra, batch: rows.slice(index, index + BATCH_SIZE) },
+    });
   }
 }
 
-/** Idempotently upsert demonstrations and provenance edges using Pathway's existing schema. */
+/** Idempotently upsert detector-produced demonstrations and Pathway's existing evidence edges. */
 export async function upsertDemonstrations(
   graph: Graph,
   developerId: string,
@@ -18,7 +30,31 @@ export async function upsertDemonstrations(
   buildId: string,
 ): Promise<number> {
   if (!demonstrations.length) return 0;
-  await writeBatches(graph, `
+
+  const nodeRows = demonstrations.map((demo) => ({
+    id: demo.id,
+    rule_id: demo.ruleId,
+    technique: demo.technique,
+    summary: demo.summary,
+    modifiers: demo.modifiers.join(" | "),
+    depth: demo.depth,
+    depth_rank: DEPTH_RANK[demo.depth] ?? 1,
+    commit_sha: demo.commitSha,
+    file_change_id: demo.fileChangeId,
+    repository_id: demo.repositoryId,
+    path: demo.path,
+    language: demo.language,
+    start_line: demo.startLine,
+    end_line: demo.endLine,
+    snippet: demo.snippet,
+    permalink: demo.permalink,
+    change_intent: demo.intent,
+    commit_subject: demo.commitSubject,
+    created_at: demo.createdAt,
+  }));
+  await writeBatches(
+    graph,
+    `
     UNWIND $batch AS item
     MERGE (x:Demonstration {id: item.id})
     SET x.rule_id = item.rule_id, x.technique = item.technique,
@@ -31,28 +67,63 @@ export async function upsertDemonstrations(
         x.permalink = item.permalink, x.change_intent = item.change_intent,
         x.commit_subject = item.commit_subject, x.created_at = item.created_at,
         x.developer_id = $developer_id, x.build_id = $build_id
-    RETURN count(x) AS n`, demonstrations.map((d) => ({
-      id: d.id, rule_id: d.ruleId, technique: d.technique, summary: d.summary,
-      modifiers: d.modifiers.join(" | "), depth: d.depth, depth_rank: depthRank[d.depth] ?? 1,
-      commit_sha: d.commitSha, file_change_id: d.fileChangeId, repository_id: d.repositoryId,
-      path: d.path, language: d.language, start_line: d.startLine, end_line: d.endLine,
-      snippet: d.snippet, permalink: d.permalink, change_intent: d.intent,
-      commit_subject: d.commitSubject, created_at: d.createdAt,
-    })), { developer_id: developerId, build_id: buildId });
+    RETURN count(x) AS n`,
+    nodeRows,
+    { developer_id: developerId, build_id: buildId },
+  );
 
-  const rows = demonstrations.map((d) => ({ id: d.id, capability_id: d.capabilityId,
-    file_change_id: d.fileChangeId, repository_id: d.repositoryId, layer_id: d.layerId }));
-  const edges: Array<{ query: string; label: string }> = [
-    { label: "developer evidence", query: `UNWIND $batch AS item MATCH (d:Developer {id:$developer_id}) MATCH (x:Demonstration {id:item.id}) MERGE (d)-[:DEMONSTRATED]->(x) RETURN count(x) AS n` },
-    { label: "capability evidence", query: `UNWIND $batch AS item MATCH (x:Demonstration {id:item.id}) MATCH (c:Capability {id:item.capability_id}) MERGE (x)-[:OF_CAPABILITY]->(c) RETURN count(x) AS n` },
-    { label: "FileChange provenance", query: `UNWIND $batch AS item MATCH (x:Demonstration {id:item.id}) MATCH (fc:FileChange {id:item.file_change_id}) MERGE (x)-[:EVIDENCED_BY]->(fc) MERGE (fc)-[:PRODUCED]->(x) RETURN count(x) AS n` },
-    { label: "repository provenance", query: `UNWIND $batch AS item MATCH (x:Demonstration {id:item.id}) MATCH (r:Repository {id:item.repository_id}) MERGE (x)-[:IN_REPOSITORY]->(r) RETURN count(x) AS n` },
-    { label: "engineering context", query: `UNWIND $batch AS item WITH item WHERE item.layer_id <> '' MATCH (x:Demonstration {id:item.id}) MATCH (ctx:EngineeringContext {id:item.layer_id}) MERGE (x)-[:IN_CONTEXT]->(ctx) RETURN count(x) AS n` },
+  const edgeRows = demonstrations.map((demo) => ({
+    id: demo.id,
+    capability_id: demo.capabilityId,
+    file_change_id: demo.fileChangeId,
+    repository_id: demo.repositoryId,
+    layer_id: demo.layerId || "",
+  }));
+  const edges = [
+    `UNWIND $batch AS item MATCH (d:Developer {id:$developer_id}) MATCH (x:Demonstration {id:item.id}) MERGE (d)-[:DEMONSTRATED]->(x) RETURN count(x) AS n`,
+    `UNWIND $batch AS item MATCH (x:Demonstration {id:item.id}) MATCH (c:Capability {id:item.capability_id}) MERGE (x)-[:OF_CAPABILITY]->(c) RETURN count(x) AS n`,
+    `UNWIND $batch AS item MATCH (x:Demonstration {id:item.id}) MATCH (fc:FileChange {id:item.file_change_id}) MERGE (x)-[:EVIDENCED_BY]->(fc) MERGE (fc)-[:PRODUCED]->(x) RETURN count(x) AS n`,
+    `UNWIND $batch AS item MATCH (x:Demonstration {id:item.id}) MATCH (r:Repository {id:item.repository_id}) MERGE (x)-[:IN_REPOSITORY]->(r) RETURN count(x) AS n`,
   ];
-  for (const edge of edges) await writeBatches(graph, edge.query, rows, { developer_id: developerId });
+  for (const query of edges)
+    await writeBatches(graph, query, edgeRows, { developer_id: developerId });
 
-  const skillRows = demonstrations.flatMap((d) => d.usesSkillIds.map((skill_id) => ({ id: d.id, skill_id })));
-  if (skillRows.length) await writeBatches(graph,
-    `UNWIND $batch AS item MATCH (x:Demonstration {id:item.id}) MATCH (s:Skill {id:item.skill_id}) MERGE (x)-[:USES]->(s) RETURN count(x) AS n`, skillRows);
+  const contextRows = edgeRows.filter((row) => row.layer_id !== "");
+  if (contextRows.length) {
+    await writeBatches(
+      graph,
+      `UNWIND $batch AS item MATCH (x:Demonstration {id:item.id}) MATCH (ctx:EngineeringContext {id:item.layer_id}) MERGE (x)-[:IN_CONTEXT]->(ctx) RETURN count(x) AS n`,
+      contextRows,
+    );
+  }
+  const skillRows = demonstrations.flatMap((demo) =>
+    demo.usesSkillIds.map((skill_id) => ({ id: demo.id, skill_id })),
+  );
+  if (skillRows.length) {
+    await writeBatches(
+      graph,
+      `UNWIND $batch AS item MATCH (x:Demonstration {id:item.id}) MATCH (s:Skill {id:item.skill_id}) MERGE (x)-[:USES]->(s) RETURN count(x) AS n`,
+      skillRows,
+    );
+  }
   return demonstrations.length;
+}
+
+/** Existing IDs are already persisted; do not spend LLM calls reviewing them on every overlapping sync. */
+export async function findExistingDemonstrationIds(
+  graph: Graph,
+  ids: string[],
+): Promise<Set<string>> {
+  const existing = new Set<string>();
+  for (let index = 0; index < ids.length; index += BATCH_SIZE) {
+    const batch = ids.slice(index, index + BATCH_SIZE);
+    const result = await graph.query(
+      `MATCH (x:Demonstration) WHERE x.id IN $ids RETURN x.id AS id`,
+      { params: { ids: batch } },
+    );
+    for (const row of (result.data ?? []) as Array<{ id?: unknown }>) {
+      if (row.id != null) existing.add(String(row.id));
+    }
+  }
+  return existing;
 }

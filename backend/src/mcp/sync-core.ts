@@ -13,6 +13,8 @@ import type {
   RepoContext,
   SyncStats,
 } from "./sync-types.js";
+import { runLearningPipeline } from "../learning/learning-pipeline.js";
+import { cerebrasLearningReasoner } from "../learning/learning-agent.js";
 
 import {
   ANALYSIS_VERSION,
@@ -214,7 +216,6 @@ export class GithubSync {
   get retries(): number {
     return this.retryCount;
   }
-
 
   private async getDeveloperInfo(): Promise<AnyObject> {
     return this.callGitHub("get_me", {});
@@ -490,7 +491,6 @@ export class GithubSync {
     }
   }
 
-
   private async getRepoContext(repo: GitHubRepository): Promise<RepoContext> {
     const branch = repo.default_branch || "main";
 
@@ -669,7 +669,6 @@ export class GithubSync {
     );
   }
 
-
   private async getLastSyncedAtBatch(
     repositoryIds: string[],
   ): Promise<Map<string, string>> {
@@ -731,7 +730,6 @@ export class GithubSync {
       },
     );
   }
-
 
   private async getIncompleteCommitsBatch(
     repositoryIds: string[],
@@ -819,7 +817,6 @@ export class GithubSync {
     }
   }
 
-
   private async getProcessedCommitIds(
     commits: Array<{ commit: GitHubCommit; repo: GitHubRepository }>,
   ): Promise<Set<string>> {
@@ -888,7 +885,6 @@ export class GithubSync {
       return new Set();
     }
   }
-
 
   private async processCommit(
     commit: GitHubCommit,
@@ -1113,7 +1109,6 @@ export class GithubSync {
     };
   }
 
-
   private async getPullRequestDetail(
     repo: GitHubRepository,
     pr: GitHubPullRequest,
@@ -1257,7 +1252,6 @@ export class GithubSync {
       );
     }
   }
-
 
   private async searchIssuesPaged(
     query: string,
@@ -1469,7 +1463,6 @@ export class GithubSync {
     return { issues, reviewed };
   }
 
-
   private async storeDeveloper(user: AnyObject): Promise<void> {
     const details: AnyObject = user.details ?? {};
 
@@ -1510,7 +1503,6 @@ export class GithubSync {
       },
     );
   }
-
 
   private async storeRepositories(
     repositories: GitHubRepository[],
@@ -1584,7 +1576,6 @@ export class GithubSync {
     }
   }
 
-
   private async storePullRequests(
     records: Array<{
       pr: GitHubPullRequest;
@@ -1657,7 +1648,6 @@ export class GithubSync {
     }
   }
 
-
   private async storePRFiles(
     records: Array<{
       file: AnyObject;
@@ -1714,7 +1704,6 @@ export class GithubSync {
       );
     }
   }
-
 
   private async storeCommitMetadata(commits: GitHubCommit[], repoId: string) {
     if (!commits.length) return;
@@ -1830,7 +1819,6 @@ export class GithubSync {
     }
   }
 
-
   private async storeCommitEnrichment(rows: CommitEnrichment[]): Promise<void> {
     for (const batch of chunkArray(rows, DB_BATCH_SIZE)) {
       await this.graph.query(
@@ -1862,7 +1850,6 @@ export class GithubSync {
       );
     }
   }
-
 
   private async storeFileChanges(changes: FileChangeRecord[]): Promise<void> {
     if (changes.length === 0) {
@@ -1963,7 +1950,6 @@ export class GithubSync {
     }
   }
 
-
   private async pruneOutsideHistoryWindow(): Promise<void> {
     const cutoff = new Date(getHistoryCutoff()).toISOString();
     const params = { developer_id: this.developerId, cutoff };
@@ -2020,7 +2006,6 @@ export class GithubSync {
       { params },
     );
   }
-
 
   private async pruneExcludedRepositories(): Promise<void> {
     const excluded = Array.from(EXCLUDED_REPOS);
@@ -2116,7 +2101,6 @@ export class GithubSync {
     }
   }
 
-
   async run(): Promise<SyncStats> {
     const startedAt = Date.now();
 
@@ -2177,7 +2161,6 @@ export class GithubSync {
       dbRelationships: 0,
     };
 
-
     const repositoryIds = repositories.map((repo) => String(repo.id));
 
     const [lastSyncedAtByRepo, incompleteByRepo] = await Promise.all([
@@ -2186,7 +2169,6 @@ export class GithubSync {
     ]);
 
     const overlapMs = SYNC_OVERLAP_DAYS * 24 * 60 * 60 * 1000;
-
 
     const repositoryResults = await mapWithConcurrency(
       repositories,
@@ -2329,7 +2311,6 @@ export class GithubSync {
 
     await this.pruneInactiveRepositoryLinks();
 
-
     await mapWithConcurrency(
       activeResults,
       async ({ repo, allCommits }) => {
@@ -2337,7 +2318,6 @@ export class GithubSync {
       },
       REPO_CONCURRENCY,
     );
-
 
     const allPRs = activeResults.flatMap(({ repo, prs }) =>
       prs.map((pr) => ({ repo, pr })),
@@ -2397,7 +2377,6 @@ export class GithubSync {
       await this.storePRFiles(prFileResults.flat());
     }
 
-
     if (!this.rateLimited) {
       const activity = await this.syncActivity();
 
@@ -2406,7 +2385,6 @@ export class GithubSync {
 
       this.onProgress("activity_synced", activity);
     }
-
 
     const commitMap = new Map<
       string,
@@ -2433,7 +2411,6 @@ export class GithubSync {
 
     let uniqueCommits = Array.from(commitMap.values());
 
-
     if (uniqueCommits.length > MAX_INITIAL_COMMITS_TOTAL) {
       const droppedCount = uniqueCommits.length - MAX_INITIAL_COMMITS_TOTAL;
 
@@ -2456,7 +2433,6 @@ export class GithubSync {
     });
 
     const processedCommitIds = await this.getProcessedCommitIds(uniqueCommits);
-
 
     let completed = 0;
 
@@ -2564,7 +2540,6 @@ export class GithubSync {
       }
     }
 
-
     this.onProgress("writing", {
       message: "Writing commits and code evidence to FalkorDB",
     });
@@ -2577,6 +2552,50 @@ export class GithubSync {
         .filter((e): e is CommitEnrichment => e !== null),
     );
 
+    // Learn only from the file changes in this sync batch. Existing demonstration IDs
+    // are skipped by the pipeline, preventing repeated LLM calls for overlap commits.
+    try {
+      const contextByCommit = new Map<
+        string,
+        { repositoryFullName: string; commitMessage: string }
+      >();
+      for (const item of commitResults) {
+        const repositoryId = String(item.repo.id);
+        const commitSha = safeString(item.commit.sha);
+        if (!repositoryId || !commitSha) continue;
+        contextByCommit.set(`${repositoryId}:${commitSha}`, {
+          repositoryFullName: safeString(item.repo.full_name),
+          commitMessage: safeString(item.commit.commit?.message),
+        });
+      }
+
+      const learningResult = await runLearningPipeline({
+        graph: this.graph,
+        developerId: this.developerId,
+        fileChanges: allFileChanges.map((change) => ({
+          id: change.id,
+          path: change.path,
+          language: change.language,
+          patch: change.patch,
+          addedCode: change.added_code,
+          commitSha: change.commit_sha,
+          repositoryId: change.repository_id,
+          createdAt: change.created_at,
+        })),
+        contextByCommit,
+        reasoner: cerebrasLearningReasoner,
+        buildId: `learning-${this.developerId}-${Date.now()}`,
+      });
+      this.onProgress(
+        "learning_complete",
+        learningResult as unknown as Record<string, unknown>,
+      );
+    } catch (error) {
+      // Learning is an enrichment stage: a Cerebras outage must not invalidate a successful GitHub sync.
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("[learning-pipeline] Failed after GitHub sync:", message);
+      this.onProgress("learning_failed", { message });
+    }
 
     const syncTimestamp = new Date().toISOString();
 

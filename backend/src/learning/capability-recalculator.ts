@@ -4,7 +4,7 @@ import {
   type Demonstration,
 } from "../graph/developer-knowledge-graph.js";
 
-/** Recompute capability roll-ups from the complete valid evidence set, not only this sync batch. */
+/** Recompute roll-ups from all stored demonstrations, not just this sync batch. */
 export async function recalculateCapabilities(
   graph: Graph,
   developerId: string,
@@ -17,18 +17,17 @@ export async function recalculateCapabilities(
       x.commit_sha AS commitSha, x.created_at AS createdAt`,
     { params: { developer_id: developerId } },
   );
-  const rows = (result.data ?? []) as any[];
-  const demos = rows.map((r) => ({
-    id: String(r.id ?? ""),
-    capabilityId: String(r.capabilityId ?? ""),
-    technique: String(r.technique ?? ""),
-    depth: (r.depth || "usage") as Demonstration["depth"],
-    repositoryId: String(r.repositoryId ?? ""),
-    commitSha: String(r.commitSha ?? ""),
-    createdAt: String(r.createdAt ?? ""),
+  const demos = ((result.data ?? []) as any[]).map((row) => ({
+    id: String(row.id ?? ""),
+    capabilityId: String(row.capabilityId ?? ""),
+    technique: String(row.technique ?? ""),
+    depth: (row.depth || "usage") as Demonstration["depth"],
+    repositoryId: String(row.repositoryId ?? ""),
+    commitSha: String(row.commitSha ?? ""),
+    createdAt: String(row.createdAt ?? ""),
   })) as Demonstration[];
   const rollups = rollUpDemonstrations(demos);
-
+  const updatedAt = new Date().toISOString();
   for (const item of rollups) {
     await graph.query(
       `
@@ -38,7 +37,8 @@ export async function recalculateCapabilities(
           r.evidence_count=$evidence_count, r.commit_count=$commit_count,
           r.repo_count=$repo_count, r.technique_count=$technique_count,
           r.active_days=$active_days, r.first_seen=$first_seen,
-          r.last_seen=$last_seen, r.techniques_json=$techniques_json
+          r.last_seen=$last_seen, r.techniques_json=$techniques_json,
+          r.updated_at=$updated_at
       RETURN c.id AS id`,
       {
         params: {
@@ -55,6 +55,7 @@ export async function recalculateCapabilities(
           first_seen: item.firstSeen,
           last_seen: item.lastSeen,
           techniques_json: item.techniquesJson,
+          updated_at: updatedAt,
         },
       },
     );
