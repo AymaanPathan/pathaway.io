@@ -35,7 +35,7 @@ import {
   type TraceEvent,
 } from "../compoenents/ChatBlock";
 import DepthProfile from "../compoenents/DepthProfile";
-
+import InsightAnswer from "../compoenents/InsightAnswer";
 /* ========================================================================== */
 /* DESIGN TOKENS (shared with the landing page)                               */
 /* ========================================================================== */
@@ -1313,11 +1313,11 @@ type ChatMsg = {
   meta?: Obj;
   pending?: boolean;
   steps?: LiveStep[];
-  // NEW
   investigation?: Obj;
   findings?: Obj[];
   graphPaths?: Obj[];
   nextActions?: Obj[];
+  insight?: Obj;
 };
 type ChatCtx = { nodes: Obj[]; sel: string | null; detail: Obj | null };
 
@@ -1905,24 +1905,25 @@ export default function OverviewPage() {
           (b): b is Obj & { type: string } => typeof b.type === "string",
         );
         if (answer || blocks.length)
-         reply = {
-           text: answer,
-           question: text,
-           blocks,
-           followups: asArray<string>(r.data.followups).slice(0, 3),
-           tools: asArray<Obj>(r.data.tools),
-           mode: asString(r.data.meta?.mode),
-           meta: (r.data.meta ?? {}) as Obj,
-           slugs: asArray<string>(r.data.topics).filter(Boolean),
-           local: false,
-           // NEW
-           investigation: (r.data.investigation ?? undefined) as
-             | Obj
-             | undefined,
-           findings: asArray<Obj>(r.data.findings),
-           graphPaths: asArray<Obj>(r.data.graphPaths),
-           nextActions: asArray<Obj>(r.data.nextActions),
-         };
+          reply = {
+            text: answer,
+            question: text,
+            blocks,
+            followups: asArray<string>(r.data.followups).slice(0, 3),
+            tools: asArray<Obj>(r.data.tools),
+            mode: asString(r.data.meta?.mode),
+            meta: (r.data.meta ?? {}) as Obj,
+            slugs: asArray<string>(r.data.topics).filter(Boolean),
+            local: false,
+            // NEW
+            investigation: (r.data.investigation ?? undefined) as
+              | Obj
+              | undefined,
+            findings: asArray<Obj>(r.data.findings),
+            graphPaths: asArray<Obj>(r.data.graphPaths),
+            nextActions: asArray<Obj>(r.data.nextActions),
+            insight: (r.data.insight ?? undefined) as Obj | undefined,
+          };
       } else if (r.status === 429) {
         reply = {
           text: asString(r.data.error, "Slow down a little."),
@@ -2462,6 +2463,14 @@ export default function OverviewPage() {
                           >
                             {m.text}
                           </div>
+                        ) : m.insight?.diagnosis && !m.pending ? (
+                          /* NEW: insight-first answer */
+                          <InsightAnswer
+                            m={m}
+                            onPick={pick}
+                            onFollow={(q) => void send(q)}
+                            onOpen={() => setStage(m)}
+                          />
                         ) : m.blocks ||
                           m.pending ||
                           m.tools ||

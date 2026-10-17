@@ -1,10 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { Router, type Response } from "express";
 import { getGraphForDeveloper } from "../db/falkordb.js";
 import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
-import {
-  createNvidiaLlm,
-  type DepthLlm,
-} from "../agents/depth-analyzer-agent.js";
+import { createCerebrasChatLlm, type ChatLlm } from "../ai-models/cerebras.js";
 import {
   answerTopicQuestion,
   type ChatTurn,
@@ -33,15 +31,12 @@ function limited(developerId: string): boolean {
   return false;
 }
 
-/** Short timeout + one retry: chat must feel interactive. null = rules mode. */
-let llm: DepthLlm | null | undefined;
-function chatLlm(): DepthLlm | null {
+/** Cerebras gpt-oss-120b for chat. null = rules mode (answers still come from the graph). */
+let llm: ChatLlm | null | undefined;
+function chatLlm(): ChatLlm | null {
   if (llm !== undefined) return llm;
   try {
-    llm = createNvidiaLlm({
-      timeoutMs: Number(process.env.TOPIC_CHAT_TIMEOUT_MS) || 30_000,
-      maxRetries: Number(process.env.TOPIC_CHAT_RETRIES) || 1,
-    });
+    llm = createCerebrasChatLlm();
   } catch (error) {
     console.warn(
       "[topics-chat] LLM unavailable, using rules mode:",

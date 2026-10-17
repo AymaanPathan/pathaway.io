@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { Graph } from "../db/falkordb.js";
-import type { DepthLlm } from "./depth-analyzer-agent.js";
+import type { ChatLlm } from "../ai-models/cerebras.js";
 import {
   ALL_TOOLS,
   TOOL_BY_NAME,
@@ -74,7 +74,7 @@ export interface TopicChatInput {
 
   selectedTopic?: string | null;
 
-  llm: DepthLlm | null;
+  llm: ChatLlm | null;
 
   emit?: (event: TraceEvent) => void;
 }
@@ -96,21 +96,83 @@ export interface InvestigationStep {
   ms: number;
 }
 
+/* ---- the four measures. They are different things and never share a field. ---- */
+
+/** PROFICIENCY: assessed depth of the developer's skill in one topic. */
+export interface Proficiency {
+  level: string; // none | surface | working | proficient | deep | "not assessed"
+  score: number | null; // 0..100, null when unknown
+  /** CONFIDENCE: strength of the evidence behind this assessment (not the skill itself) */
+  confidence: "low" | "medium" | "high" | null;
+  assessed: boolean;
+}
+
+/** GRAPH IMPORTANCE: structural role in the topic graph. Says nothing about skill. */
+export interface Importance {
+  metric: "pagerank_lift";
+  value: number | null;
+  note: string;
+}
+
+/** GAP PRIORITY: why this gap should be addressed before the others. */
+export interface GapPriority {
+  rank: number;
+  of: number;
+  reason: string;
+}
+
+/** Direct prerequisite (1 hop) vs multi-hop dependency (2+ hops). */
+export interface Dependency {
+  relation: "direct" | "multi_hop";
+  hops: number;
+}
+
 export interface Finding {
   id: string;
   tool: string;
+  /** summary = tool-level overview; gap = one concrete weak-foundation gap; result = any other tool result */
+  kind: "summary" | "gap" | "result";
   claim: string;
   evidence: string[];
-  /** how reliable THIS result is (from query health + tool caveats), not a skill rating */
-  confidence?: "low" | "medium" | "high";
+  /** how reliable THIS tool result is (query health + caveats). Not a skill rating. */
+  reliability?: "low" | "medium" | "high";
+  /** strength of evidence behind the assessments this finding relies on. Not a skill rating. */
+  confidence?: "low" | "medium" | "high" | null;
+  proficiency?: { topic: Proficiency; foundation: Proficiency };
+  importance?: Importance;
+  priority?: GapPriority;
+  dependency?: Dependency;
   limitations?: string[];
   slugs: string[];
+  /** the graph path that proves this finding */
+  pathId?: string;
+}
+
+export interface PathNode {
+  slug: string | null;
+  name: string;
+  proficiency: Proficiency | null;
+}
+
+export interface PathEdge {
+  from: string;
+  to: string;
+  /** raw edge type from the graph, e.g. BUILDS_ON */
+  type: string;
+  label: string;
+  relation: "direct" | "multi_hop";
+  hops: number;
 }
 
 export interface GraphPath {
+  id: string;
   tool: string;
+  /** canonical finding this path proves (one finding, many views) */
+  findingId: string | null;
   nodes: string[];
   relationships: string[];
+  steps: PathNode[];
+  edges: PathEdge[];
   meaning: string;
 }
 
@@ -125,6 +187,23 @@ export interface NextAction {
   /** question the UI sends back to the agent when the button is pressed */
   prompt?: string;
   slug?: string | null;
+  /** canonical finding that justifies this action */
+  findingId?: string | null;
+}
+
+/** Insight-first view: the diagnosis, one action, the strongest proof. Everything else is on demand. */
+export interface Insight {
+  diagnosis: {
+    findingId: string;
+    headline: string;
+    detail: string;
+    tone: "gap" | "info";
+  } | null;
+  nextAction: NextAction | null;
+  keyEvidence: string[];
+  keyPathId: string | null;
+  /** findings that are NOT the diagnosis (shown collapsed, each references its own path) */
+  otherFindingIds: string[];
 }
 
 export interface TopicChatToolInfo {
@@ -169,6 +248,7 @@ export interface TopicChatResponse {
   findings: Finding[];
   graphPaths: GraphPath[];
   nextActions: NextAction[];
+  insight: Insight;
 
   meta: {
     mode: "llm" | "rules" | "direct";
@@ -199,6 +279,14 @@ interface AgentRun extends ToolRun {
   limitations: string[];
 }
 
+const EMPTY_INSIGHT: Insight = {
+  diagnosis: null,
+  nextAction: null,
+  keyEvidence: [],
+  keyPathId: null,
+  otherFindingIds: [],
+};
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const clip = (s: string, n: number) =>
   s.length > n ? `${s.slice(0, n - 1)}…` : s;
@@ -215,10 +303,10 @@ async function streamAnswer(
   for (const p of parts) {
     buf += p;
     count += 1;
-    if (count % 3 === 0) {
+    if (count % 6 === 0) {
       emit({ type: "answer_delta", text: buf });
       buf = "";
-      await sleep(22);
+      await sleep(8);
     }
   }
   if (buf) emit({ type: "answer_delta", text: buf });
@@ -245,8 +333,23 @@ const noteLlm = (ok: boolean): void => {
   }
 };
 
+const LLM_HARD_MS = Number(process.env.TOPIC_CHAT_HARD_MS) || 12_000;
+
+function withDeadline<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label} timed out after ${ms}ms`)),
+        ms,
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function askJson(
-  llm: DepthLlm | null,
+  llm: ChatLlm | null,
   stage: "discover" | "synthesize",
   system: string,
   user: string,
@@ -254,13 +357,17 @@ async function askJson(
 ): Promise<Row | null> {
   if (!llm || Date.now() < llmPausedUntil) return null;
   try {
-    const out = await llm.completeJson({
+    const out = await withDeadline(
+      llm.completeJson({
+        stage,
+        system,
+        user,
+        maxTokens,
+        temperature: stage === "discover" ? 0.1 : 0.3,
+      }),
+      LLM_HARD_MS,
       stage,
-      system,
-      user,
-      maxTokens,
-      temperature: stage === "discover" ? 0.1 : 0.3,
-    });
+    );
     if (out && typeof out === "object" && !Array.isArray(out)) {
       noteLlm(true);
       return out as Row;
@@ -401,6 +508,70 @@ function resolveCalls(
 }
 
 /* ========================================================================== */
+/* CANONICAL PROFICIENCY (one source of truth, so scores never contradict)    */
+/* ========================================================================== */
+
+const LEVEL_RANK: Record<string, number> = {
+  "not assessed": -1,
+  none: 0,
+  surface: 1,
+  working: 2,
+  proficient: 3,
+  deep: 4,
+};
+const levelRank = (p: Proficiency): number =>
+  p.assessed ? (LEVEL_RANK[p.level] ?? 0) : -1;
+const normLevel = (s: unknown): string =>
+  typeof s === "string" ? s.trim().toLowerCase() : "";
+const cap = (s: string): string => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const CONF_RANK = { low: 0, medium: 1, high: 2 } as const;
+
+interface ProfRef {
+  slug: string | null;
+  name: string;
+  prof: Proficiency;
+  /** set when a tool's stated level disagrees with the assessment on file */
+  conflict: string | null;
+}
+
+/**
+ * Looks a topic up in the developer's topic list and returns ONE proficiency
+ * object. If a tool reported a different level, the stored assessment wins and
+ * the disagreement is recorded as a limitation instead of being shown twice.
+ */
+function profOf(topics: DevTopic[], ref: string, toolLevel?: unknown): ProfRef {
+  const slug = resolveTopic(ref, topics);
+  const t: any = slug ? topics.find((x) => x.slug === slug) : null;
+  const name: string = (t?.name as string) || ref;
+  const canon = normLevel(t?.level ?? t?.developerLevel);
+  const given = normLevel(toolLevel);
+  const level = canon || given || "not assessed";
+
+  let conflict: string | null = null;
+  if (canon && given && given !== "not assessed" && canon !== given)
+    conflict = `${name}: a tool reported ${given}, but the stored assessment says ${canon}. Showing ${canon}.`;
+
+  const n = Number(t?.score);
+  const c = normLevel(t?.confidence);
+  return {
+    slug,
+    name,
+    conflict,
+    prof: {
+      level,
+      score: Number.isFinite(n) && t?.score != null ? n : null,
+      confidence: c === "low" || c === "medium" || c === "high" ? c : null,
+      assessed: level !== "not assessed",
+    },
+  };
+}
+
+const fmtProf = (p: Proficiency): string =>
+  !p.assessed
+    ? "Not assessed"
+    : `${cap(p.level)}${p.score != null ? ` (${p.score}/100)` : ""}`;
+
+/* ========================================================================== */
 /* ROUND 1 PLANNER                                                            */
 /* ========================================================================== */
 
@@ -418,7 +589,7 @@ RULES
 Return ONLY: {"calls":[{"tool":"","args":{},"why":""}],"direct_answer":""}`;
 
 async function planWithLlm(
-  llm: DepthLlm | null,
+  llm: ChatLlm | null,
   message: string,
   history: ChatTurn[],
   selected: string | null,
@@ -701,6 +872,44 @@ async function executePlan(
 }
 
 /* ========================================================================== */
+/* GAP RANKING (single place that decides which gap comes first)              */
+/* ========================================================================== */
+
+interface RankedGap {
+  g: Row;
+  top: ProfRef;
+  fo: ProfRef;
+  hops: number;
+  lift: number | null;
+}
+
+/**
+ * Order: (1) depth of the parent topic that rests on the weak base, deepest first,
+ * (2) direct prerequisites before multi-hop dependencies, (3) foundation weight.
+ * Used by follow-ups, findings, paths and next actions so they always agree.
+ */
+function rankedGaps(f: Row, topics: DevTopic[]): RankedGap[] {
+  const raw: Row[] = Array.isArray(f.foundationGaps) ? f.foundationGaps : [];
+  return raw
+    .map((g) => {
+      const lift = Number(g.foundationLift);
+      return {
+        g,
+        top: profOf(topics, String(g.topic), g.topicLevel),
+        fo: profOf(topics, String(g.foundation), g.foundationLevel),
+        hops: Math.max(1, Number(g.hops) || 1),
+        lift: Number.isFinite(lift) && g.foundationLift != null ? lift : null,
+      };
+    })
+    .sort(
+      (a, b) =>
+        levelRank(b.top.prof) - levelRank(a.top.prof) ||
+        a.hops - b.hops ||
+        (b.lift ?? -1) - (a.lift ?? -1),
+    );
+}
+
+/* ========================================================================== */
 /* ROUND 2: follow-ups that depend on what round 1 FOUND                      */
 /* ========================================================================== */
 
@@ -726,19 +935,19 @@ function planFollowUps(runs: AgentRun[], topics: DevTopic[]): PlannedCall[] {
     const f = (r.result.facts ?? {}) as Row;
 
     if (r.tool === "find_gaps") {
-      const g = Array.isArray(f.foundationGaps) ? f.foundationGaps[0] : null;
-      const upper = g?.topic ? resolveTopic(String(g.topic), topics) : null;
-      if (g && upper) {
+      const top = rankedGaps(f, topics)[0];
+      const upper = top?.top.slug ?? null;
+      if (top && upper) {
         add({
           tool: "explain_topic",
           args: { topic: upper },
-          why: `Find_gaps flagged ${g.topic} as resting on a weak foundation; checking how it was rated and on what evidence.`,
+          why: `Find_gaps flagged ${top.top.name} as resting on a weak foundation; checking how it was rated and on what evidence.`,
           dependsOn: "find_gaps",
         });
         add({
           tool: "learning_path_to_topic",
           args: { topic: upper },
-          why: `Showing which prerequisites of ${g.topic} are still weak or unassessed.`,
+          why: `Showing which prerequisites of ${top.top.name} are still weak or unassessed.`,
           dependsOn: "find_gaps",
         });
       }
@@ -831,17 +1040,40 @@ function evidenceLines(r: AgentRun): string[] {
     .slice(0, 8);
 }
 
-function mainConfidence(r: AgentRun): "low" | "medium" | "high" {
+/** Reliability of a TOOL RESULT (query health). This is not skill confidence. */
+function resultReliability(r: AgentRun): "low" | "medium" | "high" {
   if (r.degraded?.length) return "low";
   if (r.limitations.length) return "medium";
   return "high";
 }
 
+function minConfidence(
+  list: Array<Proficiency["confidence"]>,
+): Proficiency["confidence"] {
+  const known = list.filter((c): c is "low" | "medium" | "high" => c != null);
+  if (!known.length) return null;
+  return known.reduce((a, b) => (CONF_RANK[b] < CONF_RANK[a] ? b : a));
+}
+
 function buildInvestigation(runs: AgentRun[], topics: DevTopic[]) {
   const steps: InvestigationStep[] = [];
   const findings: Finding[] = [];
+  const gapPaths: GraphPath[] = [];
+  const mainByTool = new Map<string, string>();
+  /** every evidence line appears in exactly one finding */
+  const usedEvidence = new Set<string>();
+  const uniqueEvidence = (lines: string[]) =>
+    lines.filter((l) => {
+      const key = l.toLowerCase();
+      if (usedEvidence.has(key)) return false;
+      usedEvidence.add(key);
+      return true;
+    });
+
   let fid = 0;
+  let pid = 0;
   const newId = () => `f${++fid}`;
+  const newPathId = () => `p${++pid}`;
 
   runs.forEach((r, i) => {
     const status = statusOf(r);
@@ -849,43 +1081,123 @@ function buildInvestigation(runs: AgentRun[], topics: DevTopic[]) {
 
     if ((status === "success" || status === "partial") && r.result) {
       const f = (r.result.facts ?? {}) as Row;
-      const mainId = newId();
-      findingIds.push(mainId);
-      findings.push({
-        id: mainId,
-        tool: r.tool,
-        claim: r.result.summary,
-        evidence: evidenceLines(r),
-        confidence: mainConfidence(r),
-        limitations: r.limitations.length ? r.limitations : undefined,
-        slugs: (r.result.slugs ?? []).slice(0, 8),
-      });
+      const gaps = r.tool === "find_gaps" ? rankedGaps(f, topics) : [];
 
-      if (r.tool === "find_gaps" && Array.isArray(f.foundationGaps)) {
-        for (const g of f.foundationGaps.slice(0, 3)) {
-          const unassessed = g.foundationLevel === "not assessed";
+      if (gaps.length) {
+        /* one canonical finding per gap; the tool-level summary is not repeated */
+        gaps.slice(0, 3).forEach((x, idx) => {
           const id = newId();
+          const pathId = newPathId();
           findingIds.push(id);
+          mainByTool.set(`${r.tool}#${idx}`, id);
+          if (idx === 0) mainByTool.set(r.tool, id);
+
+          const direct = x.hops === 1;
+          const unassessed = !x.fo.prof.assessed;
+          const depLabel = direct
+            ? "direct prerequisite"
+            : `multi-hop dependency, ${x.hops} hops`;
+
+          const evidence = uniqueEvidence([
+            `${x.top.name}: ${fmtProf(x.top.prof)}${x.top.prof.confidence ? `, ${x.top.prof.confidence} evidence confidence` : ""}`,
+            unassessed
+              ? `${x.fo.name}: no assessment on file`
+              : `${x.fo.name}: ${fmtProf(x.fo.prof)}${x.fo.prof.confidence ? `, ${x.fo.prof.confidence} evidence confidence` : ""}`,
+            `${x.top.name} BUILDS_ON ${x.fo.name} (${depLabel})`,
+            ...(x.lift != null
+              ? [
+                  `Graph importance of ${x.fo.name}: PageRank lift ${x.lift}. This is structure, not skill.`,
+                ]
+              : []),
+          ]);
+
+          const limitations = [...r.limitations];
+          if (unassessed)
+            limitations.push(
+              "The foundation has not been assessed; this is missing evidence, not proven weakness.",
+            );
+          if (!direct)
+            limitations.push(
+              `Intermediate topics on this ${x.hops}-hop path are not listed by the graph tool; only the two endpoints are shown.`,
+            );
+          for (const c of [x.top.conflict, x.fo.conflict])
+            if (c) limitations.push(c);
+
           findings.push({
             id,
             tool: r.tool,
-            claim: `${g.topic} (${g.topicLevel}) stands on ${unassessed ? "an unassessed" : "a weak"} foundation: ${g.foundation}.`,
-            evidence: [
-              `${g.foundation} is ${g.foundationLevel}, ${g.hops} ${plural(Number(g.hops), "hop", "hops")} below ${g.topic}.`,
-              `Foundation weight (PageRank lift): ${g.foundationLift}.`,
-            ],
-            confidence: unassessed ? "medium" : "high",
-            limitations: unassessed
-              ? [
-                  "The foundation has not been assessed; this is missing evidence, not proven weakness.",
-                ]
-              : undefined,
-            slugs: [
-              resolveTopic(String(g.topic), topics),
-              resolveTopic(String(g.foundation), topics),
-            ].filter((x): x is string => Boolean(x)),
+            kind: "gap",
+            claim: `${x.top.name} (${fmtProf(x.top.prof)}) stands on ${unassessed ? "an unassessed" : "a weak"} ${direct ? "direct prerequisite" : "multi-hop dependency"}: ${x.fo.name} (${fmtProf(x.fo.prof)}).`,
+            evidence,
+            reliability: resultReliability(r),
+            confidence: unassessed
+              ? null
+              : minConfidence([x.top.prof.confidence, x.fo.prof.confidence]),
+            proficiency: { topic: x.top.prof, foundation: x.fo.prof },
+            importance: {
+              metric: "pagerank_lift",
+              value: x.lift,
+              note: "How much of the graph rests on this topic. Not a skill rating.",
+            },
+            dependency: {
+              relation: direct ? "direct" : "multi_hop",
+              hops: x.hops,
+            },
+            priority: {
+              rank: idx + 1,
+              of: gaps.length,
+              reason:
+                `Ranked by parent depth, then proximity, then foundation weight. ` +
+                `${x.top.name} is ${x.top.prof.level}, so a weak base under it costs the most; ` +
+                (direct
+                  ? `it is a direct prerequisite, so fixing it helps the parent immediately`
+                  : `it is ${x.hops} hops down, so nearer links should be fixed first`) +
+                (x.lift != null ? `; foundation weight ${x.lift}.` : "."),
+            },
+            limitations: limitations.length ? limitations : undefined,
+            slugs: [x.top.slug, x.fo.slug].filter((s): s is string => !!s),
+            pathId,
           });
-        }
+
+          gapPaths.push({
+            id: pathId,
+            tool: r.tool,
+            findingId: id,
+            nodes: [x.top.name, x.fo.name],
+            relationships: [
+              direct ? "BUILDS_ON" : `BUILDS_ON (${x.hops} hops)`,
+            ],
+            steps: [
+              { slug: x.top.slug, name: x.top.name, proficiency: x.top.prof },
+              { slug: x.fo.slug, name: x.fo.name, proficiency: x.fo.prof },
+            ],
+            edges: [
+              {
+                from: x.top.name,
+                to: x.fo.name,
+                type: "BUILDS_ON",
+                label: "builds on",
+                relation: direct ? "direct" : "multi_hop",
+                hops: x.hops,
+              },
+            ],
+            meaning: `${x.top.name} is ${fmtProf(x.top.prof)}, but the topic it builds on is ${fmtProf(x.fo.prof)}.`,
+          });
+        });
+      } else {
+        const mainId = newId();
+        findingIds.push(mainId);
+        mainByTool.set(r.tool, mainId);
+        findings.push({
+          id: mainId,
+          tool: r.tool,
+          kind: "result",
+          claim: r.result.summary,
+          evidence: uniqueEvidence(evidenceLines(r)),
+          reliability: resultReliability(r),
+          limitations: r.limitations.length ? r.limitations : undefined,
+          slugs: (r.result.slugs ?? []).slice(0, 8),
+        });
       }
     }
 
@@ -922,95 +1234,159 @@ function buildInvestigation(runs: AgentRun[], topics: DevTopic[]) {
         ? "complete"
         : "partial";
 
-  return { steps, findings, status };
+  return {
+    steps,
+    findings,
+    status,
+    gapPaths,
+    mainByTool,
+    nextPathId: newPathId,
+  };
 }
 
-/** Real paths pulled from tool output: connect_topics chains, gap chains, explain_topic foundations. */
-function buildGraphPaths(runs: AgentRun[]): GraphPath[] {
+/** Real paths pulled from tool output (gap paths are built with their findings above). */
+function buildGraphPaths(
+  runs: AgentRun[],
+  topics: DevTopic[],
+  mainByTool: Map<string, string>,
+  newPathId: () => string,
+): GraphPath[] {
   const out: GraphPath[] = [];
+  const node = (name: string): PathNode => {
+    const p = profOf(topics, name);
+    return { slug: p.slug, name: p.name, proficiency: p.prof };
+  };
+
   for (const r of runs) {
     if (!r.ok || r.miss || r.skipped || !r.result) continue;
     const f = (r.result.facts ?? {}) as Row;
     const blocks = (r.result.blocks ?? []) as any[];
+    const findingId = mainByTool.get(r.tool) ?? null;
 
     if (r.tool === "connect_topics") {
       const pathBlock = blocks.find((b) => b.type === "path");
       const st: any[] = pathBlock?.steps ?? [];
-      if (st.length >= 2)
+      if (st.length >= 2) {
+        const nodes = st.map((x) => node(String(x.name)));
         out.push({
+          id: newPathId(),
           tool: r.tool,
-          nodes: st.map((x) => String(x.name)),
+          findingId,
+          nodes: nodes.map((n) => n.name),
           relationships: st
             .slice(0, -1)
             .map((x) => String(x.edge ?? "linked to")),
+          steps: nodes,
+          edges: st.slice(0, -1).map((x, i) => {
+            const raw = String(x.edge ?? "linked to");
+            return {
+              from: nodes[i].name,
+              to: nodes[i + 1].name,
+              type: raw.toUpperCase().replace(/\s+/g, "_"),
+              label: raw,
+              relation: "direct" as const,
+              hops: 1,
+            };
+          }),
           meaning: `${st[0].name} reaches ${st[st.length - 1].name} in ${st.length - 1} ${plural(st.length - 1, "hop", "hops")} (${f.engine ?? "graph search"}).`,
         });
-    }
-
-    if (r.tool === "find_gaps" && Array.isArray(f.foundationGaps)) {
-      for (const g of f.foundationGaps.slice(0, 3))
-        out.push({
-          tool: r.tool,
-          nodes: [String(g.topic), String(g.foundation)],
-          relationships: [
-            Number(g.hops) > 1 ? `builds on (${g.hops} hops)` : "builds on",
-          ],
-          meaning: `${g.topic} is ${g.topicLevel}, but the topic it builds on is ${g.foundationLevel}.`,
-        });
+      }
     }
 
     if (r.tool === "explain_topic" && Array.isArray(f.buildsOn)) {
-      for (const b of f.buildsOn.slice(0, 2))
+      for (const b of f.buildsOn.slice(0, 2)) {
+        const from = node(String(f.topic));
+        const to = node(String(b).replace(/\s*\(.*\)$/, ""));
         out.push({
+          id: newPathId(),
           tool: r.tool,
-          nodes: [String(f.topic), String(b).replace(/\s*\(.*\)$/, "")],
-          relationships: ["builds on"],
-          meaning: `${f.topic} builds on ${b}.`,
+          findingId,
+          nodes: [from.name, to.name],
+          relationships: ["BUILDS_ON"],
+          steps: [from, to],
+          edges: [
+            {
+              from: from.name,
+              to: to.name,
+              type: "BUILDS_ON",
+              label: "builds on",
+              relation: "direct",
+              hops: 1,
+            },
+          ],
+          meaning: `${from.name} builds on ${to.name}.`,
         });
+      }
     }
 
     if (r.tool === "learning_path_to_topic") {
       const rm = blocks.find((b) => b.type === "roadmap");
       const st: any[] = rm?.steps ?? [];
-      if (st.length >= 2)
+      if (st.length >= 2) {
+        const nodes = st.map((x) => node(String(x.name)));
         out.push({
+          id: newPathId(),
           tool: r.tool,
-          nodes: st.map((x) => String(x.name)),
-          relationships: st.slice(0, -1).map(() => "is foundation of"),
+          findingId,
+          nodes: nodes.map((n) => n.name),
+          relationships: st.slice(0, -1).map(() => "FOUNDATION_OF"),
+          steps: nodes,
+          edges: st.slice(0, -1).map((_, i) => ({
+            from: nodes[i].name,
+            to: nodes[i + 1].name,
+            type: "FOUNDATION_OF",
+            label: "is foundation of",
+            relation: "direct" as const,
+            hops: 1,
+          })),
           meaning: r.result.summary,
         });
+      }
     }
   }
-  return out.slice(0, 6);
+  return out;
 }
 
-function buildNextActions(runs: AgentRun[], topics: DevTopic[]): NextAction[] {
+function buildNextActions(
+  runs: AgentRun[],
+  topics: DevTopic[],
+  findings: Finding[],
+): NextAction[] {
   const out: NextAction[] = [];
   const push = (a: NextAction) => {
     if (out.length < 4 && !out.some((x) => x.title === a.title)) out.push(a);
   };
+  const mainFinding = (tool: string, kind?: Finding["kind"]) =>
+    findings.find((x) => x.tool === tool && (!kind || x.kind === kind))?.id ??
+    null;
+
   for (const r of runs) {
     if (!r.ok || r.miss || r.skipped || !r.result) continue;
     const f = (r.result.facts ?? {}) as Row;
 
     if (r.tool === "find_gaps") {
-      const g = Array.isArray(f.foundationGaps) ? f.foundationGaps[0] : null;
-      if (g) {
-        if (g.foundationLevel === "not assessed")
+      const x = rankedGaps(f, topics)[0];
+      const fid =
+        findings.find((q) => q.tool === r.tool && q.priority?.rank === 1)?.id ??
+        mainFinding(r.tool);
+      if (x) {
+        if (!x.fo.prof.assessed)
           push({
             type: "investigate",
-            title: `Check ${g.foundation}`,
-            reason: `${g.topic} depends on it, but it has no assessment yet, so the gap is unconfirmed.`,
-            prompt: `Search my graph for ${g.foundation}`,
-            slug: resolveTopic(String(g.foundation), topics),
+            title: `Check ${x.fo.name}`,
+            reason: `${x.top.name} depends on it, but it has no assessment yet, so the gap is unconfirmed.`,
+            prompt: `Search my graph for ${x.fo.name}`,
+            slug: x.fo.slug,
+            findingId: fid,
           });
         else
           push({
             type: "learn",
-            title: `Strengthen ${g.foundation}`,
-            reason: `${g.topic} is ${g.topicLevel}, but ${g.foundation} is only ${g.foundationLevel}.`,
-            prompt: `How do I get to ${g.foundation}?`,
-            slug: resolveTopic(String(g.foundation), topics),
+            title: `Strengthen ${x.fo.name}`,
+            reason: `${x.top.name} is ${fmtProf(x.top.prof)}, but ${x.fo.name} is only ${fmtProf(x.fo.prof)}.`,
+            prompt: `How do I get to ${x.fo.name}?`,
+            slug: x.fo.slug,
+            findingId: fid,
           });
       }
       const shallow = Array.isArray(f.broadButShallow)
@@ -1023,6 +1399,7 @@ function buildNextActions(runs: AgentRun[], topics: DevTopic[]): NextAction[] {
           reason: "Lots of files, but still working level or below.",
           prompt: `Explain my ${shallow}`,
           slug: resolveTopic(String(shallow), topics),
+          findingId: fid,
         });
     }
 
@@ -1035,6 +1412,7 @@ function buildNextActions(runs: AgentRun[], topics: DevTopic[]): NextAction[] {
           reason: `You already show ${(n.buildsOnKnown ?? []).slice(0, 3).join(", ")} which it builds on.`,
           prompt: `How do I get to ${n.topic}?`,
           slug: null,
+          findingId: mainFinding(r.tool),
         });
     }
 
@@ -1047,10 +1425,47 @@ function buildNextActions(runs: AgentRun[], topics: DevTopic[]): NextAction[] {
           reason: "Its evidence is boilerplate, incidental or thin.",
           prompt: `Explain my ${q}`,
           slug: resolveTopic(String(q), topics),
+          findingId: mainFinding(r.tool),
         });
     }
   }
   return out;
+}
+
+/** Insight first: one diagnosis, one action, the strongest proof. Everything else stays collapsed. */
+function buildInsight(
+  findings: Finding[],
+  paths: GraphPath[],
+  actions: NextAction[],
+  answer: string,
+): Insight {
+  const primary =
+    findings.find((f) => f.kind === "gap" && f.priority?.rank === 1) ??
+    findings.find((f) => f.kind === "result" && f.evidence.length) ??
+    findings[0];
+  if (!primary) return { ...EMPTY_INSIGHT, nextAction: actions[0] ?? null };
+
+  const nextAction =
+    actions.find((a) => a.findingId === primary.id) ?? actions[0] ?? null;
+  const keyPath =
+    paths.find((p) => p.id === primary.pathId) ??
+    paths.find((p) => p.findingId === primary.id) ??
+    null;
+
+  return {
+    diagnosis: {
+      findingId: primary.id,
+      headline: primary.claim,
+      detail: answer,
+      tone: primary.kind === "gap" ? "gap" : "info",
+    },
+    nextAction,
+    keyEvidence: primary.evidence.slice(0, 3),
+    keyPathId: keyPath?.id ?? null,
+    otherFindingIds: findings
+      .filter((f) => f.id !== primary.id)
+      .map((f) => f.id),
+  };
 }
 
 /* ========================================================================== */
@@ -1059,6 +1474,7 @@ function buildNextActions(runs: AgentRun[], topics: DevTopic[]): NextAction[] {
 
 const COMPOSE_SYSTEM = `You write the chat reply for Pathway's topic assistant. The interface already shows tables, rankings, lists, evidence and graph paths built from the tool results, so DO NOT repeat every item.
 Write 2 to 4 plain sentences that interpret the result for the developer: the key takeaway, one notable detail, and one concrete next step. Name in plain words which graph analysis produced the key finding (for example "the betweenness ranking" or "the BUILDS_ON traversal"). Use ONLY the supplied facts. Never invent topics, levels, numbers or relationships. Address the developer as "you". No markdown, no bullet lists, no headings.
+Keep four ideas apart and never use one word for two of them: proficiency (how deep the developer's skill is), confidence (how strong the evidence behind a rating is), graph importance (how central a topic is in the graph, not a skill), gap priority (why one gap comes first). Say "direct prerequisite" for a 1-hop BUILDS_ON link and "multi-hop dependency" for longer ones.
 Each result may carry "limitations". If a limitation affects the conclusion, state it plainly in one clause. Never turn a limitation into a claim: for example never say no gaps exist when a result says it could not be verified, and never call a topic weak when its foundation is merely unassessed.
 If the developer asked about something the graph has no topic for, say so plainly in one sentence and use the closest topics the tools did return.
 Also give:
@@ -1068,7 +1484,7 @@ Output minified JSON on one line, no commentary. Do not think out loud.
 
 Return ONLY: {"answer":"","tool_notes":{"tool_name":""},"followups":[""]}`;
 
-function fitFacts(runs: AgentRun[], budget = 6500): Row[] {
+function fitFacts(runs: AgentRun[], budget = 3500): Row[] {
   const full = runs.map((r) => ({
     tool: r.tool,
     ok: r.ok,
@@ -1133,7 +1549,7 @@ function followupsFor(runs: AgentRun[]): string[] {
 }
 
 async function compose(
-  llm: DepthLlm | null,
+  llm: ChatLlm | null,
   message: string,
   runs: AgentRun[],
 ): Promise<{
@@ -1165,7 +1581,7 @@ async function compose(
     "synthesize",
     COMPOSE_SYSTEM,
     JSON.stringify({ question: message, results: fitFacts(usable) }),
-    900,
+    450,
   );
   const answer = asText(raw?.answer, 900);
   if (!answer)
@@ -1228,6 +1644,10 @@ export async function answerTopicQuestion(
   const ctx = createToolContext(input.graph, input.developerId, selected);
   const topics = await ctx.topics().catch(() => [] as DevTopic[]);
 
+  /* start the heavy graph metrics now; they run while the planner thinks */
+  void ctx.pageRank().catch(() => undefined);
+  void ctx.betweenness().catch(() => undefined);
+
   emit?.({
     type: "stage",
     stage: "planning",
@@ -1235,13 +1655,20 @@ export async function answerTopicQuestion(
     label: "Choosing which graph tools can answer this",
   });
   const t0 = Date.now();
-  const planned = await planWithLlm(
-    input.llm,
-    input.message,
-    history,
-    selected,
-    topics,
-  );
+  /*
+   * Fast path: when the keyword router recognises the question, skip the
+   * planner LLM call entirely (saves a whole model round trip). The LLM
+   * planner only runs for vague questions or greetings.
+   */
+  const ruled = routeByRules(input.message, topics, selected);
+  const OVERVIEW_RE = /summary|overview|about me|profile|how many|who am i/i;
+  const vague =
+    ruled.length === 1 &&
+    ruled[0].tool === "profile_overview" &&
+    !OVERVIEW_RE.test(input.message);
+  const planned = vague
+    ? await planWithLlm(input.llm, input.message, history, selected, topics)
+    : null;
 
   if (planned && !planned.calls.length && planned.direct) {
     const plannerMs = Date.now() - t0;
@@ -1264,6 +1691,7 @@ export async function answerTopicQuestion(
       findings: [],
       graphPaths: [],
       nextActions: [],
+      insight: EMPTY_INSIGHT,
       meta: {
         mode: "direct",
         model: input.llm?.model ?? null,
@@ -1279,8 +1707,7 @@ export async function answerTopicQuestion(
   }
 
   let rawCalls = planned?.calls ?? [];
-  if (!rawCalls.length)
-    rawCalls = routeByRules(input.message, topics, selected);
+  if (!rawCalls.length) rawCalls = ruled;
 
   const { calls, skipped } = resolveCalls(rawCalls, topics, selected);
   const plannerMs = Date.now() - t0;
@@ -1316,10 +1743,9 @@ export async function answerTopicQuestion(
   /* round 2: only when round 1 left a concrete open question, within the call cap */
   let rounds: 1 | 2 = 1;
   const used = runs.filter((r) => !r.skipped).length;
-  const follow = planFollowUps(runs, topics).slice(
-    0,
-    Math.max(0, MAX_TOOL_CALLS - used),
-  );
+  const follow = (
+    process.env.TOPIC_CHAT_ROUND2 === "0" ? [] : planFollowUps(runs, topics)
+  ).slice(0, Math.max(0, MAX_TOOL_CALLS - used));
   if (follow.length) {
     emit?.({
       type: "followup",
@@ -1364,6 +1790,15 @@ export async function answerTopicQuestion(
   ].slice(0, 12);
 
   const inv = buildInvestigation(runs, topics);
+  const otherPaths = buildGraphPaths(
+    runs,
+    topics,
+    inv.mainByTool,
+    inv.nextPathId,
+  );
+  const graphPaths = [...inv.gapPaths, ...otherPaths].slice(0, 8);
+  const nextActions = buildNextActions(runs, topics, inv.findings);
+  const insight = buildInsight(inv.findings, graphPaths, nextActions, answer);
 
   return {
     answer,
@@ -1372,8 +1807,9 @@ export async function answerTopicQuestion(
     followups,
     investigation: { status: inv.status, steps: inv.steps },
     findings: inv.findings,
-    graphPaths: buildGraphPaths(runs),
-    nextActions: buildNextActions(runs, topics),
+    graphPaths,
+    nextActions,
+    insight,
     tools: runs.map((r) => ({
       name: r.tool,
       title: r.title,
