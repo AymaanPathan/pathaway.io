@@ -1313,6 +1313,11 @@ type ChatMsg = {
   meta?: Obj;
   pending?: boolean;
   steps?: LiveStep[];
+  // NEW
+  investigation?: Obj;
+  findings?: Obj[];
+  graphPaths?: Obj[];
+  nextActions?: Obj[];
 };
 type ChatCtx = { nodes: Obj[]; sel: string | null; detail: Obj | null };
 
@@ -1855,6 +1860,20 @@ export default function OverviewPage() {
             state: "run" as const,
           })),
         }));
+      } else if (e.type === "followup") {
+        // tools chosen BECAUSE of what round 1 found
+        patch((m) => ({
+          ...m,
+          steps: [
+            ...(m.steps ?? []),
+            ...e.calls.map((c) => ({
+              tool: c.tool,
+              title: c.title,
+              state: "run" as const,
+              dependsOn: c.dependsOn,
+            })),
+          ],
+        }));
       } else if (e.type === "tool_done") {
         patch((m) => ({
           ...m,
@@ -1886,17 +1905,24 @@ export default function OverviewPage() {
           (b): b is Obj & { type: string } => typeof b.type === "string",
         );
         if (answer || blocks.length)
-          reply = {
-            text: answer,
-            question: text,
-            blocks,
-            followups: asArray<string>(r.data.followups).slice(0, 3),
-            tools: asArray<Obj>(r.data.tools),
-            mode: asString(r.data.meta?.mode),
-            meta: (r.data.meta ?? {}) as Obj,
-            slugs: asArray<string>(r.data.topics).filter(Boolean),
-            local: false,
-          };
+         reply = {
+           text: answer,
+           question: text,
+           blocks,
+           followups: asArray<string>(r.data.followups).slice(0, 3),
+           tools: asArray<Obj>(r.data.tools),
+           mode: asString(r.data.meta?.mode),
+           meta: (r.data.meta ?? {}) as Obj,
+           slugs: asArray<string>(r.data.topics).filter(Boolean),
+           local: false,
+           // NEW
+           investigation: (r.data.investigation ?? undefined) as
+             | Obj
+             | undefined,
+           findings: asArray<Obj>(r.data.findings),
+           graphPaths: asArray<Obj>(r.data.graphPaths),
+           nextActions: asArray<Obj>(r.data.nextActions),
+         };
       } else if (r.status === 429) {
         reply = {
           text: asString(r.data.error, "Slow down a little."),

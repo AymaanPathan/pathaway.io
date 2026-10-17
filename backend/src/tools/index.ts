@@ -14,7 +14,7 @@ import { recentActivityTool } from "./recent-activity.tool.js";
 import { recommendNextTopicsTool } from "./recommend-next-topics.tool.js";
 import { searchTopicsTool } from "./search-topics.tool.js";
 import { strongestTopicsTool } from "./strongest-topics.tool.js";
-import { clamp } from "./shared.js";
+import { clamp, queryHealth, type QueryHealth } from "./shared.js";
 import type { Row, ToolContext, ToolResult, TopicTool } from "./types.js";
 
 export type { DevTopic, ToolContext, ToolResult, TopicTool } from "./types.js";
@@ -42,7 +42,6 @@ export const ALL_TOOLS: TopicTool[] = [
 
 export const TOOL_BY_NAME = new Map(ALL_TOOLS.map((t) => [t.name, t]));
 
-
 export function describeTools() {
   return ALL_TOOLS.map((t) => ({
     name: t.name,
@@ -63,7 +62,6 @@ export function describeTools() {
     ),
   }));
 }
-
 
 export function parseToolArgs(
   tool: TopicTool,
@@ -120,7 +118,8 @@ export interface ToolRun {
   ms: number;
   result: ToolResult | null;
   error: string | null;
-  
+  /** labels of graph queries that threw while this tool ran (empty = all queries succeeded) */
+  degraded: string[];
   how: string[];
 }
 
@@ -131,14 +130,12 @@ const short = (v: unknown, max = 60): string => {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 };
 
-
 function describeFact(key: string, v: unknown): string {
   if (Array.isArray(v)) return `${key}: ${v.length} item(s)`;
   if (v && typeof v === "object")
     return `${key}: ${Object.keys(v).length} field(s)`;
   return `${key}: ${short(v)}`;
 }
-
 
 function buildHow(tool: TopicTool, args: Row, result: ToolResult): string[] {
   const custom = (result as unknown as Row).how;
@@ -193,9 +190,10 @@ export async function runTool(
     args,
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const health: QueryHealth = { total: 0, failed: [] };
   try {
     const result = await Promise.race<ToolResult>([
-      tool.run(ctx, args),
+      queryHealth.run(health, () => tool.run(ctx, args)),
       new Promise<ToolResult>((_, reject) => {
         timer = setTimeout(
           () => reject(new Error(`timed out after ${TOOL_TIMEOUT_MS}ms`)),
@@ -209,6 +207,7 @@ export async function runTool(
       ms: Date.now() - started,
       result,
       error: null,
+      degraded: [...health.failed],
       how: buildHow(tool, args, result),
     };
   } catch (error) {
@@ -220,6 +219,7 @@ export async function runTool(
       ms: Date.now() - started,
       result: null,
       error: message,
+      degraded: [...health.failed],
       how: [],
     };
   } finally {

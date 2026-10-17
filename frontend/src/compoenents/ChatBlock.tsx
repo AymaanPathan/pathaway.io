@@ -1,22 +1,33 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import {
+  AlertTriangle,
   ArrowRight,
   CheckCircle2,
   ChevronRight,
   CircleDashed,
+  Compass,
   Flame,
+  GraduationCap,
   Loader2,
+  Search,
   Wrench,
   XCircle,
 } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
 
 /**
- * Renders the `blocks` returned by POST /api/topics/chat(/stream), and the
- * chat message itself: streamed answer, tools used, evidence, and how the
- * answer was reached. Every block is built by a backend tool from FalkorDB
- * results, so this file only decides how things LOOK. It never interprets or
- * invents data.
+ * Renders the structured response of POST /api/topics/chat(/stream):
+ *
+ *   Answer          streamed text
+ *   Investigation   which tools ran, why, and whether each one really worked
+ *   Findings        claim + evidence + limitations, straight from tool output
+ *   Graph paths     real BUILDS_ON / RELATED_TOPIC chains
+ *   Next actions    suggestions only; nothing is created or written from here
+ *   Evidence views  the visual blocks built by the tools
+ *   Technical trace per-tool inputs, graph operations and steps
+ *
+ * Every piece is built by a backend tool from FalkorDB results, so this file
+ * only decides how things LOOK. It never interprets or invents data.
  */
 
 const YELLOW = "#F5C542";
@@ -58,6 +69,11 @@ const SEVERITY: Record<string, string> = {
   medium: YELLOW,
   low: SKY,
 };
+const CONFIDENCE_COLOR: Record<string, string> = {
+  high: GREEN,
+  medium: YELLOW,
+  low: CORAL,
+};
 
 export type UiBlock = { type: string } & Record<string, any>;
 type Obj = Record<string, any>;
@@ -76,6 +92,15 @@ export type TraceEvent =
       ms: number;
       calls: Array<{ tool: string; title: string; why: string; args: Obj }>;
       skipped: Array<{ term: string; tool: string; reason: string }>;
+    }
+  | {
+      type: "followup";
+      calls: Array<{
+        tool: string;
+        title: string;
+        why: string;
+        dependsOn: string;
+      }>;
     }
   | { type: "tool_start"; tool: string; title: string }
   | {
@@ -96,11 +121,15 @@ export type LiveStep = {
   title: string;
   state: "run" | "done" | "miss";
   ms?: number;
+  /** set for round-2 steps: the tool whose result caused this one */
+  dependsOn?: string;
 };
 
 const s = (v: unknown, d = "") => (v == null ? d : String(v));
 const n = (v: unknown, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const arr = (v: unknown): Obj[] => (Array.isArray(v) ? (v as Obj[]) : []);
+const strs = (v: unknown): string[] =>
+  Array.isArray(v) ? v.map((x) => s(x)).filter(Boolean) : [];
 const fmtMs = (v: unknown) => {
   const x = n(v);
   return x >= 1000 ? `${(x / 1000).toFixed(1)}s` : `${Math.round(x)}ms`;
@@ -669,12 +698,6 @@ function Timeline({ b, onPick }: { b: Obj; onPick: (slug: string) => void }) {
 
 /* ========================================================================== */
 /* CHAT MESSAGE                                                               */
-/*                                                                            */
-/*   1. Answer            streamed text                                       */
-/*   2. Tools used        chips (live while running)                          */
-/*   3. Evidence          blocks built from graph results                     */
-/*   4. How it was answered   per tool: inputs, graph operations, steps       */
-/*   5. Ask next          follow-ups                                          */
 /* ========================================================================== */
 
 function Section({
@@ -707,15 +730,19 @@ function Section({
   );
 }
 
-function StateDot({ state }: { state: "run" | "done" | "miss" | "fail" }) {
+type DotState = "run" | "done" | "miss" | "partial" | "fail";
+
+function StateDot({ state }: { state: DotState }) {
   const bg =
     state === "done"
       ? GREEN
       : state === "run"
         ? YELLOW
-        : state === "miss"
-          ? LINE
-          : CORAL;
+        : state === "partial"
+          ? YELLOW
+          : state === "miss"
+            ? LINE
+            : CORAL;
   return (
     <span
       className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full"
@@ -725,6 +752,8 @@ function StateDot({ state }: { state: "run" | "done" | "miss" | "fail" }) {
         <Loader2 size={11} className="animate-spin" strokeWidth={3} />
       ) : state === "done" ? (
         <CheckCircle2 size={11} />
+      ) : state === "partial" ? (
+        <AlertTriangle size={11} />
       ) : state === "miss" ? (
         <CircleDashed size={11} />
       ) : (
@@ -734,14 +763,36 @@ function StateDot({ state }: { state: "run" | "done" | "miss" | "fail" }) {
   );
 }
 
+/** step status from the backend -> dot state */
+const STEP_DOT: Record<string, DotState> = {
+  success: "done",
+  empty: "miss",
+  partial: "partial",
+  failed: "fail",
+};
+const STEP_LABEL: Record<string, string> = {
+  success: "found",
+  empty: "no match",
+  partial: "partial",
+  failed: "failed",
+};
+const STEP_BG: Record<string, string> = {
+  success: GREEN,
+  empty: LINE,
+  partial: YELLOW,
+  failed: CORAL,
+};
+
 function ToolChip({
   title,
   state,
   ms,
+  after,
 }: {
   title: string;
-  state: "run" | "done" | "miss" | "fail";
+  state: DotState;
   ms?: unknown;
+  after?: string;
 }) {
   return (
     <span
@@ -753,6 +804,11 @@ function ToolChip({
     >
       <StateDot state={state} />
       {title}
+      {after && (
+        <span className="text-[11px] font-semibold text-neutral-600">
+          after {after.replace(/_/g, " ")}
+        </span>
+      )}
       {ms != null && state !== "run" && (
         <span className="text-[11px] font-semibold text-neutral-600">
           {fmtMs(ms)}
@@ -761,6 +817,310 @@ function ToolChip({
     </span>
   );
 }
+
+function SmallLabel({
+  icon,
+  children,
+}: {
+  icon?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-black uppercase tracking-[.14em] text-neutral-600">
+      {icon}
+      {children}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------ investigation */
+
+function InvestigationPanel({ inv, findings }: { inv: Obj; findings: Obj[] }) {
+  const steps = arr(inv.steps);
+  if (!steps.length) return null;
+  const status = s(inv.status, "complete");
+  const byId = new Map(findings.map((f) => [s(f.id), f] as [string, Obj]));
+  const headBg =
+    status === "complete" ? GREEN : status === "partial" ? YELLOW : CORAL;
+  const headText =
+    status === "complete"
+      ? "all checks completed"
+      : status === "partial"
+        ? "some checks incomplete"
+        : "no check completed";
+
+  return (
+    <details
+      className="group overflow-hidden rounded-2xl"
+      style={{ backgroundColor: WHITE, ...border }}
+      open={status !== "complete"}
+    >
+      <summary
+        className="flex cursor-pointer select-none items-center gap-2 px-3 py-2 text-[12px] font-black"
+        style={{ backgroundColor: CARD }}
+      >
+        <ChevronRight
+          size={14}
+          strokeWidth={3}
+          className="transition-transform group-open:rotate-90"
+        />
+        Investigation
+        <span className="font-bold text-neutral-700">
+          · {steps.length} tool{steps.length === 1 ? "" : "s"}
+        </span>
+        <span
+          className="ml-auto rounded-full px-2 py-px text-[10px] font-black uppercase"
+          style={{ backgroundColor: headBg, ...border }}
+        >
+          {headText}
+        </span>
+      </summary>
+      <ol className="space-y-2 p-3" style={{ borderTop: `2px solid ${INK}` }}>
+        {steps.map((st) => {
+          const sub = strs(st.findingIds)
+            .map((id) => byId.get(id))
+            .filter(Boolean) as Obj[];
+          return (
+            <li key={s(st.id)} className="flex items-start gap-2">
+              <StateDot state={STEP_DOT[s(st.status)] ?? "miss"} />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[13px] font-black">{s(st.title)}</span>
+                  <span
+                    className="rounded-full px-1.5 py-px text-[10px] font-black uppercase"
+                    style={{
+                      backgroundColor: STEP_BG[s(st.status)] ?? LINE,
+                      border: `1.5px solid ${INK}`,
+                    }}
+                  >
+                    {STEP_LABEL[s(st.status)] ?? s(st.status)}
+                  </span>
+                  {n(st.round) === 2 && st.dependsOn && (
+                    <span
+                      className="rounded-full px-1.5 py-px text-[10px] font-bold"
+                      style={{
+                        backgroundColor: LAVENDER,
+                        border: `1.5px solid ${INK}`,
+                      }}
+                    >
+                      follows {s(st.dependsOn).replace(/_/g, " ")}
+                    </span>
+                  )}
+                  <span className="ml-auto text-[11px] font-bold text-neutral-600">
+                    {fmtMs(st.ms)}
+                  </span>
+                </div>
+                {st.purpose && (
+                  <p className="text-[12px] leading-4 text-neutral-700">
+                    <span className="font-black">Why: </span>
+                    {s(st.purpose)}
+                  </p>
+                )}
+                <p className="text-[12px] leading-4 text-neutral-900">
+                  {s(st.summary)}
+                </p>
+                {sub.length > 0 && (
+                  <p className="mt-0.5 text-[11px] font-bold text-neutral-600">
+                    {sub.length} finding{sub.length === 1 ? "" : "s"} below
+                  </p>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </details>
+  );
+}
+
+/* ----------------------------------------------------------------- findings */
+
+function FindingCard({ f }: { f: Obj }) {
+  const conf = s(f.confidence);
+  const evidence = strs(f.evidence);
+  const limits = strs(f.limitations);
+  return (
+    <div
+      className="rounded-xl p-2.5"
+      style={{
+        backgroundColor: WHITE,
+        border: `1.5px solid ${INK}`,
+        borderLeft: `6px solid ${CONFIDENCE_COLOR[conf] ?? LINE}`,
+      }}
+    >
+      <div className="flex items-start gap-2">
+        <p className="min-w-0 flex-1 text-[13px] font-black leading-5">
+          {s(f.claim)}
+        </p>
+        {conf && (
+          <span
+            title="How reliable this graph result is. Not a skill rating."
+            className="shrink-0 rounded-full px-2 py-px text-[10px] font-black uppercase"
+            style={{
+              backgroundColor: CONFIDENCE_COLOR[conf] ?? LINE,
+              color: conf === "high" ? WHITE : INK,
+              border: `1.5px solid ${INK}`,
+            }}
+          >
+            {conf} reliability
+          </span>
+        )}
+      </div>
+      {evidence.length > 0 && (
+        <ul className="mt-1.5 space-y-0.5">
+          {evidence.map((e, i) => (
+            <li
+              key={i}
+              className="flex items-start gap-1.5 text-[12px] leading-4 text-neutral-900"
+            >
+              <span
+                className="mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{ backgroundColor: INK }}
+              />
+              <span>{e}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {limits.length > 0 && (
+        <div
+          className="mt-2 rounded-lg px-2 py-1.5"
+          style={{
+            backgroundColor: `${YELLOW}33`,
+            border: `1.5px dashed ${INK}`,
+          }}
+        >
+          <div className="flex items-center gap-1 text-[10px] font-black uppercase">
+            <AlertTriangle size={11} /> Limitations
+          </div>
+          <ul className="mt-0.5 space-y-0.5">
+            {limits.map((l, i) => (
+              <li key={i} className="text-[12px] leading-4">
+                {l}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* --------------------------------------------------------------- graph paths */
+
+function GraphPaths({ paths }: { paths: Obj[] }) {
+  if (!paths.length) return null;
+  return (
+    <Section label="Graph paths">
+      <div className="space-y-3">
+        {paths.map((p, i) => {
+          const nodes = strs(p.nodes);
+          const rels = strs(p.relationships);
+          return (
+            <div key={i}>
+              <div className="flex flex-wrap items-center gap-y-1.5">
+                {nodes.map((nm, j) => (
+                  <span key={`${nm}-${j}`} className="flex items-center">
+                    <span
+                      className="rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+                      style={{ backgroundColor: WHITE, ...border }}
+                    >
+                      {nm}
+                    </span>
+                    {j < nodes.length - 1 && (
+                      <span className="mx-1.5 flex flex-col items-center text-[10px] font-black uppercase text-neutral-700">
+                        <ArrowRight size={14} strokeWidth={3} />
+                        {rels[j] ?? "linked to"}
+                      </span>
+                    )}
+                  </span>
+                ))}
+              </div>
+              {p.meaning && (
+                <p className="mt-1 text-[12px] leading-4 text-neutral-800">
+                  <span className="font-black">Why this? </span>
+                  {s(p.meaning)}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
+/* -------------------------------------------------------------- next actions */
+
+const ACTION_ICON: Record<string, ReactNode> = {
+  investigate: <Search size={13} strokeWidth={3} />,
+  learn: <GraduationCap size={13} strokeWidth={3} />,
+  mission: <Compass size={13} strokeWidth={3} />,
+};
+const ACTION_BG: Record<string, string> = {
+  investigate: SKY,
+  learn: GREEN,
+  mission: PURPLE,
+};
+
+function NextActions({
+  actions,
+  onFollow,
+}: {
+  actions: Obj[];
+  onFollow: (q: string) => void;
+}) {
+  if (!actions.length) return null;
+  return (
+    <div>
+      <SmallLabel>Suggested next actions</SmallLabel>
+      <div className="space-y-1.5">
+        {actions.map((a, i) => {
+          const type = s(a.type, "investigate");
+          const prompt = s(a.prompt);
+          return (
+            <button
+              key={i}
+              type="button"
+              disabled={!prompt}
+              onClick={() => prompt && onFollow(prompt)}
+              className="flex w-full items-start gap-2 rounded-xl p-2 text-left transition-transform hover:-translate-y-0.5 disabled:cursor-default disabled:hover:translate-y-0"
+              style={{ backgroundColor: WHITE, ...border }}
+            >
+              <span
+                className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full"
+                style={{
+                  backgroundColor: ACTION_BG[type] ?? SKY,
+                  color: type === "learn" ? WHITE : INK,
+                  border: `1.5px solid ${INK}`,
+                }}
+              >
+                {ACTION_ICON[type] ?? ACTION_ICON.investigate}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[13px] font-black">
+                  {s(a.title)}
+                </span>
+                <span className="block text-[12px] leading-4 text-neutral-800">
+                  {s(a.reason)}
+                </span>
+              </span>
+              {prompt && (
+                <ChevronRight size={14} strokeWidth={3} className="mt-1" />
+              )}
+            </button>
+          );
+        })}
+      </div>
+      <p className="mt-1 text-[11px] font-semibold text-neutral-600">
+        Suggestions only. Pressing one asks the graph a follow-up question; it
+        does not create or change anything.
+      </p>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ message */
 
 export function AiMessage({
   m,
@@ -781,6 +1141,13 @@ export function AiMessage({
   const tools = arr(m.tools);
   const liveSteps = arr(m.steps) as LiveStep[];
   const ranTools = tools.filter((t) => !t.skipped);
+
+  const inv = (m.investigation ?? null) as Obj | null;
+  const hasInv = !!inv && arr(inv.steps).length > 0;
+  const findings = arr(m.findings);
+  const graphPaths = arr(m.graphPaths);
+  const nextActions = arr(m.nextActions);
+  const invStatus = s(inv?.status, "complete");
 
   return (
     <div className="w-full space-y-2.5">
@@ -815,6 +1182,21 @@ export function AiMessage({
             No answer was produced.
           </p>
         )}
+        {!pending && hasInv && invStatus !== "complete" && (
+          <p
+            className="mt-2 flex items-start gap-1.5 rounded-lg px-2 py-1.5 text-[12px] font-bold leading-4"
+            style={{
+              backgroundColor:
+                invStatus === "failed" ? `${CORAL}33` : `${YELLOW}33`,
+              border: `1.5px dashed ${INK}`,
+            }}
+          >
+            <AlertTriangle size={13} className="mt-px shrink-0" />
+            {invStatus === "failed"
+              ? "No graph check completed, so treat this answer as unverified."
+              : "Some checks were empty or incomplete. Open the investigation to see which, before relying on this answer."}
+          </p>
+        )}
         {m.local && (
           <p className="mt-2 text-[11px] font-bold text-neutral-600">
             Answered from the graph already loaded in your browser (live service
@@ -823,39 +1205,71 @@ export function AiMessage({
         )}
       </Section>
 
-      {/* 2. TOOLS USED */}
-      {(pending ? liveSteps.length > 0 : ranTools.length > 0) && (
+      {/* 2a. LIVE TOOL CHIPS while running */}
+      {pending && liveSteps.length > 0 && (
         <div className="px-0.5">
-          <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-black uppercase tracking-[.14em] text-neutral-600">
-            <Wrench size={12} strokeWidth={3} />
-            {pending ? "Running" : "Tools used"}
-          </div>
+          <SmallLabel icon={<Wrench size={12} strokeWidth={3} />}>
+            Running
+          </SmallLabel>
           <div className="flex flex-wrap gap-1.5">
-            {pending
-              ? liveSteps.map((st) => (
-                  <ToolChip
-                    key={st.tool}
-                    title={st.title}
-                    state={st.state}
-                    ms={st.ms}
-                  />
-                ))
-              : ranTools.map((t, i) => (
-                  <ToolChip
-                    key={`${t.name}-${i}`}
-                    title={s(t.title)}
-                    state={!t.ok ? "fail" : t.miss ? "miss" : "done"}
-                    ms={t.ms}
-                  />
-                ))}
+            {liveSteps.map((st) => (
+              <ToolChip
+                key={st.tool}
+                title={st.title}
+                state={st.state}
+                ms={st.ms}
+                after={st.dependsOn}
+              />
+            ))}
           </div>
         </div>
       )}
 
-      {/* 3. EVIDENCE */}
+      {/* 2b. INVESTIGATION (structured) */}
+      {!pending && hasInv && (
+        <InvestigationPanel inv={inv as Obj} findings={findings} />
+      )}
+
+      {/* 2c. legacy chips when the server sent no investigation */}
+      {!pending && !hasInv && ranTools.length > 0 && (
+        <div className="px-0.5">
+          <SmallLabel icon={<Wrench size={12} strokeWidth={3} />}>
+            Tools used
+          </SmallLabel>
+          <div className="flex flex-wrap gap-1.5">
+            {ranTools.map((t, i) => (
+              <ToolChip
+                key={`${t.name}-${i}`}
+                title={s(t.title)}
+                state={!t.ok ? "fail" : t.miss ? "miss" : "done"}
+                ms={t.ms}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 3. FINDINGS: claim + evidence + limitations */}
+      {!pending && findings.length > 0 && (
+        <Section label="Evidence behind this answer">
+          <div className="space-y-2">
+            {findings.map((f) => (
+              <FindingCard key={s(f.id)} f={f} />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* 4. GRAPH PATHS */}
+      {!pending && <GraphPaths paths={graphPaths} />}
+
+      {/* 5. NEXT ACTIONS */}
+      {!pending && <NextActions actions={nextActions} onFollow={onFollow} />}
+
+      {/* 6. VISUAL EVIDENCE BLOCKS */}
       {blocks.length > 0 && (
         <Section
-          label="Evidence from your graph"
+          label="Graph views"
           right={
             <button
               type="button"
@@ -888,7 +1302,7 @@ export function AiMessage({
         </div>
       )}
 
-      {/* 4. HOW IT WAS ANSWERED */}
+      {/* 7. TECHNICAL TRACE */}
       {!pending && tools.length > 0 && (
         <div
           className="overflow-hidden rounded-2xl"
@@ -898,12 +1312,10 @@ export function AiMessage({
         </div>
       )}
 
-      {/* 5. ASK NEXT */}
+      {/* 8. ASK NEXT */}
       {!pending && followups.length > 0 && (
         <div className="px-0.5">
-          <div className="mb-1.5 text-[11px] font-black uppercase tracking-[.14em] text-neutral-600">
-            Ask next
-          </div>
+          <SmallLabel>Ask next</SmallLabel>
           <div className="flex flex-wrap gap-1.5">
             {followups.map((f) => (
               <button
@@ -973,24 +1385,31 @@ function StepList({ steps }: { steps: string[] }) {
 function ToolCard({ t }: { t: Obj }) {
   const skipped = t.skipped === true;
   const miss = t.miss === true && !skipped;
-  const failed = !t.ok && !skipped;
-  const state: "done" | "miss" | "fail" = failed
+  const failed = !t.ok && !skipped && !miss;
+  const status = s(t.status);
+  const partial = status === "partial";
+  const state: DotState = failed
     ? "fail"
     : skipped || miss
       ? "miss"
-      : "done";
+      : partial
+        ? "partial"
+        : "done";
   const label = skipped
     ? "skipped"
     : failed
       ? "failed"
       : miss
         ? "no match"
-        : "used";
+        : partial
+          ? "partial"
+          : "used";
   const args = Object.entries((t.args ?? {}) as Obj).filter(
     ([, v]) => v != null && v !== "",
   );
   const features = (Array.isArray(t.features) ? t.features : []) as string[];
   const how = (Array.isArray(t.how) ? t.how : []).map((x: unknown) => s(x));
+  const limits = strs(t.limitations);
 
   return (
     <div
@@ -1006,8 +1425,16 @@ function ToolCard({ t }: { t: Obj }) {
         <span className="text-[13px] font-black">{s(t.title)}</span>
         <Badge
           text={label}
-          bg={failed ? CORAL : skipped || miss ? LINE : GREEN}
+          bg={
+            failed ? CORAL : partial ? YELLOW : skipped || miss ? LINE : GREEN
+          }
         />
+        {n(t.round) === 2 && t.dependsOn && (
+          <Badge
+            text={`follows ${s(t.dependsOn).replace(/_/g, " ")}`}
+            bg={LAVENDER}
+          />
+        )}
         {!skipped && (
           <span className="ml-auto text-[11px] font-bold text-neutral-600">
             {fmtMs(t.ms)}
@@ -1057,6 +1484,15 @@ function ToolCard({ t }: { t: Obj }) {
             </p>
           ) : (
             <>
+              {limits.length > 0 && (
+                <p
+                  className="rounded-lg px-2 py-1.5 text-[12px] leading-4"
+                  style={{ backgroundColor: `${YELLOW}33` }}
+                >
+                  <span className="font-black">Caveat: </span>
+                  {limits.join(" ")}
+                </p>
+              )}
               {how.length > 0 && (
                 <div>
                   <div className="text-[10px] font-black uppercase tracking-wider text-neutral-600">
@@ -1102,9 +1538,10 @@ export function ToolTrace({
           strokeWidth={3}
           className="transition-transform group-open:rotate-90"
         />
-        How this answer was reached
+        Technical trace
         <span className="font-bold text-neutral-700">
           · {used} graph tool{used === 1 ? "" : "s"} used
+          {n(m.rounds) === 2 ? ", 2 rounds" : ""}
         </span>
         {m.durationMs != null && (
           <span className="ml-auto text-[11px] font-bold text-neutral-600">

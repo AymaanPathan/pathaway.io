@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Graph } from "../db/falkordb.js";
 import {
   asAuthenticity,
@@ -38,6 +39,17 @@ export function daysSince(iso: string): number | null {
   return Number.isFinite(t) ? Math.floor((Date.now() - t) / 86_400_000) : null;
 }
 
+/**
+ * Per-tool-run query health. cypher() returns null when a query throws, and most
+ * tools treat null like "no rows", so a broken query used to look exactly like an
+ * empty graph. runTool() opens one of these around every tool; cypher() records
+ * failures into it so the agent can report "partial" instead of "empty".
+ */
+export interface QueryHealth {
+  total: number;
+  failed: string[];
+}
+export const queryHealth = new AsyncLocalStorage<QueryHealth>();
 
 export async function cypher(
   graph: Graph,
@@ -45,10 +57,13 @@ export async function cypher(
   query: string,
   params: Row = {},
 ): Promise<Row[] | null> {
+  const health = queryHealth.getStore();
+  if (health) health.total += 1;
   try {
     const result = await graph.query(query, { params });
     return (result.data ?? []) as Row[];
   } catch (error) {
+    health?.failed.push(label);
     console.warn(
       `[topic-tools] ${label} failed:`,
       error instanceof Error ? error.message : error,
@@ -56,9 +71,6 @@ export async function cypher(
     return null;
   }
 }
-
-
-
 
 export const FOUNDATION_WEAK_RANK = 2;
 
@@ -69,14 +81,12 @@ const CONFIDENCE_RANK: Record<string, number> = { high: 3, medium: 2, low: 1 };
 export const evidenceVolume = (t: DevTopic): number =>
   t.files + 2 * t.commits + 3 * t.repos;
 
-
 export const strengthOrder = (a: DevTopic, b: DevTopic): number =>
   b.levelRank - a.levelRank ||
   (CONFIDENCE_RANK[b.confidence] ?? 0) - (CONFIDENCE_RANK[a.confidence] ?? 0) ||
   evidenceVolume(b) - evidenceVolume(a) ||
   b.score - a.score ||
   a.name.localeCompare(b.name);
-
 
 export function broadButShallow(topics: DevTopic[]): {
   items: DevTopic[];
@@ -91,8 +101,6 @@ export function broadButShallow(topics: DevTopic[]): {
     .sort((a, b) => b.files - a.files || a.name.localeCompare(b.name));
   return { items, bar };
 }
-
-
 
 export async function loadDeveloperTopics(
   graph: Graph,
@@ -175,8 +183,6 @@ export async function loadNeighbors(
   return out;
 }
 
-
-
 export interface TaxonomyShape {
   topics: number;
   builds: number;
@@ -204,18 +210,10 @@ export async function taxonomyShape(graph: Graph): Promise<TaxonomyShape> {
   };
 }
 
-
 export const relTypes = (s: TaxonomyShape): string[] => [
   ...(s.builds > 0 ? ["BUILDS_ON"] : []),
   ...(s.related > 0 ? ["RELATED_TOPIC"] : []),
 ];
-
-
-
-
-
-
-
 
 export interface Subgraph {
   slugs: string[];
@@ -272,7 +270,7 @@ async function loadSubgraph(
       builds.push([a, b]);
     } else {
       const k = pairKey(a, b);
-      if (seenR.has(k)) continue; 
+      if (seenR.has(k)) continue;
       seenR.add(k);
       related.push([a, b]);
     }
@@ -299,7 +297,6 @@ export function scopedSubgraph(
   }
   return p;
 }
-
 
 export function componentsLocal(
   nodes: string[],
@@ -331,10 +328,7 @@ export function componentsLocal(
   return out;
 }
 
-
-
 export interface MetricMeta {
-  
   scope: "developer" | "global" | "persisted" | "none";
   nodes: number;
   builds: number;
@@ -359,7 +353,6 @@ export function metricMeta(m: MetricResult): MetricMeta {
     note: "",
   };
 }
-
 
 export function liftOf(m: MetricResult, slug: string): number {
   const n = m.scores.size;
@@ -398,7 +391,6 @@ function pageRankLocal(
   }
   return new Map(nodes.map((s, i) => [s, r[i]!]));
 }
-
 
 function betweennessLocal(
   nodes: string[],
@@ -448,7 +440,6 @@ function betweennessLocal(
   }
   return new Map(nodes.map((s, i) => [s, cb[i]! / 2]));
 }
-
 
 const GLOBAL_ONLY = () => process.env.TOPIC_METRICS_SCOPE === "global";
 
@@ -549,7 +540,6 @@ async function globalBetweenness(graph: Graph): Promise<WithMeta> {
   });
 }
 
-
 export async function computePageRank(
   graph: Graph,
   scope?: MetricScope,
@@ -588,7 +578,6 @@ export async function computePageRank(
   }
   return globalPageRank(graph);
 }
-
 
 export async function computeBetweenness(
   graph: Graph,
@@ -630,7 +619,6 @@ export async function computeBetweenness(
   return globalBetweenness(graph);
 }
 
-
 export function graphOrder(pr: Map<string, number>, bt: Map<string, number>) {
   return (
     a: { slug: string; name: string },
@@ -646,8 +634,6 @@ export const maxOf = (m: Map<string, number>): number => {
   for (const v of m.values()) if (v > max) max = v;
   return max;
 };
-
-
 
 export function topicItem(t: DevTopic, note?: string): TopicItem {
   return {
