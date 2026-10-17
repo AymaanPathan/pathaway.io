@@ -36,26 +36,26 @@ import {
 } from "../compoenents/ChatBlock";
 
 /* ========================================================================== */
-/* DESIGN TOKENS (same theme as before)                                       */
+/* DESIGN TOKENS (shared with the landing page)                               */
 /* ========================================================================== */
 
 const DISPLAY_FONT = '"Space Grotesk", "Arial Black", sans-serif';
 const BODY_FONT = '"Inter", "Helvetica Neue", sans-serif';
-const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+const MONO = '"IBM Plex Mono", "SF Mono", ui-monospace, monospace';
 
 const YELLOW = "#F5C542";
-const CORAL = "#F2704F";
+const CORAL = "#F0776B";
 const SKY = "#5FA0D8";
 const GREEN = "#3FA24A";
 const PURPLE = "#8B72D9";
 const LAVENDER = "#D8D0F2";
 const INK = "#101210";
-const PAPER = "#F1EEE7";
-const LINE = "#DAD6CC";
-const CARD = "#E9E5DB";
-const WHITE = "#FFFDF8";
+const PAPER = "#FBF7EA";
+const LINE = "#E4E0D4";
+const CARD = "#F1ECDC";
+const WHITE = "#FFFFFF";
 
-const GUTTER = "px-4 sm:px-6 lg:px-8";
+const GUTTER = "px-5 sm:px-6";
 const border = { border: `2px solid ${INK}` };
 const shadow = (n = 3) => `${n}px ${n}px 0 0 ${INK}`;
 const clamp = (n: number): CSSProperties => ({
@@ -395,7 +395,7 @@ function layoutAreas(nodes: Obj[], edges: Obj[]) {
         const dy = a.y - b.y;
         const d2 = Math.max(dx * dx + dy * dy, 80);
         const d = Math.sqrt(d2);
-        const f = (14000 / d2) * (0.35 + cool);
+        const f = (22000 / d2) * (0.35 + cool);
         a.vx += (dx / d) * f;
         a.vy += (dy / d) * f;
         b.vx -= (dx / d) * f;
@@ -407,7 +407,7 @@ function layoutAreas(nodes: Obj[], edges: Obj[]) {
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const d = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-      const f = (d - 150) * 0.02;
+      const f = (d - 170) * 0.02;
       a.vx += (dx / d) * f;
       a.vy += (dy / d) * f;
       b.vx -= (dx / d) * f;
@@ -465,7 +465,7 @@ function layoutLayers(nodes: Obj[]) {
     row.forEach((n, i) => {
       const x =
         row.length === 1 ? GW / 2 : 150 + (i / (row.length - 1)) * (GW - 230);
-      out.set(asString(n.id), { x, y: y + (i % 2 ? 14 : -14) });
+      out.set(asString(n.id), { x, y: y + (i % 2 ? 22 : -22) });
     });
   });
   return { pos: out, bands };
@@ -686,18 +686,25 @@ function finishEgo(
 }
 
 const EGO_W = 1000;
-const EGO_H = 620;
+const EGO_H = 660;
+/* ellipse radii [rx, ry] per hop */
+const RINGS: Record<number, [number, number]> = {
+  1: [230, 150],
+  2: [400, 235],
+  3: [470, 290],
+};
+const NODE_R = (hop: number) => (hop === 0 ? 38 : hop === 1 ? 24 : 17);
 
+/**
+ * Sector layout: every first-step node owns a slice of the circle sized by how many
+ * nodes hang off it, and its children are spread evenly inside that slice. Dense
+ * slices alternate between two radii so nodes and labels never stack on each other.
+ */
 function egoLayout(nodes: GNode[], edges: GEdge[], centerId: string) {
   const out = new Map<string, Pt & { angle: number }>();
   const cx = EGO_W / 2;
   const cy = EGO_H / 2;
   out.set(centerId, { x: cx, y: cy, angle: 0 });
-  const ring: Record<number, [number, number]> = {
-    1: [250, 165],
-    2: [430, 262],
-    3: [470, 285],
-  };
   const byHop = (h: number) =>
     nodes
       .filter((n) => n.hop === h)
@@ -705,58 +712,96 @@ function egoLayout(nodes: GNode[], edges: GEdge[], centerId: string) {
         (a, b) =>
           a.kind.localeCompare(b.kind) || a.label.localeCompare(b.label),
       );
-
-  const first = byHop(1);
-  first.forEach((n, i) => {
-    const a = (i / Math.max(1, first.length)) * Math.PI * 2 - Math.PI / 2;
-    out.set(n.id, {
-      x: cx + Math.cos(a) * ring[1][0],
-      y: cy + Math.sin(a) * ring[1][1],
+  const hopOf = new Map(nodes.map((n) => [n.id, n.hop] as [string, number]));
+  const parentOf = (n: GNode): string | null => {
+    for (const e of edges) {
+      const other =
+        e.source === n.id ? e.target : e.target === n.id ? e.source : null;
+      if (other && hopOf.get(other) === n.hop - 1) return other;
+    }
+    return null;
+  };
+  const put = (id: string, ring: [number, number], a: number, extra = 0) =>
+    out.set(id, {
+      x: cx + Math.cos(a) * (ring[0] + extra),
+      y: cy + Math.sin(a) * (ring[1] + extra * 0.62),
       angle: a,
     });
+
+  const first = byHop(1);
+  const kids2 = new Map<string, GNode[]>();
+  const orphans: GNode[] = [];
+  for (const n of byHop(2)) {
+    const p = parentOf(n);
+    if (p) kids2.set(p, [...(kids2.get(p) ?? []), n]);
+    else orphans.push(n);
+  }
+
+  const weightOf = (n: GNode) => Math.max(1, kids2.get(n.id)?.length ?? 0);
+  const totalW =
+    first.reduce((s, n) => s + weightOf(n), 0) +
+    (orphans.length ? orphans.length : 0);
+  let cursor = -Math.PI / 2;
+  const dense = (count: number, span: number, ring: [number, number]) =>
+    (span * Math.sqrt((ring[0] ** 2 + ring[1] ** 2) / 2)) / Math.max(1, count) <
+    46;
+
+  first.forEach((n) => {
+    const w = weightOf(n);
+    const span = (Math.PI * 2 * w) / Math.max(1, totalW);
+    const mid = cursor + span / 2;
+    put(n.id, RINGS[1], mid);
+    const list = kids2.get(n.id) ?? [];
+    const usable = span * 0.92;
+    const stagger = dense(list.length, usable, RINGS[2]);
+    list.forEach((k, i) => {
+      const a =
+        list.length === 1
+          ? mid
+          : mid - usable / 2 + ((i + 0.5) / list.length) * usable;
+      put(k.id, RINGS[2], a, stagger && i % 2 ? 34 : 0);
+    });
+    cursor += span;
   });
 
-  for (const h of [2, 3]) {
-    const layer = byHop(h);
-    const kids = new Map<string, GNode[]>();
-    for (const n of layer) {
-      const parent =
-        edges
-          .map((e) =>
-            e.source === n.id ? e.target : e.target === n.id ? e.source : null,
-          )
-          .find((id) => id && nodes.find((x) => x.id === id)?.hop === h - 1) ??
-        centerId;
-      kids.set(parent, [...(kids.get(parent) ?? []), n]);
-    }
-    let orphan = 0;
-    for (const [parent, list] of kids) {
-      const base = out.get(parent)?.angle ?? -Math.PI / 2 + orphan++ * 0.7;
-      const spread = Math.min(0.9, 0.2 * list.length);
-      list.forEach((n, i) => {
-        const a =
-          list.length === 1
-            ? base
-            : base - spread / 2 + (i / (list.length - 1)) * spread;
-        out.set(n.id, {
-          x: cx + Math.cos(a) * ring[h][0],
-          y: cy + Math.sin(a) * ring[h][1],
-          angle: a,
-        });
-      });
-    }
+  /* second-step nodes that have no first-step parent share the remaining slice */
+  if (orphans.length) {
+    const span = (Math.PI * 2 * orphans.length) / Math.max(1, totalW);
+    const stagger = dense(orphans.length, span * 0.92, RINGS[2]);
+    orphans.forEach((k, i) => {
+      const a = cursor + ((i + 0.5) / orphans.length) * span;
+      put(k.id, RINGS[2], a, stagger && i % 2 ? 34 : 0);
+    });
   }
-  /* anything unreachable sits on the outer ring */
+
+  /* third step: fan out around the parent, on the outer ring */
+  const kids3 = new Map<string, GNode[]>();
+  const lost3: GNode[] = [];
+  for (const n of byHop(3)) {
+    const p = parentOf(n);
+    if (p && out.has(p)) kids3.set(p, [...(kids3.get(p) ?? []), n]);
+    else lost3.push(n);
+  }
+  for (const [parent, list] of kids3) {
+    const base = out.get(parent)!.angle;
+    const spread = Math.min(0.7, 0.14 * list.length);
+    list.forEach((k, i) => {
+      const a =
+        list.length === 1
+          ? base
+          : base - spread / 2 + (i / (list.length - 1)) * spread;
+      put(k.id, RINGS[3], a, i % 2 ? 22 : 0);
+    });
+  }
+  lost3.forEach((k, i) =>
+    put(k.id, RINGS[3], (i / Math.max(1, lost3.length)) * Math.PI * 2),
+  );
+
   nodes
     .filter((n) => !out.has(n.id))
-    .forEach((n, i, arr) => {
-      const a = (i / Math.max(1, arr.length)) * Math.PI * 2;
-      out.set(n.id, {
-        x: cx + Math.cos(a) * 470,
-        y: cy + Math.sin(a) * 285,
-        angle: a,
-      });
-    });
+    .forEach((n, i, arr) =>
+      put(n.id, RINGS[3], (i / Math.max(1, arr.length)) * Math.PI * 2),
+    );
   return out;
 }
 
@@ -842,6 +887,9 @@ function EvidenceGraph({
   const hoverNode = hover ? ego.nodes.find((n) => n.id === hover) : null;
   const hp = hover ? pos.get(hover) : null;
   const maxHop = Math.max(0, ...ego.nodes.map((n) => n.hop));
+  /* far-out nodes only get a label when the picture is sparse, or when they are in focus */
+  const outerCount = visibleNodes.filter((n) => n.hop >= 2).length;
+  const labelOuter = outerCount <= 10;
 
   const toggleKind = (k: string) =>
     setHiddenKinds((s) => {
@@ -854,17 +902,17 @@ function EvidenceGraph({
   return (
     <div
       className="rounded-2xl"
-      style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(4) }}
+      style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(3) }}
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-3">
+      <div className="flex flex-wrap items-start justify-between gap-3 px-4 pt-4">
         <div>
           <h3
-            className="text-[16px] font-black"
+            className="text-[18px] font-bold"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             Evidence graph
           </h3>
-          <p className="text-[12px] font-semibold text-neutral-700">
+          <p className="mt-0.5 text-[12px] font-semibold text-neutral-600">
             {visibleNodes.length - 1} connected nodes, up to {maxHop} step
             {maxHop === 1 ? "" : "s"} from {asString(detail.topic?.name)}. Tap
             any node.
@@ -878,6 +926,7 @@ function EvidenceGraph({
                 key={k}
                 type="button"
                 onClick={() => toggleKind(k)}
+                aria-pressed={!off}
                 className="press inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-bold"
                 style={{
                   backgroundColor: off ? CARD : WHITE,
@@ -899,163 +948,162 @@ function EvidenceGraph({
         </div>
       </div>
 
-      <div className="relative mt-1 h-[520px] overflow-hidden sm:h-[600px]">
-        {loading && (
-          <div className="absolute left-4 top-2 z-10 flex items-center gap-2 text-[12px] font-bold">
-            <RefreshCw size={13} className="animate-spin" /> reading the graph…
-          </div>
-        )}
-        <svg
-          viewBox={`0 0 ${EGO_W} ${EGO_H}`}
-          className="absolute inset-0 h-full w-full"
-          role="group"
-          aria-label="Evidence graph for this topic"
+      <div className="mt-2 overflow-x-auto">
+        <div
+          className="relative mx-auto w-full min-w-[760px]"
+          style={{ aspectRatio: `${EGO_W} / ${EGO_H}` }}
         >
-          <defs>
-            <pattern
-              id="egrid"
-              width="32"
-              height="32"
-              patternUnits="userSpaceOnUse"
-            >
-              <circle cx="1" cy="1" r="1" fill={INK} opacity=".12" />
-            </pattern>
-            <marker
-              id="earrow"
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth="6"
-              markerHeight="6"
-              orient="auto-start-reverse"
-            >
-              <path d="M0,0 L10,5 L0,10 z" fill={INK} />
-            </marker>
-          </defs>
-          <rect width={EGO_W} height={EGO_H} fill="url(#egrid)" />
-          {[1, 2, 3]
-            .filter((h) => h <= maxHop)
-            .map((h) => (
-              <ellipse
-                key={h}
-                cx={EGO_W / 2}
-                cy={EGO_H / 2}
-                rx={[0, 250, 430, 470][h]}
-                ry={[0, 165, 262, 285][h]}
-                fill="none"
-                stroke={INK}
-                strokeOpacity=".12"
-                strokeDasharray="4 6"
-              />
-            ))}
-
-          {visibleEdges.map((e, i) => {
-            const a = pos.get(e.source);
-            const b = pos.get(e.target);
-            const na = visibleNodes.find((n) => n.id === e.source);
-            const nb = visibleNodes.find((n) => n.id === e.target);
-            if (!a || !b || !na || !nb) return null;
-            const ra = na.hop === 0 ? 38 : na.hop === 1 ? 24 : 17;
-            const rb = nb.hop === 0 ? 38 : nb.hop === 1 ? 24 : 17;
-            const dx = b.x - a.x;
-            const dy = b.y - a.y;
-            const d = Math.max(Math.hypot(dx, dy), 1);
-            const x1 = a.x + (dx / d) * ra;
-            const y1 = a.y + (dy / d) * ra;
-            const x2 = b.x - (dx / d) * (rb + 4);
-            const y2 = b.y - (dy / d) * (rb + 4);
-            const touch = focus && (e.source === focus || e.target === focus);
-            const dim = focusSet && !touch;
-            const directed =
-              e.type === "BUILDS_ON" ||
-              e.type === "USES_APPROACH" ||
-              e.type === "BACKED_BY";
-            return (
-              <g
-                key={e.id}
-                style={{
-                  opacity: dim ? 0.07 : touch ? 1 : 0.5,
-                  transition: "opacity .3s ease",
-                }}
+          {loading && (
+            <div className="absolute left-4 top-2 z-10 flex items-center gap-2 text-[12px] font-bold">
+              <RefreshCw size={13} className="animate-spin" /> reading the
+              graph…
+            </div>
+          )}
+          <svg
+            viewBox={`0 0 ${EGO_W} ${EGO_H}`}
+            className="absolute inset-0 h-full w-full"
+            role="group"
+            aria-label="Evidence graph for this topic"
+          >
+            <defs>
+              <pattern
+                id="egrid"
+                width="32"
+                height="32"
+                patternUnits="userSpaceOnUse"
               >
-                <line
-                  x1={x1}
-                  y1={y1}
-                  x2={x2}
-                  y2={y2}
-                  stroke={touch ? CORAL : INK}
-                  strokeWidth={touch ? 3 : 1.5}
-                  strokeDasharray={
-                    e.type === "RELATED_TOPIC" ? "5 5" : undefined
-                  }
-                  markerEnd={directed ? "url(#earrow)" : undefined}
-                  pathLength={1}
-                  style={{
-                    transition: "stroke-width .2s ease",
-                    animation: `odraw .8s ${Math.min(i, 30) * 0.03}s ease-out both`,
-                  }}
+                <circle cx="1" cy="1" r="1" fill={INK} opacity=".1" />
+              </pattern>
+              <marker
+                id="earrow"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="6"
+                markerHeight="6"
+                orient="auto-start-reverse"
+              >
+                <path d="M0,0 L10,5 L0,10 z" fill={INK} />
+              </marker>
+            </defs>
+            <rect width={EGO_W} height={EGO_H} fill="url(#egrid)" />
+            {[1, 2, 3]
+              .filter((h) => h <= maxHop)
+              .map((h) => (
+                <ellipse
+                  key={h}
+                  cx={EGO_W / 2}
+                  cy={EGO_H / 2}
+                  rx={RINGS[h][0]}
+                  ry={RINGS[h][1]}
+                  fill="none"
+                  stroke={INK}
+                  strokeOpacity=".12"
+                  strokeDasharray="4 6"
                 />
-                {touch && (
-                  <text
-                    x={(x1 + x2) / 2}
-                    y={(y1 + y2) / 2 - 6}
-                    textAnchor="middle"
-                    fontSize="11"
-                    fontWeight={800}
-                    fontFamily={BODY_FONT}
-                    style={{
-                      fill: INK,
-                      paintOrder: "stroke",
-                      stroke: WHITE,
-                      strokeWidth: 4,
-                    }}
-                  >
-                    {edgeLabel(e.type)}
-                  </text>
-                )}
-              </g>
-            );
-          })}
+              ))}
 
-          {visibleNodes.map((n, i) => {
-            const p = pos.get(n.id);
-            if (!p) return null;
-            const r = n.hop === 0 ? 38 : n.hop === 1 ? 24 : 17;
-            const fill =
-              n.kind === "topic"
-                ? (LEVEL_COLOR[n.level ?? ""] ?? (n.hop === 0 ? INK : CARD))
-                : kindMeta(n.kind).color;
-            const dim = focusSet ? !focusSet.has(n.id) : false;
-            const sel = active === n.id;
-            const unassessed =
-              n.kind === "topic" && n.hop > 0 && n.assessed === false;
-            return (
-              <g
-                key={n.id}
-                tabIndex={0}
-                role="button"
-                aria-label={`${kindMeta(n.kind).label}: ${n.label}`}
-                onClick={() => setActive(sel ? null : n.id)}
-                onKeyDown={(ev) => {
-                  if (ev.key === "Enter" || ev.key === " ") {
-                    ev.preventDefault();
-                    setActive(sel ? null : n.id);
-                  }
-                }}
-                onMouseEnter={() => setHover(n.id)}
-                onMouseLeave={() => setHover(null)}
-                onFocus={() => setHover(n.id)}
-                onBlur={() => setHover(null)}
-                style={{
-                  cursor: "pointer",
-                  opacity: dim ? 0.15 : 1,
-                  transition: "opacity .3s ease",
-                }}
-              >
+            {visibleEdges.map((e) => {
+              const a = pos.get(e.source);
+              const b = pos.get(e.target);
+              const na = visibleNodes.find((n) => n.id === e.source);
+              const nb = visibleNodes.find((n) => n.id === e.target);
+              if (!a || !b || !na || !nb) return null;
+              const ra = NODE_R(na.hop);
+              const rb = NODE_R(nb.hop);
+              const dx = b.x - a.x;
+              const dy = b.y - a.y;
+              const d = Math.max(Math.hypot(dx, dy), 1);
+              const x1 = a.x + (dx / d) * ra;
+              const y1 = a.y + (dy / d) * ra;
+              const x2 = b.x - (dx / d) * (rb + 4);
+              const y2 = b.y - (dy / d) * (rb + 4);
+              const touch = focus && (e.source === focus || e.target === focus);
+              const dim = focusSet && !touch;
+              const directed =
+                e.type === "BUILDS_ON" ||
+                e.type === "USES_APPROACH" ||
+                e.type === "BACKED_BY";
+              return (
                 <g
+                  key={e.id}
                   style={{
-                    transformOrigin: `${p.x}px ${p.y}px`,
-                    animation: `opop .5s ${Math.min(i, 40) * 0.025}s cubic-bezier(.2,1.4,.4,1) both`,
+                    opacity: dim ? 0.07 : touch ? 1 : 0.5,
+                    transition: "opacity .3s ease",
+                  }}
+                >
+                  <line
+                    x1={x1}
+                    y1={y1}
+                    x2={x2}
+                    y2={y2}
+                    stroke={touch ? CORAL : INK}
+                    strokeWidth={touch ? 3 : 1.5}
+                    strokeDasharray={
+                      e.type === "RELATED_TOPIC" ? "5 5" : undefined
+                    }
+                    markerEnd={directed ? "url(#earrow)" : undefined}
+                  />
+                  {touch && (
+                    <text
+                      x={(x1 + x2) / 2}
+                      y={(y1 + y2) / 2 - 6}
+                      textAnchor="middle"
+                      fontSize="11"
+                      fontWeight={700}
+                      fontFamily={BODY_FONT}
+                      style={{
+                        fill: INK,
+                        paintOrder: "stroke",
+                        stroke: WHITE,
+                        strokeWidth: 4,
+                      }}
+                    >
+                      {edgeLabel(e.type)}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+
+            {visibleNodes.map((n) => {
+              const p = pos.get(n.id);
+              if (!p) return null;
+              const r = NODE_R(n.hop);
+              const fill =
+                n.kind === "topic"
+                  ? (LEVEL_COLOR[n.level ?? ""] ?? (n.hop === 0 ? INK : CARD))
+                  : kindMeta(n.kind).color;
+              const dim = focusSet ? !focusSet.has(n.id) : false;
+              const sel = active === n.id;
+              const unassessed =
+                n.kind === "topic" && n.hop > 0 && n.assessed === false;
+              const showLabel =
+                n.hop <= 1 ||
+                labelOuter ||
+                sel ||
+                (focusSet ? focusSet.has(n.id) && !!focus : false);
+              return (
+                <g
+                  key={n.id}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`${kindMeta(n.kind).label}: ${n.label}`}
+                  onClick={() => setActive(sel ? null : n.id)}
+                  onKeyDown={(ev) => {
+                    if (ev.key === "Enter" || ev.key === " ") {
+                      ev.preventDefault();
+                      setActive(sel ? null : n.id);
+                    }
+                  }}
+                  onMouseEnter={() => setHover(n.id)}
+                  onMouseLeave={() => setHover(null)}
+                  onFocus={() => setHover(n.id)}
+                  onBlur={() => setHover(null)}
+                  style={{
+                    cursor: "pointer",
+                    opacity: dim ? 0.15 : 1,
+                    transition: "opacity .3s ease",
                   }}
                 >
                   {n.hop === 0 && (
@@ -1064,9 +1112,8 @@ function EvidenceGraph({
                       cy={p.y}
                       r={r + 9}
                       fill="none"
-                      stroke={CORAL}
+                      stroke={YELLOW}
                       strokeWidth="3"
-                      style={{ animation: "oring 2.4s ease-out infinite" }}
                     />
                   )}
                   {sel && (
@@ -1084,65 +1131,64 @@ function EvidenceGraph({
                     cy={p.y}
                     r={r}
                     fill={fill}
+                    stroke={INK}
+                    strokeWidth={sel || n.hop === 0 ? 4 : 2.5}
                     strokeDasharray={unassessed ? "4 3" : undefined}
-                    style={{
-                      stroke: INK,
-                      strokeWidth: sel || n.hop === 0 ? 4 : 2.5,
-                      filter: "drop-shadow(2px 3px 0 rgba(16,18,16,.9))",
-                      transition: "stroke-width .2s ease",
-                    }}
                   />
-                  <text
-                    x={p.x}
-                    y={n.hop === 0 ? p.y + r + 20 : p.y + r + 14}
-                    textAnchor="middle"
-                    fontSize={n.hop === 0 ? 16 : n.hop === 1 ? 12 : 11}
-                    fontWeight={n.hop === 0 ? 900 : 700}
-                    fontFamily={n.hop === 0 ? DISPLAY_FONT : BODY_FONT}
-                    style={{
-                      fill: INK,
-                      paintOrder: "stroke",
-                      stroke: "#FFFDF8",
-                      strokeWidth: 5,
-                      strokeLinejoin: "round",
-                    }}
-                  >
-                    {cut(n.label, n.hop === 0 ? 28 : 20)}
-                  </text>
+                  {showLabel && (
+                    <text
+                      x={p.x}
+                      y={n.hop === 0 ? p.y + r + 20 : p.y + r + 14}
+                      textAnchor="middle"
+                      fontSize={n.hop === 0 ? 16 : n.hop === 1 ? 12 : 11}
+                      fontWeight={n.hop === 0 ? 800 : 700}
+                      fontFamily={n.hop === 0 ? DISPLAY_FONT : BODY_FONT}
+                      style={{
+                        fill: INK,
+                        paintOrder: "stroke",
+                        stroke: WHITE,
+                        strokeWidth: 5,
+                        strokeLinejoin: "round",
+                        pointerEvents: "none",
+                      }}
+                    >
+                      {cut(n.label, n.hop === 0 ? 28 : n.hop === 1 ? 22 : 18)}
+                    </text>
+                  )}
                 </g>
-              </g>
-            );
-          })}
-        </svg>
+              );
+            })}
+          </svg>
 
-        {hoverNode && hp && (
-          <div
-            className="pointer-events-none absolute z-20 max-w-[220px] rounded-xl px-2.5 py-1.5 text-[12px] leading-4"
-            style={{
-              left: `${(hp.x / EGO_W) * 100}%`,
-              top: `${(hp.y / EGO_H) * 100}%`,
-              transform: `translate(${hp.x > EGO_W * 0.65 ? "-110%" : "14px"}, -50%)`,
-              backgroundColor: INK,
-              color: PAPER,
-            }}
-          >
-            <div className="font-black">{hoverNode.label}</div>
-            <div className="opacity-80">
-              {kindMeta(hoverNode.kind).label}
-              {hoverNode.level
-                ? ` · ${LEVEL_LABEL[hoverNode.level] ?? hoverNode.level}`
-                : ""}
-              {hoverNode.hop > 0
-                ? ` · ${hoverNode.hop} step${hoverNode.hop === 1 ? "" : "s"} away`
-                : ""}
+          {hoverNode && hp && (
+            <div
+              className="pointer-events-none absolute z-20 max-w-[240px] rounded-xl px-2.5 py-1.5 text-[12px] leading-4"
+              style={{
+                left: `${(hp.x / EGO_W) * 100}%`,
+                top: `${(hp.y / EGO_H) * 100}%`,
+                transform: `translate(${hp.x > EGO_W * 0.65 ? "-110%" : "14px"}, -50%)`,
+                backgroundColor: INK,
+                color: WHITE,
+              }}
+            >
+              <div className="font-bold">{hoverNode.label}</div>
+              <div className="opacity-80">
+                {kindMeta(hoverNode.kind).label}
+                {hoverNode.level
+                  ? `, ${LEVEL_LABEL[hoverNode.level] ?? hoverNode.level}`
+                  : ""}
+                {hoverNode.hop > 0
+                  ? `, ${hoverNode.hop} step${hoverNode.hop === 1 ? "" : "s"} away`
+                  : ""}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       <div
-        className="px-4 pb-4 pt-2"
-        style={{ borderTop: `1px solid ${LINE}` }}
+        className="px-4 pb-4 pt-3"
+        style={{ borderTop: `2px solid ${INK}`, backgroundColor: PAPER }}
       >
         {activeNode ? (
           <div
@@ -1161,7 +1207,7 @@ function EvidenceGraph({
                   }
                 />
                 <span
-                  className="text-[15px] font-black"
+                  className="text-[15px] font-bold"
                   style={{ fontFamily: DISPLAY_FONT }}
                 >
                   {activeNode.label}
@@ -1177,7 +1223,7 @@ function EvidenceGraph({
                   <li key={e.id} className="text-[12px] leading-4">
                     <b>{nameOf(e.source)}</b>{" "}
                     <span
-                      className="rounded-full px-1.5 text-[10px] font-black"
+                      className="rounded-full px-1.5 text-[10px] font-bold"
                       style={{
                         backgroundColor: LAVENDER,
                         border: `1.5px solid ${INK}`,
@@ -1188,8 +1234,7 @@ function EvidenceGraph({
                     <b>{nameOf(e.target)}</b>
                     {e.note ? (
                       <span className="text-neutral-700">
-                        {" "}
-                        · {cut(e.note, 90)}
+                        , {cut(e.note, 90)}
                       </span>
                     ) : null}
                   </li>
@@ -1213,7 +1258,7 @@ function EvidenceGraph({
                   href={activeNode.permalink}
                   target="_blank"
                   rel="noreferrer"
-                  className="press inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-black"
+                  className="hard inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-bold"
                   style={{ backgroundColor: GREEN, color: WHITE, ...border }}
                 >
                   View the code
@@ -1237,6 +1282,7 @@ function EvidenceGraph({
             <span className="text-neutral-700">
               Rings show distance from the topic. Filter by kind with the chips
               above.
+              {!labelOuter && " Hover a far-out node to read its name."}
             </span>
           </div>
         )}
@@ -1854,7 +1900,7 @@ export default function OverviewPage() {
           style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(4) }}
         >
           <h1
-            className="text-[22px] font-black"
+            className="text-[22px] font-bold"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             Couldn't load your topics
@@ -1920,12 +1966,15 @@ export default function OverviewPage() {
     (stats.evidence?.byKind ?? {}) as Record<string, number>,
   ).reduce((n, v) => n + num(v), 0);
   const gstats = (graph?.stats ?? {}) as Obj;
+  const communityCount = asArray<Obj>(
+    dims.find((d) => d.id === "community")?.groups,
+  ).length;
 
   return (
     <div
       className="min-h-screen w-full"
       style={{
-        backgroundColor: PAPER,
+        backgroundColor: WHITE,
         color: INK,
         fontFamily: BODY_FONT,
         fontWeight: 500,
@@ -1934,11 +1983,12 @@ export default function OverviewPage() {
       <style>{`
         * { box-sizing: border-box; }
         html { scroll-behavior: smooth; }
-        .press { transition: transform .16s cubic-bezier(.2,.8,.2,1), box-shadow .16s ease, background-color .2s ease, opacity .2s ease; }
-        .press:hover:not(:disabled) { transform: translateY(-2px); }
-        .press:active:not(:disabled) { transform: translateY(1px) scale(.97); }
-        button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid ${SKY}; outline-offset: 2px; }
-        svg g:focus-visible { outline: 3px solid ${SKY}; outline-offset: 2px; }
+        .press { transition: transform .12s ease, background-color .2s ease, opacity .2s ease; -webkit-tap-highlight-color: transparent; }
+        .press:active:not(:disabled) { transform: translateY(1px) scale(.98); }
+        .hard { box-shadow: 2px 2px 0 0 ${INK}; transition: transform .1s ease, box-shadow .1s ease, background-color .2s ease, opacity .2s ease; -webkit-tap-highlight-color: transparent; user-select: none; }
+        .hard:active:not(:disabled) { transform: translate(2px, 2px); box-shadow: 0 0 0 0 ${INK}; }
+        button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid ${INK}; outline-offset: 2px; }
+        svg g:focus-visible { outline: 2px solid ${INK}; outline-offset: 2px; }
         details > summary { list-style: none; }
         details > summary::-webkit-details-marker { display: none; }
         @keyframes ostripe { to { background-position: 28px 0; } }
@@ -1947,8 +1997,6 @@ export default function OverviewPage() {
         @keyframes osweep { to { transform: rotate(360deg); } }
         @keyframes opop { from { opacity: 0; transform: scale(.2); } to { opacity: 1; transform: scale(1); } }
         @keyframes oslide { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes ofloat { 0%,100% { transform: translate(0,0); } 50% { transform: translate(0,-3px); } }
-        @keyframes odraw { from { stroke-dasharray: 1; stroke-dashoffset: 1; } to { stroke-dasharray: 1; stroke-dashoffset: 0; } }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
       `}</style>
 
@@ -1956,43 +2004,43 @@ export default function OverviewPage() {
       <header
         className="sticky top-0 z-40"
         style={{
-          backgroundColor: "rgba(241,238,231,.96)",
+          backgroundColor: "rgba(255,255,255,.96)",
           borderBottom: `2px solid ${INK}`,
-          backdropFilter: "blur(10px)",
+          backdropFilter: "blur(8px)",
         }}
       >
-        <div className={`flex items-center justify-between py-2.5 ${GUTTER}`}>
+        <div
+          className={`mx-auto flex max-w-[1500px] items-center justify-between py-3 ${GUTTER}`}
+        >
           <div className="flex items-center gap-5">
-            <Link to="/" className="flex items-center gap-2.5">
-              <div
-                className="flex h-8 w-8 items-center justify-center rounded-xl"
-                style={{ backgroundColor: YELLOW, ...border }}
-              >
-                <Sparkles size={16} />
-              </div>
+            <Link to="/" className="flex items-center gap-2">
+              <Mark />
               <span
-                className="text-[18px] font-black tracking-tight"
+                className="text-[18px] font-bold tracking-tight"
                 style={{ fontFamily: DISPLAY_FONT }}
               >
                 pathway.io
               </span>
             </Link>
-            <nav className="hidden items-center gap-1 md:flex">
+            <nav className="hidden items-center gap-1.5 md:flex">
               <span
-                className="rounded-full px-3 py-1.5 text-[13px] font-bold"
-                style={{ backgroundColor: YELLOW }}
+                aria-current="page"
+                className="rounded-full px-3.5 py-1.5 text-[13px] font-bold"
+                style={{ backgroundColor: YELLOW, ...border }}
               >
                 Overview
               </span>
               <Link
                 to="/graph"
-                className="press rounded-full px-3 py-1.5 text-[13px] font-bold"
+                className="rounded-full px-3.5 py-1.5 text-[13px] font-bold text-neutral-500"
+                style={{ border: "2px solid transparent" }}
               >
                 Skill graph
               </Link>
               <Link
                 to="/builds"
-                className="press rounded-full px-3 py-1.5 text-[13px] font-bold"
+                className="rounded-full px-3.5 py-1.5 text-[13px] font-bold text-neutral-500"
+                style={{ border: "2px solid transparent" }}
               >
                 Builds
               </Link>
@@ -2009,11 +2057,11 @@ export default function OverviewPage() {
         </div>
       </header>
 
-      <main className={`w-full pb-20 pt-4 ${GUTTER}`}>
+      <main className={`mx-auto w-full max-w-[1500px] pb-20 pt-8 ${GUTTER}`}>
         {partial.length > 0 && (
           <div
-            className="mb-3 rounded-xl p-2.5 text-[13px] font-bold"
-            style={{ backgroundColor: WHITE, color: CORAL, ...border }}
+            className="mb-4 rounded-xl p-3 text-[13px] font-bold"
+            style={{ backgroundColor: WHITE, color: "#b8392a", ...border }}
           >
             Some data could not load ({partial.join(", ")}). Hit Refresh to
             retry.
@@ -2021,7 +2069,7 @@ export default function OverviewPage() {
         )}
         {status.outdated && (
           <div
-            className="mb-3 rounded-xl p-2.5 text-[13px] font-bold"
+            className="mb-4 rounded-xl p-3 text-[13px] font-bold"
             style={{ backgroundColor: YELLOW, ...border }}
           >
             These assessments come from an older analysis version. Re-run the
@@ -2030,15 +2078,13 @@ export default function OverviewPage() {
         )}
 
         {/* 1. HEADLINE */}
-        <section className="mb-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div className="min-w-0 lg:max-w-[60%]">
-              <p className="text-[12px] font-black uppercase tracking-[.14em] text-neutral-700">
-                Your engineering knowledge graph
-              </p>
+        <section className="mb-8">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0 lg:max-w-[64%]">
+              <Eyebrow>YOUR ENGINEERING KNOWLEDGE GRAPH</Eyebrow>
               <h1
-                className="mt-0.5 text-[20px] font-black leading-[1.2] tracking-tight sm:text-[24px]"
-                style={{ fontFamily: DISPLAY_FONT, ...clamp(2) }}
+                className="mt-2 text-[28px] font-bold leading-[1.08] tracking-tight sm:text-[38px]"
+                style={{ fontFamily: DISPLAY_FONT, ...clamp(3) }}
                 title={asString(summary?.headline)}
               >
                 {summary?.headline
@@ -2048,18 +2094,18 @@ export default function OverviewPage() {
                     : "No topics yet. Run the analysis to map what you know."}
               </h1>
               {summary?.pattern && (
-                <p className="mt-1 text-[13px] leading-5 text-neutral-800">
+                <p className="mt-3 max-w-2xl text-[14px] leading-relaxed text-neutral-600">
                   {asString(summary.pattern)}
                 </p>
               )}
             </div>
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2.5">
               {running ? (
                 <RunMini job={job} step={stepOf(job)} model={model} />
               ) : (
                 <>
                   {status.lastAnalyzedAt && (
-                    <span className="text-[12px] font-semibold text-neutral-700">
+                    <span className="text-[12px] font-semibold text-neutral-600">
                       analyzed {timeAgo(asString(status.lastAnalyzedAt))}
                     </span>
                   )}
@@ -2072,7 +2118,7 @@ export default function OverviewPage() {
             </div>
           </div>
 
-          <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
             <Tile
               value={num(stats.topics)}
               label="Topics analyzed"
@@ -2096,28 +2142,28 @@ export default function OverviewPage() {
           </div>
 
           {mixTotal > 0 && (
-            <div className="mt-3 flex items-center gap-3">
+            <div className="mt-5 flex items-center gap-4">
               <div
-                className="flex h-3 flex-1 overflow-hidden rounded-full"
+                className="flex h-4 flex-1 overflow-hidden rounded-full"
                 style={{ backgroundColor: CARD, ...border }}
               >
-                {LEVEL_ORDER.filter((l) => levelMix[l]).map((l) => (
+                {LEVEL_ORDER.filter((l) => levelMix[l]).map((l, i, arr) => (
                   <div
                     key={l}
                     title={`${LEVEL_LABEL[l]}: ${levelMix[l]}`}
                     style={{
                       width: `${(levelMix[l] / mixTotal) * 100}%`,
                       backgroundColor: LEVEL_COLOR[l],
-                      borderRight: `2px solid ${INK}`,
+                      borderRight: i < arr.length - 1 ? `2px solid ${INK}` : 0,
                     }}
                   />
                 ))}
               </div>
-              <div className="hidden shrink-0 items-center gap-3 sm:flex">
+              <div className="hidden shrink-0 items-center gap-4 sm:flex">
                 {LEVEL_ORDER.filter((l) => levelMix[l]).map((l) => (
                   <span
                     key={l}
-                    className="flex items-center gap-1.5 text-[12px] font-bold text-neutral-900"
+                    className="flex items-center gap-1.5 text-[12px] font-bold text-neutral-800"
                   >
                     <Dot color={LEVEL_COLOR[l]} />
                     {levelMix[l]} {LEVEL_LABEL[l].toLowerCase()}
@@ -2127,39 +2173,43 @@ export default function OverviewPage() {
             </div>
           )}
           {jobErr && (
-            <p className="mt-2 text-[13px] font-bold" style={{ color: CORAL }}>
+            <p
+              className="mt-3 text-[13px] font-bold"
+              style={{ color: "#b8392a" }}
+            >
               {jobErr}
             </p>
           )}
         </section>
 
         {/* 2. KNOWLEDGE GRAPH + SIDE PANEL */}
-        <div className="grid gap-4 xl:h-[calc(100vh-300px)] xl:min-h-[640px] xl:grid-cols-[minmax(0,1fr)_420px] xl:grid-rows-[minmax(0,1fr)]">
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px] xl:items-stretch">
           <section
-            className="flex h-[620px] min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl xl:h-full"
-            style={{
-              backgroundColor: "#F8F6F1",
-              backgroundImage:
-                "radial-gradient(circle at 50% 38%, #FFFDF8 0%, #F4F1E9 55%, #ECE8DD 100%)",
-              ...border,
-            }}
+            className="min-w-0 overflow-hidden rounded-2xl"
+            style={{ backgroundColor: PAPER, ...border, boxShadow: shadow(4) }}
           >
-            <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-2.5">
-              <div className="flex flex-wrap items-baseline gap-x-3">
+            <div
+              className="flex flex-col gap-3 px-4 py-3.5"
+              style={{
+                borderBottom: `2px solid ${INK}`,
+                backgroundColor: WHITE,
+              }}
+            >
+              <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
                 <h2
-                  className="text-[16px] font-black"
+                  className="text-[20px] font-bold"
                   style={{ fontFamily: DISPLAY_FONT }}
                 >
                   Knowledge graph
                 </h2>
-                <span className="text-[12px] font-semibold text-neutral-800">
-                  size = depth · ring = score · tap a topic or a line
+                <span className="text-[12px] font-semibold text-neutral-600">
+                  Size = depth, ring = score. Tap a topic or a line.
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <div
                   className="flex rounded-full p-0.5"
-                  style={{ backgroundColor: WHITE, ...border }}
+                  style={{ backgroundColor: PAPER, ...border }}
                 >
                   {(
                     [
@@ -2171,10 +2221,12 @@ export default function OverviewPage() {
                       key={k}
                       type="button"
                       onClick={() => setLayoutMode(k)}
-                      className="press rounded-full px-2.5 py-0.5 text-[12px] font-black"
+                      aria-pressed={layoutMode === k}
+                      className="press rounded-full px-3 py-0.5 text-[12px] font-bold"
                       style={{
                         backgroundColor:
                           layoutMode === k ? YELLOW : "transparent",
+                        border: `2px solid ${layoutMode === k ? INK : "transparent"}`,
                       }}
                     >
                       {label}
@@ -2185,7 +2237,7 @@ export default function OverviewPage() {
                   value={colorBy}
                   onChange={(e) => setColorBy(e.target.value)}
                   aria-label="Colour by"
-                  className="press rounded-full bg-white px-2.5 py-1 text-[12px] font-bold outline-none"
+                  className="rounded-full bg-white px-3 py-1 text-[12px] font-bold outline-none"
                   style={border}
                 >
                   <option value="level">Colour: depth</option>
@@ -2194,7 +2246,7 @@ export default function OverviewPage() {
                 </select>
                 <Btn
                   onClick={() => setShowNeighbors((v) => !v)}
-                  bg={showNeighbors ? YELLOW : CARD}
+                  bg={showNeighbors ? YELLOW : WHITE}
                 >
                   {showNeighbors ? "Hide" : "Show"} unassessed
                 </Btn>
@@ -2207,40 +2259,44 @@ export default function OverviewPage() {
             </div>
 
             {nodes.length > 0 && (
-              <div className="flex flex-wrap gap-x-4 gap-y-0.5 px-4 pb-1 pt-1.5 text-[12px] font-bold text-neutral-800">
+              <div
+                className="flex flex-wrap gap-x-5 gap-y-1 px-4 py-2 text-[12px] font-bold text-neutral-700"
+                style={{ borderBottom: `1px solid ${LINE}` }}
+              >
                 <span>{num(gstats.assessedNodes)} assessed</span>
                 <span>{num(gstats.externalNodes)} unassessed neighbours</span>
                 <span>{num(gstats.buildsOn)} “builds on” links</span>
                 <span>{num(gstats.related)} “goes with” links</span>
                 <span>
-                  {
-                    asArray<Obj>(dims.find((d) => d.id === "community")?.groups)
-                      .length
-                  }{" "}
-                  communities
+                  {communityCount} communit{communityCount === 1 ? "y" : "ies"}
                 </span>
               </div>
             )}
 
             {nodes.length ? (
               <>
-                <div className="relative min-h-[240px] flex-1 overflow-hidden">
-                  <TopicGraph
-                    nodes={nodes}
-                    edges={edges}
-                    pos={positions}
-                    bands={layoutMode === "layers" ? layered.bands : null}
-                    colorBy={colorBy}
-                    selected={sel}
-                    selectedEdge={asString(selEdge?.id)}
-                    glow={highlight}
-                    pathIds={pathIds}
-                    running={running}
-                    onSelect={(n) =>
-                      n.assessed ? pick(asString(n.slug)) : undefined
-                    }
-                    onEdge={(e) => setSelEdge(e)}
-                  />
+                <div className="overflow-x-auto">
+                  <div
+                    className="relative mx-auto w-full min-w-[680px]"
+                    style={{ aspectRatio: `${GW} / ${GH}` }}
+                  >
+                    <TopicGraph
+                      nodes={nodes}
+                      edges={edges}
+                      pos={positions}
+                      bands={layoutMode === "layers" ? layered.bands : null}
+                      colorBy={colorBy}
+                      selected={sel}
+                      selectedEdge={asString(selEdge?.id)}
+                      glow={highlight}
+                      pathIds={pathIds}
+                      running={running}
+                      onSelect={(n) =>
+                        n.assessed ? pick(asString(n.slug)) : undefined
+                      }
+                      onEdge={(e) => setSelEdge(e)}
+                    />
+                  </div>
                 </div>
                 <RelationInspector
                   sel={sel}
@@ -2253,22 +2309,29 @@ export default function OverviewPage() {
                 />
               </>
             ) : (
-              <div className="p-5 pt-2">
+              <div className="p-5">
                 <Empty text="No topic graph yet. Run the analysis to build it." />
               </div>
             )}
           </section>
 
-          <aside ref={asideRef} className="min-h-0 min-w-0 xl:h-full">
+          <aside
+            ref={asideRef}
+            className="relative h-[680px] min-w-0 xl:h-auto xl:min-h-[680px]"
+          >
             <section
-              className="flex h-[620px] min-h-0 flex-col overflow-hidden rounded-2xl xl:h-full"
-              style={{ backgroundColor: PAPER, ...border }}
+              className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl xl:absolute xl:inset-0"
+              style={{
+                backgroundColor: WHITE,
+                ...border,
+                boxShadow: shadow(4),
+              }}
             >
               <div
-                className="flex items-center gap-2 px-3 py-2"
+                className="flex items-center gap-2 px-3 py-2.5"
                 style={{
                   borderBottom: `2px solid ${INK}`,
-                  backgroundColor: CARD,
+                  backgroundColor: PAPER,
                 }}
               >
                 <div
@@ -2296,7 +2359,7 @@ export default function OverviewPage() {
                         aria-selected={active}
                         disabled={k === "topic" && !sel}
                         onClick={() => setSideTab(k)}
-                        className="press inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-black disabled:opacity-40"
+                        className="press inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-bold disabled:opacity-40"
                         style={{
                           backgroundColor: active ? YELLOW : "transparent",
                           border: `2px solid ${active ? INK : "transparent"}`,
@@ -2307,7 +2370,7 @@ export default function OverviewPage() {
                     );
                   })}
                 </div>
-                <span className="ml-auto hidden items-center gap-1.5 text-[12px] font-bold text-neutral-800 sm:flex">
+                <span className="ml-auto hidden items-center gap-1.5 text-[12px] font-bold text-neutral-700 sm:flex">
                   <Dot color={GREEN} /> grounded in your graph
                 </span>
               </div>
@@ -2316,7 +2379,8 @@ export default function OverviewPage() {
                 <>
                   <div
                     ref={chatRef}
-                    className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3.5"
+                    className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4"
+                    style={{ backgroundColor: WHITE }}
                   >
                     {messages.map((m) => (
                       <div
@@ -2350,7 +2414,7 @@ export default function OverviewPage() {
                           <div
                             className="w-full rounded-2xl px-3.5 py-3 text-[13px] leading-[1.65]"
                             style={{
-                              backgroundColor: WHITE,
+                              backgroundColor: PAPER,
                               ...border,
                               borderBottomLeftRadius: 4,
                             }}
@@ -2365,7 +2429,7 @@ export default function OverviewPage() {
                     className="space-y-2 p-3"
                     style={{
                       borderTop: `2px solid ${INK}`,
-                      backgroundColor: WHITE,
+                      backgroundColor: PAPER,
                     }}
                   >
                     {messages.length <= 2 && (
@@ -2376,7 +2440,7 @@ export default function OverviewPage() {
                             type="button"
                             onClick={() => void send(p)}
                             className="press rounded-full px-2.5 py-1 text-left text-[12px] font-bold"
-                            style={{ backgroundColor: LAVENDER, ...border }}
+                            style={{ backgroundColor: WHITE, ...border }}
                           >
                             {p}
                           </button>
@@ -2402,7 +2466,7 @@ export default function OverviewPage() {
                         type="submit"
                         disabled={!draft.trim() || thinking}
                         aria-label="Send"
-                        className="press flex h-9 w-9 shrink-0 items-center justify-center rounded-full disabled:opacity-40"
+                        className="hard flex h-9 w-9 shrink-0 items-center justify-center rounded-full disabled:opacity-40"
                         style={{ backgroundColor: YELLOW, ...border }}
                       >
                         <Send size={14} />
@@ -2452,9 +2516,9 @@ export default function OverviewPage() {
 
         {stage?.blocks && stage.blocks.length > 0 && (
           <section
-            className="mt-6 rounded-2xl p-4"
+            className="mt-8 rounded-2xl p-5"
             style={{
-              backgroundColor: CARD,
+              backgroundColor: PAPER,
               ...border,
               boxShadow: shadow(4),
               animation: "oslide .25s ease-out both",
@@ -2462,17 +2526,15 @@ export default function OverviewPage() {
           >
             <div className="mb-3 flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <p className="text-[12px] font-black uppercase tracking-[.14em] text-neutral-700">
-                  Answer
-                </p>
+                <Eyebrow>ANSWER</Eyebrow>
                 <h2
-                  className="text-[18px] font-black leading-tight"
+                  className="mt-1 text-[20px] font-bold leading-tight"
                   style={{ fontFamily: DISPLAY_FONT }}
                 >
                   {stage.question}
                 </h2>
                 {stage.text && (
-                  <p className="mt-1 max-w-3xl text-[13px] leading-5 text-neutral-900">
+                  <p className="mt-1 max-w-3xl text-[13px] leading-5 text-neutral-800">
                     {stage.text}
                   </p>
                 )}
@@ -2481,7 +2543,7 @@ export default function OverviewPage() {
                 type="button"
                 onClick={() => setStage(null)}
                 aria-label="Close answer"
-                className="press shrink-0 rounded-full p-1.5"
+                className="hard shrink-0 rounded-full p-1.5"
                 style={{ backgroundColor: WHITE, ...border }}
               >
                 <X size={14} />
@@ -2500,27 +2562,31 @@ export default function OverviewPage() {
         )}
 
         {/* 4. EXPLORE */}
-        <section className="mt-8">
+        <section className="mt-12">
           <div
-            className="flex flex-wrap gap-x-6 gap-y-1"
+            className="flex flex-wrap gap-x-7 gap-y-1"
             style={{ borderBottom: `2px solid ${INK}` }}
+            role="tablist"
+            aria-label="Explore"
           >
             {LENSES.map((l) => (
               <button
                 key={l.id}
                 type="button"
+                role="tab"
+                aria-selected={lens === l.id}
                 onClick={() => setLens(l.id)}
-                className="press -mb-[2px] px-1 pb-2 pt-1 text-[14px] font-black"
+                className="press -mb-[2px] px-1 pb-2.5 pt-1 text-[14px] font-bold"
                 style={{
-                  borderBottom: `4px solid ${lens === l.id ? CORAL : "transparent"}`,
-                  color: lens === l.id ? INK : "#33362f",
+                  borderBottom: `4px solid ${lens === l.id ? INK : "transparent"}`,
+                  color: lens === l.id ? INK : "#737373",
                 }}
               >
                 {l.label}
                 {l.id === "hood" && integrityFailed > 0 && (
                   <span
                     className="ml-1.5 rounded-full px-1.5 text-[11px]"
-                    style={{ backgroundColor: CORAL, color: WHITE }}
+                    style={{ backgroundColor: CORAL, color: INK }}
                   >
                     {integrityFailed}
                   </span>
@@ -2531,7 +2597,7 @@ export default function OverviewPage() {
 
           <div
             key={lens}
-            className="pt-4"
+            className="pt-5"
             style={{ animation: "oslide .25s ease-out both" }}
           >
             {lens === "highlights" &&
@@ -2539,15 +2605,15 @@ export default function OverviewPage() {
                 <div>
                   {highlightRows.map((r) => (
                     <Row key={r.key}>
-                      <div className="w-48 shrink-0">
-                        <div className="flex items-center gap-2 text-[13px] font-black">
+                      <div className="w-52 shrink-0">
+                        <div className="flex items-center gap-2 text-[13px] font-bold">
                           <span
                             className="h-3 w-3 rounded-sm"
                             style={{ backgroundColor: r.color, ...border }}
                           />
                           {r.label}
                         </div>
-                        <div className="mt-0.5 pl-5 text-[12px] text-neutral-700">
+                        <div className="mt-0.5 pl-5 text-[12px] text-neutral-600">
                           {r.hint}
                         </div>
                       </div>
@@ -2570,10 +2636,14 @@ export default function OverviewPage() {
             {lens === "depth" &&
               (domainGroups.length ? (
                 <div
-                  className="rounded-2xl p-4"
-                  style={{ backgroundColor: WHITE, ...border }}
+                  className="rounded-2xl p-5"
+                  style={{
+                    backgroundColor: WHITE,
+                    ...border,
+                    boxShadow: shadow(3),
+                  }}
                 >
-                  <p className="mb-3 text-[13px] leading-5 text-neutral-800">
+                  <p className="mb-4 text-[13px] leading-5 text-neutral-700">
                     Rows are engineering areas, columns are depth. Each topic
                     lands where its evidence puts it.
                   </p>
@@ -2588,7 +2658,7 @@ export default function OverviewPage() {
                       {["surface", "working", "proficient", "deep"].map((l) => (
                         <div
                           key={l}
-                          className="flex items-center gap-1.5 px-1 pb-1 text-[13px] font-black"
+                          className="flex items-center gap-1.5 px-1 pb-1 text-[13px] font-bold"
                         >
                           <Dot color={LEVEL_COLOR[l]} /> {LEVEL_LABEL[l]}
                         </div>
@@ -2606,16 +2676,17 @@ export default function OverviewPage() {
             {lens === "groups" &&
               (activeDim ? (
                 <div>
-                  <div className="mb-2 flex flex-wrap gap-2">
+                  <div className="mb-3 flex flex-wrap gap-2">
                     {dims.map((x) => (
                       <button
                         key={asString(x.id)}
                         type="button"
                         onClick={() => setGroupDim(asString(x.id))}
-                        className="press rounded-full px-3 py-1 text-[13px] font-black"
+                        aria-pressed={activeDim?.id === x.id}
+                        className="press rounded-full px-3.5 py-1 text-[13px] font-bold"
                         style={{
-                          backgroundColor: activeDim?.id === x.id ? INK : WHITE,
-                          color: activeDim?.id === x.id ? PAPER : INK,
+                          backgroundColor:
+                            activeDim?.id === x.id ? YELLOW : WHITE,
                           ...border,
                         }}
                       >
@@ -2623,22 +2694,22 @@ export default function OverviewPage() {
                       </button>
                     ))}
                   </div>
-                  <p className="mb-2 text-[13px] leading-5 text-neutral-700">
+                  <p className="mb-2 text-[13px] leading-5 text-neutral-600">
                     {asString(activeDim.method?.why)}
                   </p>
                   {asArray<Obj>(activeDim.groups).map((g) => (
                     <Row key={asString(g.key)}>
-                      <div className="w-48 shrink-0">
+                      <div className="w-52 shrink-0">
                         <div
-                          className="text-[13px] font-black"
+                          className="text-[14px] font-bold"
                           style={{ fontFamily: DISPLAY_FONT }}
                         >
                           {asString(g.label)}
                         </div>
-                        <div className="text-[12px] text-neutral-700">
-                          {num(g.count)} topics · avg {num(g.averageScore)}
+                        <div className="text-[12px] text-neutral-600">
+                          {num(g.count)} topics, avg {num(g.averageScore)}
                           {g.internalLinks != null
-                            ? ` · ${num(g.internalLinks)} links inside`
+                            ? `, ${num(g.internalLinks)} links inside`
                             : ""}
                         </div>
                       </div>
@@ -2662,14 +2733,14 @@ export default function OverviewPage() {
 
             {lens === "foundations" &&
               (relations ? (
-                <div className="grid gap-5 lg:grid-cols-2">
+                <div className="grid gap-8 lg:grid-cols-2">
                   <div>
-                    <div className="mb-2 text-[13px] font-black">
+                    <div className="mb-3 text-[14px] font-bold">
                       Strong topics on weak or unverified foundations
                     </div>
-                    <div className="space-y-2.5">
+                    <div className="space-y-3">
                       {asArray<Obj>(relations.foundationGaps).length === 0 && (
-                        <span className="text-[13px] text-neutral-800">
+                        <span className="text-[13px] text-neutral-700">
                           Every foundation of a proficient or deep topic has
                           assessed evidence.
                         </span>
@@ -2684,10 +2755,10 @@ export default function OverviewPage() {
                             borderLeft: `4px solid ${g.severity === "weak" ? CORAL : YELLOW}`,
                           }}
                         >
-                          <div className="text-[12px] font-black uppercase text-neutral-700">
+                          <div className="text-[12px] font-bold text-neutral-600">
                             {g.severity === "weak"
-                              ? "assessed, shallow"
-                              : "not assessed"}
+                              ? "Assessed, shallow"
+                              : "Not assessed"}
                           </div>
                           <p className="text-[13px] leading-5">
                             {asString(g.message)}
@@ -2697,12 +2768,12 @@ export default function OverviewPage() {
                     </div>
                   </div>
                   <div>
-                    <div className="mb-2 text-[13px] font-black">
+                    <div className="mb-3 text-[14px] font-bold">
                       Topics that build on what you know
                     </div>
-                    <div className="space-y-2.5">
+                    <div className="space-y-3">
                       {asArray<Obj>(relations.frontier).length === 0 && (
-                        <span className="text-[13px] text-neutral-800">
+                        <span className="text-[13px] text-neutral-700">
                           No unassessed topic builds on your assessed ones yet.
                         </span>
                       )}
@@ -2712,10 +2783,10 @@ export default function OverviewPage() {
                           className="pl-3"
                           style={{ borderLeft: `4px solid ${SKY}` }}
                         >
-                          <div className="text-[13px] font-black">
+                          <div className="text-[13px] font-bold">
                             {asString(f.name)}
                           </div>
-                          <p className="text-[12px] leading-4 text-neutral-800">
+                          <p className="text-[12px] leading-4 text-neutral-700">
                             {asString(f.message)}
                           </p>
                         </div>
@@ -2729,12 +2800,13 @@ export default function OverviewPage() {
 
             {lens === "topics" && (
               <div>
-                <div className="mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                   <input
                     value={qDraft}
                     onChange={(e) => setQDraft(e.target.value)}
                     placeholder="Search topics…"
-                    className="rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
+                    aria-label="Search topics"
+                    className="rounded-full bg-white px-4 py-1.5 text-[13px] font-semibold outline-none"
                     style={border}
                   />
                   <FilterSelect
@@ -2781,7 +2853,8 @@ export default function OverviewPage() {
                         key={asString(c.slug)}
                         type="button"
                         onClick={() => pick(asString(c.slug))}
-                        className="press flex w-full items-center gap-3 py-2.5 text-left hover:bg-black/[.04]"
+                        aria-pressed={sel === c.slug}
+                        className="flex w-full items-center gap-3 px-2 py-3 text-left"
                         style={{
                           borderBottom: `1px solid ${LINE}`,
                           backgroundColor:
@@ -2790,21 +2863,21 @@ export default function OverviewPage() {
                       >
                         <Dot color={LEVEL_COLOR[asString(c.level)] ?? CARD} />
                         <span
-                          className="w-56 shrink-0 truncate text-[13px] font-black"
+                          className="w-56 shrink-0 truncate text-[14px] font-bold"
                           style={{ fontFamily: DISPLAY_FONT }}
                         >
                           {asString(c.name)}
                         </span>
-                        <span className="hidden min-w-0 flex-1 truncate text-[13px] text-neutral-800 md:block">
+                        <span className="hidden min-w-0 flex-1 truncate text-[13px] text-neutral-700 md:block">
                           {asString(c.verdict)}
                         </span>
-                        <span className="ml-auto shrink-0 text-[12px] font-bold text-neutral-700">
-                          {LEVEL_LABEL[asString(c.level)] ?? c.level} ·{" "}
-                          {num(c.score)} · {asString(c.confidence)} conf.
+                        <span className="ml-auto shrink-0 text-[12px] font-bold text-neutral-600">
+                          {LEVEL_LABEL[asString(c.level)] ?? c.level}, score{" "}
+                          {num(c.score)}, {asString(c.confidence)} conf.
                         </span>
                       </button>
                     ))}
-                    <div className="flex items-center justify-between pt-3">
+                    <div className="flex items-center justify-between pt-4">
                       <Btn
                         onClick={() =>
                           setFilters({
@@ -2816,7 +2889,7 @@ export default function OverviewPage() {
                       >
                         Previous
                       </Btn>
-                      <span className="text-[13px] font-bold text-neutral-800">
+                      <span className="text-[13px] font-bold text-neutral-700">
                         {filters.page * PAGE + 1}–
                         {filters.page * PAGE + items.length} of {total}
                       </span>
@@ -2838,7 +2911,7 @@ export default function OverviewPage() {
 
             {lens === "paths" && (
               <div>
-                <p className="mb-3 text-[13px] text-neutral-800">
+                <p className="mb-4 text-[13px] text-neutral-700">
                   Pick two topics to see the shortest route through the graph.
                   Each hop says whether it is a foundation or just an
                   association.
@@ -2878,7 +2951,7 @@ export default function OverviewPage() {
                 </div>
                 {pathRes && (
                   <div
-                    className="mt-4 flex flex-wrap items-center gap-2"
+                    className="mt-5 flex flex-wrap items-center gap-2"
                     style={{ animation: "oslide .25s ease-out both" }}
                   >
                     {asArray<Obj>(pathRes.steps).map((s, i) => {
@@ -2890,7 +2963,7 @@ export default function OverviewPage() {
                         >
                           {seg && (
                             <span
-                              className="rounded-full px-2 py-0.5 text-[11px] font-black"
+                              className="rounded-full px-2 py-0.5 text-[11px] font-bold"
                               style={{
                                 backgroundColor:
                                   seg.type === "BUILDS_ON" ? SKY : LAVENDER,
@@ -2916,7 +2989,7 @@ export default function OverviewPage() {
                 {pathErr && (
                   <p
                     className="mt-3 text-[13px] font-bold"
-                    style={{ color: CORAL }}
+                    style={{ color: "#b8392a" }}
                   >
                     {pathErr}
                   </p>
@@ -2925,13 +2998,13 @@ export default function OverviewPage() {
             )}
 
             {lens === "hood" && (
-              <div className="space-y-4">
-                <p className="text-[13px] leading-5 text-neutral-800">
+              <div className="space-y-5">
+                <p className="max-w-3xl text-[13px] leading-5 text-neutral-700">
                   FalkorDB runs graph algorithms over the shared topic map. They
                   describe how topics are structured. Your skill level always
                   comes from your code, never from these scores.
                 </p>
-                <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                   {asArray<Obj>(algos?.algorithms)
                     .filter((a) => a.engine !== "in-process")
                     .map((a) => (
@@ -2944,10 +3017,14 @@ export default function OverviewPage() {
 
                 {integrity && (
                   <div
-                    className="rounded-2xl p-3"
-                    style={{ backgroundColor: WHITE, ...border }}
+                    className="rounded-2xl p-4"
+                    style={{
+                      backgroundColor: WHITE,
+                      ...border,
+                      boxShadow: shadow(3),
+                    }}
                   >
-                    <div className="flex items-center gap-2 text-[14px] font-black">
+                    <div className="flex items-center gap-2 text-[15px] font-bold">
                       <ShieldCheck
                         size={16}
                         color={integrity.passed ? GREEN : CORAL}
@@ -2960,10 +3037,10 @@ export default function OverviewPage() {
                             : `${integrityFailed} need attention`
                         }
                         background={integrity.passed ? GREEN : CORAL}
-                        color={WHITE}
+                        color={integrity.passed ? WHITE : INK}
                       />
                     </div>
-                    <ul className="mt-2 grid gap-1.5 md:grid-cols-2">
+                    <ul className="mt-3 grid gap-2 md:grid-cols-2">
                       {asArray<Obj>(integrity.checks).map((c) => (
                         <li
                           key={asString(c.id)}
@@ -2987,7 +3064,7 @@ export default function OverviewPage() {
                     {asArray<string>(model?.scoring?.guardRails).map((g, i) => (
                       <li
                         key={i}
-                        className="pl-3 text-[13px] leading-5 text-neutral-900"
+                        className="pl-3 text-[13px] leading-5 text-neutral-800"
                         style={{ borderLeft: `3px solid ${LINE}` }}
                       >
                         {g}
@@ -3009,8 +3086,8 @@ export default function OverviewPage() {
             block: "start",
           })
         }
-        className="press fixed bottom-5 right-5 z-30 flex items-center gap-2 rounded-full px-4 py-3 text-[13px] font-black xl:hidden"
-        style={{ backgroundColor: YELLOW, ...border, boxShadow: shadow(3) }}
+        className="hard fixed bottom-5 right-5 z-30 flex items-center gap-2 rounded-full px-4 py-3 text-[13px] font-bold xl:hidden"
+        style={{ backgroundColor: YELLOW, ...border }}
       >
         <MessageCircle size={16} /> Ask
       </button>
@@ -3028,12 +3105,12 @@ function DepthRow({ g, onPick }: { g: Obj; onPick: (slug: string) => void }) {
     <>
       <div className="flex flex-col justify-center px-1">
         <span
-          className="text-[13px] font-black"
+          className="text-[13px] font-bold"
           style={{ fontFamily: DISPLAY_FONT }}
         >
           {asString(g.label)}
         </span>
-        <span className="text-[11px] text-neutral-700">
+        <span className="text-[11px] text-neutral-600">
           {num(g.count)} topics
         </span>
       </div>
@@ -3044,7 +3121,7 @@ function DepthRow({ g, onPick }: { g: Obj; onPick: (slug: string) => void }) {
             key={l}
             className="flex min-h-[54px] flex-wrap content-center gap-1 rounded-xl p-1.5"
             style={{
-              backgroundColor: cell.length ? `${LEVEL_COLOR[l]}2A` : "#F7F4EC",
+              backgroundColor: cell.length ? `${LEVEL_COLOR[l]}2A` : PAPER,
               border: `1.5px ${cell.length ? "solid" : "dashed"} ${cell.length ? LEVEL_COLOR[l] : LINE}`,
             }}
           >
@@ -3089,32 +3166,35 @@ function AlgoCard({ a, onPick }: { a: Obj; onPick: (slug: string) => void }) {
         : [];
   return (
     <div
-      className="rounded-2xl p-3.5"
+      className="rounded-2xl p-4"
       style={{
         backgroundColor: WHITE,
         ...border,
         borderTop: `6px solid ${engineBg}`,
+        boxShadow: shadow(3),
       }}
     >
       <div className="flex flex-wrap items-center gap-2">
         <span
-          className="text-[14px] font-black"
+          className="text-[15px] font-bold"
           style={{ fontFamily: DISPLAY_FONT }}
         >
           {asString(a.name)}
         </span>
         <Chip text={asString(a.engine)} background={engineBg} />
       </div>
-      <p className="mt-1 text-[13px] font-bold leading-5">{asString(a.role)}</p>
-      <p className="mt-0.5 text-[12px] leading-4 text-neutral-700">
+      <p className="mt-1.5 text-[13px] font-bold leading-5">
+        {asString(a.role)}
+      </p>
+      <p className="mt-0.5 text-[12px] leading-4 text-neutral-600">
         {a.affectsAssessment
           ? "Also feeds the confidence of each rating."
           : "Describes structure only."}
       </p>
       {st && (
-        <div className="mt-2 flex items-center gap-2 text-[12px] font-bold text-neutral-800">
+        <div className="mt-3 flex items-center gap-2 text-[12px] font-bold text-neutral-700">
           <span
-            className="relative inline-block h-2 flex-1 overflow-hidden rounded-full"
+            className="relative inline-block h-2.5 flex-1 overflow-hidden rounded-full"
             style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
           >
             <span
@@ -3130,7 +3210,7 @@ function AlgoCard({ a, onPick }: { a: Obj; onPick: (slug: string) => void }) {
         </div>
       )}
       {chips.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
+        <div className="mt-3 flex flex-wrap gap-1.5">
           {chips.map((x) => (
             <TopicChip
               key={asString(x.topic?.slug)}
@@ -3141,14 +3221,14 @@ function AlgoCard({ a, onPick }: { a: Obj; onPick: (slug: string) => void }) {
         </div>
       )}
       {a.id === "label_propagation" && (
-        <p className="mt-2 text-[12px] font-bold">
+        <p className="mt-3 text-[12px] font-bold">
           {num(f.communities)} communities
-          {f.largest ? ` · largest: ${asString(f.largest.label)}` : ""}
+          {f.largest ? `, largest: ${asString(f.largest.label)}` : ""}
         </p>
       )}
       {a.id === "wcc" && (
-        <p className="mt-2 text-[12px] font-bold">
-          {num(f.components)} components · main body {num(f.mainSize)} topics
+        <p className="mt-3 text-[12px] font-bold">
+          {num(f.components)} components, main body {num(f.mainSize)} topics
         </p>
       )}
     </div>
@@ -3183,7 +3263,7 @@ function RelationInspector({
     asString(nodeBySlug.get(slug)?.label) || humanize(slug);
   const pill = (type: string, text: string) => (
     <span
-      className="mr-1 rounded-full px-1.5 py-px text-[10px] font-black"
+      className="mr-1 rounded-full px-1.5 py-px text-[10px] font-bold"
       style={{
         backgroundColor: type === "BUILDS_ON" ? SKY : LAVENDER,
         border: `1.5px solid ${INK}`,
@@ -3203,17 +3283,20 @@ function RelationInspector({
         <b>{nameOf(other)}</b>
       </button>
       {asString(e.reason) && (
-        <span className="text-neutral-700">
-          {" "}
-          — {cut(asString(e.reason), 80)}
+        <span className="text-neutral-600">
+          , {cut(asString(e.reason), 80)}
         </span>
       )}
     </li>
   );
   return (
     <div
-      className="max-h-[170px] shrink-0 overflow-y-auto px-4 py-2.5 text-[12px]"
-      style={{ borderTop: `1px solid ${LINE}`, color: INK }}
+      className="max-h-[200px] overflow-y-auto px-4 py-3 text-[12px]"
+      style={{
+        borderTop: `2px solid ${INK}`,
+        color: INK,
+        backgroundColor: WHITE,
+      }}
     >
       {edge ? (
         <div
@@ -3221,16 +3304,16 @@ function RelationInspector({
           style={{ animation: "oslide .25s ease-out both" }}
         >
           <div>
-            <div className="text-[13px] font-black">
+            <div className="text-[13px] font-bold">
               {nameOf(asString(edge.source))}{" "}
               {pill(asString(edge.type), REL_LABEL(asString(edge.type)))}{" "}
               {nameOf(asString(edge.target))}
             </div>
-            <p className="mt-1 text-[13px] leading-5 text-neutral-900">
+            <p className="mt-1 text-[13px] leading-5 text-neutral-800">
               {asString(edge.reason) ||
                 "The graph records this link without a stated reason."}
             </p>
-            <p className="text-[11px] leading-4 text-neutral-700">
+            <p className="text-[11px] leading-4 text-neutral-600">
               {edge.type === "BUILDS_ON"
                 ? edge.trusted === false
                   ? "No stated reason, so it is ignored for prerequisites."
@@ -3242,7 +3325,7 @@ function RelationInspector({
             type="button"
             onClick={() => onEdge(null)}
             aria-label="Close connection"
-            className="press shrink-0 rounded-full p-1"
+            className="hard shrink-0 rounded-full p-1"
             style={{ backgroundColor: WHITE, ...border }}
           >
             <X size={12} />
@@ -3250,17 +3333,17 @@ function RelationInspector({
         </div>
       ) : sel ? (
         out.length + inc.length === 0 ? (
-          <p className="font-semibold text-neutral-800">
+          <p className="font-semibold text-neutral-700">
             {selName || humanize(sel)} has no recorded link to other topics.
           </p>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <div className="mb-1 font-black text-neutral-700">
+              <div className="mb-1.5 font-bold text-neutral-600">
                 Outgoing from {selName || humanize(sel)}
               </div>
-              <ul className="space-y-1">
-                {out.length === 0 && <li className="text-neutral-700">None</li>}
+              <ul className="space-y-1.5">
+                {out.length === 0 && <li className="text-neutral-600">None</li>}
                 {out
                   .slice(0, 5)
                   .map((e) =>
@@ -3269,11 +3352,11 @@ function RelationInspector({
               </ul>
             </div>
             <div>
-              <div className="mb-1 font-black text-neutral-700">
+              <div className="mb-1.5 font-bold text-neutral-600">
                 Incoming to {selName || humanize(sel)}
               </div>
-              <ul className="space-y-1">
-                {inc.length === 0 && <li className="text-neutral-700">None</li>}
+              <ul className="space-y-1.5">
+                {inc.length === 0 && <li className="text-neutral-600">None</li>}
                 {inc
                   .slice(0, 5)
                   .map((e) =>
@@ -3314,7 +3397,7 @@ function RelationInspector({
             />{" "}
             bridge
           </span>
-          <span className="ml-auto text-neutral-800">
+          <span className="ml-auto text-neutral-700">
             Click a topic to light up its links, or a line to see why it exists.
           </span>
         </div>
@@ -3344,7 +3427,7 @@ function RunMini({
   return (
     <div
       className="flex items-center gap-3 rounded-2xl py-1.5 pl-2 pr-4"
-      style={{ backgroundColor: INK, color: PAPER, ...border }}
+      style={{ backgroundColor: INK, color: WHITE, ...border }}
     >
       <svg viewBox="0 0 80 80" className="h-14 w-14 shrink-0" aria-hidden>
         <circle
@@ -3352,7 +3435,7 @@ function RunMini({
           cy="40"
           r="36"
           fill="none"
-          stroke={PAPER}
+          stroke={WHITE}
           strokeOpacity=".3"
           strokeDasharray="3 4"
         />
@@ -3361,7 +3444,7 @@ function RunMini({
           cy="40"
           r="20"
           fill="none"
-          stroke={PAPER}
+          stroke={WHITE}
           strokeOpacity=".25"
           strokeDasharray="3 4"
         />
@@ -3408,7 +3491,7 @@ function RunMini({
       </svg>
       <div className="min-w-[170px]">
         <div
-          className="text-[13px] font-black"
+          className="text-[13px] font-bold"
           style={{ animation: "oblink 1.2s ease-in-out infinite" }}
         >
           {asString(job?.stageLabel, "Scanning")}… {pct}%
@@ -3470,6 +3553,90 @@ function nodeFill(n: Obj, colorBy: string): string {
   return PALETTE[hash(asString(v)) % PALETTE.length];
 }
 
+type LabelSide = "below" | "above" | "right" | "left";
+type Box = { x1: number; y1: number; x2: number; y2: number };
+
+const boxHit = (a: Box, b: Box) =>
+  a.x1 < b.x2 && a.x2 > b.x1 && a.y1 < b.y2 && a.y2 > b.y1;
+const boxHitsCircle = (b: Box, cx: number, cy: number, r: number) => {
+  const nx = Math.max(b.x1, Math.min(cx, b.x2));
+  const ny = Math.max(b.y1, Math.min(cy, b.y2));
+  return (nx - cx) ** 2 + (ny - cy) ** 2 < r * r;
+};
+
+/** Picks a side for every label so labels never sit on top of each other or on another node. */
+function placeLabels(nodes: Obj[], pos: Map<string, Pt>) {
+  const res = new Map<string, LabelSide>();
+  const placed: Box[] = [];
+  const circles = nodes
+    .map((n) => ({ p: pos.get(asString(n.id)), r: radiusOf(n) + 6 }))
+    .filter((c): c is { p: Pt; r: number } => !!c.p);
+  const order = nodes
+    .filter((n) => n.assessed && pos.has(asString(n.id)))
+    .sort((a, b) => radiusOf(b) - radiusOf(a));
+  for (const n of order) {
+    const p = pos.get(asString(n.id))!;
+    const r = radiusOf(n);
+    const w = Math.min(22, asString(n.label).length) * 7 + 10;
+    const h = 17;
+    const cands: Array<[LabelSide, Box]> = [
+      [
+        "below",
+        {
+          x1: p.x - w / 2,
+          y1: p.y + r + 6,
+          x2: p.x + w / 2,
+          y2: p.y + r + 6 + h,
+        },
+      ],
+      [
+        "above",
+        {
+          x1: p.x - w / 2,
+          y1: p.y - r - 6 - h,
+          x2: p.x + w / 2,
+          y2: p.y - r - 6,
+        },
+      ],
+      [
+        "right",
+        {
+          x1: p.x + r + 6,
+          y1: p.y - h / 2,
+          x2: p.x + r + 6 + w,
+          y2: p.y + h / 2,
+        },
+      ],
+      [
+        "left",
+        {
+          x1: p.x - r - 6 - w,
+          y1: p.y - h / 2,
+          x2: p.x - r - 6,
+          y2: p.y + h / 2,
+        },
+      ],
+    ];
+    const ok = cands.find(
+      ([, b]) =>
+        b.x1 >= 4 &&
+        b.x2 <= GW - 4 &&
+        b.y1 >= 4 &&
+        b.y2 <= GH - 4 &&
+        !placed.some((q) => boxHit(q, b)) &&
+        !circles.some(
+          (c) =>
+            !(c.p.x === p.x && c.p.y === p.y) &&
+            boxHitsCircle(b, c.p.x, c.p.y, c.r),
+        ),
+    );
+    const chosen = ok ?? cands[0];
+    res.set(asString(n.id), chosen[0]);
+    placed.push(chosen[1]);
+  }
+  return res;
+}
+
 function TopicGraph({
   nodes,
   edges,
@@ -3502,6 +3669,7 @@ function TopicGraph({
     () => new Map(nodes.map((n) => [asString(n.id), n] as [string, Obj])),
     [nodes],
   );
+  const labelSide = useMemo(() => placeLabels(nodes, pos), [nodes, pos]);
   const focusId = hover ?? selected;
   const focusSet = useMemo(() => {
     if (!focusId) return null;
@@ -3554,7 +3722,7 @@ function TopicGraph({
             height="32"
             patternUnits="userSpaceOnUse"
           >
-            <circle cx="1" cy="1" r="1" fill={INK} opacity=".13" />
+            <circle cx="1" cy="1" r="1" fill={INK} opacity=".11" />
           </pattern>
           <marker
             id="tarrow"
@@ -3585,7 +3753,7 @@ function TopicGraph({
               x={14}
               y={b.y + 4}
               fontSize="12"
-              fontWeight={900}
+              fontWeight={800}
               fontFamily={DISPLAY_FONT}
               style={{
                 fill:
@@ -3600,7 +3768,7 @@ function TopicGraph({
             </text>
           </g>
         ))}
-        {hulls.map((h, i) => (
+        {hulls.map((h) => (
           <g key={h.domain} style={{ pointerEvents: "none" }}>
             <circle
               cx={h.cx}
@@ -3611,17 +3779,13 @@ function TopicGraph({
               stroke={INK}
               strokeOpacity=".25"
               strokeDasharray="5 6"
-              style={{
-                animation: `opop .6s ${i * 0.06}s ease-out both`,
-                transformOrigin: `${h.cx}px ${h.cy}px`,
-              }}
             />
             <text
               x={h.cx}
               y={h.cy - h.r - 6}
               textAnchor="middle"
               fontSize="12"
-              fontWeight={900}
+              fontWeight={800}
               fontFamily={DISPLAY_FONT}
               style={{ fill: INK, opacity: 0.55 }}
             >
@@ -3680,12 +3844,12 @@ function TopicGraph({
                   y={(y1 + y2) / 2 - 5}
                   textAnchor="middle"
                   fontSize="10"
-                  fontWeight={800}
+                  fontWeight={700}
                   fontFamily={BODY_FONT}
                   style={{
                     fill: INK,
                     paintOrder: "stroke",
-                    stroke: "#F8F6F1",
+                    stroke: PAPER,
                     strokeWidth: 4,
                     pointerEvents: "none",
                   }}
@@ -3718,7 +3882,21 @@ function TopicGraph({
           const dim = focusSet ? !focusSet.has(id) : false;
           const roles = asArray<string>(n.roles);
           const showLabel = n.assessed || hover === id;
-          const above = nodes.length > 8 && i % 2 === 1;
+          const side = labelSide.get(id) ?? "below";
+          const lx =
+            side === "right"
+              ? p.x + r + 8
+              : side === "left"
+                ? p.x - r - 8
+                : p.x;
+          const ly =
+            side === "below"
+              ? p.y + r + 19
+              : side === "above"
+                ? p.y - r - 9
+                : p.y + 4.5;
+          const anchor =
+            side === "right" ? "start" : side === "left" ? "end" : "middle";
           const arc = 2 * Math.PI * (r + 4);
           const score = n.assessed
             ? Math.max(0, Math.min(100, num(n.score)))
@@ -3745,7 +3923,6 @@ function TopicGraph({
                 cursor: n.assessed ? "pointer" : "default",
                 opacity: dim ? 0.15 : 1,
                 transition: "opacity .3s ease",
-                animation: `ofloat ${5 + (i % 4)}s ${-(i % 7) * 0.8}s ease-in-out infinite`,
               }}
             >
               {glow.has(id) && (
@@ -3836,25 +4013,25 @@ function TopicGraph({
                 strokeWidth={sel ? 4.5 : 2.5}
                 style={{
                   stroke: INK,
-                  filter: "drop-shadow(2px 3px 0 rgba(16,18,16,.9))",
                   transition: "stroke-width .25s ease",
                 }}
                 strokeDasharray={n.assessed ? undefined : "4 3"}
               />
               {showLabel && (
                 <text
-                  x={p.x}
-                  y={above ? p.y - r - 12 : p.y + r + 18}
-                  textAnchor="middle"
+                  x={lx}
+                  y={ly}
+                  textAnchor={anchor}
                   fontSize={n.assessed ? 13 : 11}
-                  fontWeight={n.assessed ? 800 : 600}
+                  fontWeight={n.assessed ? 700 : 600}
                   fontFamily={BODY_FONT}
                   style={{
                     fill: INK,
                     paintOrder: "stroke",
-                    stroke: "#F8F6F1",
+                    stroke: PAPER,
                     strokeWidth: 5,
                     strokeLinejoin: "round",
+                    pointerEvents: "none",
                   }}
                 >
                   {cut(asString(n.label), 22)}
@@ -3873,19 +4050,19 @@ function TopicGraph({
             top: `${(hp.y / GH) * 100}%`,
             transform: `translate(${hp.x > GW * 0.65 ? "-112%" : "16px"}, -50%)`,
             backgroundColor: INK,
-            color: PAPER,
+            color: WHITE,
             animation: "oslide .15s ease-out both",
           }}
         >
-          <div className="text-[13px] font-black">{asString(hn.label)}</div>
+          <div className="text-[13px] font-bold">{asString(hn.label)}</div>
           {hn.assessed ? (
             <>
               <div className="mt-0.5 opacity-80">
-                {LEVEL_LABEL[asString(hn.level)] ?? ""} · score {num(hn.score)}{" "}
-                · {asString(hn.confidence)} confidence
+                {LEVEL_LABEL[asString(hn.level)] ?? ""}, score {num(hn.score)},{" "}
+                {asString(hn.confidence)} confidence
               </div>
               <div className="opacity-80">
-                {num(hn.files)} files · {num(hn.commits)} commits
+                {num(hn.files)} files, {num(hn.commits)} commits
               </div>
               {asArray<string>(hn.roles).length > 0 && (
                 <div className="mt-0.5 font-bold" style={{ color: YELLOW }}>
@@ -3945,7 +4122,7 @@ function TopicPanel({
 
   return (
     <div
-      className="space-y-4"
+      className="space-y-5"
       style={{ animation: "oslide .25s ease-out both" }}
     >
       <div className="flex items-start justify-between gap-3">
@@ -3956,23 +4133,23 @@ function TopicPanel({
             color={level && level !== "none" ? WHITE : INK}
           />
           <h3
-            className="mt-2 break-words text-[20px] font-black leading-tight"
+            className="mt-2.5 break-words text-[24px] font-bold leading-tight"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             {name}
           </h3>
-          <p className="mt-0.5 text-[13px] font-semibold text-neutral-800">
-            {asString(t.domainLabel)} ·{" "}
+          <p className="mt-1 text-[12px] font-semibold text-neutral-600">
+            {asString(t.domainLabel)},{" "}
             {AUTH_LABEL[asString(t.authenticity)] ??
-              asString(t.authenticityLabel)}{" "}
-            · {asString(t.confidence)} confidence
+              asString(t.authenticityLabel)}
+            , {asString(t.confidence)} confidence
           </p>
         </div>
         <button
           type="button"
           onClick={onClose}
           aria-label="Close details"
-          className="press shrink-0 rounded-full p-1.5"
+          className="hard shrink-0 rounded-full p-1.5"
           style={{ backgroundColor: WHITE, ...border }}
         >
           <X size={14} />
@@ -3981,19 +4158,19 @@ function TopicPanel({
 
       {loading && <InlineLoading label="Reading topic…" />}
       {err && (
-        <p className="text-[13px] font-bold" style={{ color: CORAL }}>
+        <p className="text-[13px] font-bold" style={{ color: "#b8392a" }}>
           {err}
         </p>
       )}
 
       {detail && (
         <>
-          <p className="text-[13px] leading-5 text-neutral-900">
+          <p className="text-[13px] leading-relaxed text-neutral-700">
             {asString(detail.verdict)}
           </p>
           {flags.length > 0 && (
             <div
-              className="rounded-xl p-2.5 text-[12px] leading-4"
+              className="rounded-xl p-3 text-[12px] leading-4"
               style={{ backgroundColor: `${CORAL}22`, ...border }}
             >
               <b>Evidence conflicts with the rating:</b> {flags[0]}
@@ -4001,17 +4178,19 @@ function TopicPanel({
             </div>
           )}
           <div>
-            <div className="flex items-center justify-between text-[13px] font-black">
-              <span>Score {num(sc.score)}</span>
+            <div className="flex items-center justify-between text-[14px] font-bold">
+              <span style={{ fontFamily: DISPLAY_FONT }}>
+                Score {num(sc.score)}
+              </span>
               {band.length === 2 && (
-                <span className="text-neutral-700">
+                <span className="text-[12px] font-semibold text-neutral-600">
                   band {band[0]}–{band[1]}
                 </span>
               )}
             </div>
             <div
-              className="mt-1.5 h-3 overflow-hidden rounded-full"
-              style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
+              className="mt-2 h-3.5 overflow-hidden rounded-full"
+              style={{ backgroundColor: WHITE, border: `2px solid ${INK}` }}
             >
               <div
                 className="h-full transition-all duration-700"
@@ -4036,22 +4215,25 @@ function TopicPanel({
               [
                 ["Observed", k.observed.length, GREEN, WHITE],
                 ["Inferred", k.inferred.length, YELLOW, INK],
-                ["Unknown", k.unknown.length, CORAL, WHITE],
+                ["Unknown", k.unknown.length, CORAL, INK],
               ] as const
             ).map(([label, n, bg, fg]) => (
               <div
                 key={label}
-                className="rounded-xl py-2"
+                className="rounded-xl py-2.5"
                 style={{ backgroundColor: bg, color: fg, ...border }}
               >
                 <div
-                  className="text-[18px] font-black leading-none"
+                  className="text-[22px] font-bold leading-none"
                   style={{ fontFamily: DISPLAY_FONT }}
                 >
                   {n}
                 </div>
-                <div className="mt-0.5 text-[11px] font-black uppercase">
-                  {label}
+                <div
+                  className="mt-1 text-[10px] font-bold tracking-wide"
+                  style={{ fontFamily: MONO }}
+                >
+                  {label.toUpperCase()}
                 </div>
               </div>
             ))}
@@ -4059,7 +4241,7 @@ function TopicPanel({
           <button
             type="button"
             onClick={onEvidence}
-            className="press flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] font-black"
+            className="hard flex w-full items-center justify-between rounded-full px-4 py-2.5 text-[13px] font-bold"
             style={{ backgroundColor: YELLOW, ...border }}
           >
             <span>See the evidence graph below</span>
@@ -4069,7 +4251,7 @@ function TopicPanel({
             <ConfidenceBox c={detail.confidence} />
           </Block>
           <Fold title="How it connects" open>
-            <div className="space-y-2 text-[13px]">
+            <div className="space-y-3 text-[13px]">
               <div className="flex flex-wrap gap-1.5">
                 <Chip
                   text={`PageRank ${fix(g.metrics?.foundationRank)}`}
@@ -4105,14 +4287,14 @@ function TopicPanel({
               {!asArray(g.foundations).length &&
                 !asArray(g.unlocks).length &&
                 !asArray(g.related).length && (
-                  <p className="text-[13px] leading-5 text-neutral-800">
+                  <p className="text-[13px] leading-5 text-neutral-700">
                     The graph records no connection for this topic.
                   </p>
                 )}
             </div>
           </Fold>
           <div className="flex flex-wrap gap-2">
-            <Btn onClick={() => onAsk(name)} bg={LAVENDER}>
+            <Btn onClick={() => onAsk(name)} bg={WHITE}>
               <MessageCircle size={13} /> Ask about this
             </Btn>
             <Btn onClick={onReanalyze} bg={YELLOW} disabled={running}>
@@ -4138,8 +4320,8 @@ function RefList({
   if (!list.length) return null;
   return (
     <div>
-      <div className="text-[12px] font-black text-neutral-700">{title}</div>
-      <div className="mt-1 flex flex-wrap gap-1.5">
+      <div className="text-[12px] font-bold text-neutral-600">{title}</div>
+      <div className="mt-1.5 flex flex-wrap gap-1.5">
         {list.slice(0, 8).map((r, i) => {
           const slug = asString(r.slug);
           const lvl = r.level ?? r.developerLevel;
@@ -4172,7 +4354,7 @@ function RefList({
 /* ========================================================================== */
 
 function EvidenceRow({ e }: { e: EvItem }) {
-  const where = [e.repository, e.path].filter(Boolean).join(" · ");
+  const where = [e.repository, e.path].filter(Boolean).join(" / ");
   const label =
     e.title ||
     cut(e.commit, 90) ||
@@ -4189,26 +4371,26 @@ function EvidenceRow({ e }: { e: EvItem }) {
           : "Code";
   return (
     <li
-      className="rounded-lg p-2"
+      className="rounded-lg p-2.5"
       style={{ backgroundColor: PAPER, border: `1.5px solid ${INK}` }}
     >
       <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
         <span
-          className="rounded-full px-1.5 text-[10px] font-black uppercase"
+          className="rounded-full px-1.5 text-[10px] font-bold"
           style={{ backgroundColor: WHITE, border: `1.5px solid ${INK}` }}
         >
           {kindLabel}
         </span>
         <span className="font-bold">{cut(label, 90)}</span>
         {e.when && (
-          <span className="text-[11px] text-neutral-700">
+          <span className="text-[11px] text-neutral-600">
             {timeAgo(e.when)}
           </span>
         )}
       </div>
       {e.snippet && (
         <pre
-          className="mt-1 overflow-x-auto rounded-md p-1.5 text-[11px] leading-4"
+          className="mt-1.5 overflow-x-auto rounded-md p-2 text-[11px] leading-4"
           style={{
             backgroundColor: WHITE,
             border: `1px solid ${LINE}`,
@@ -4219,7 +4401,7 @@ function EvidenceRow({ e }: { e: EvItem }) {
         </pre>
       )}
       {where && (
-        <div className="mt-0.5 break-all text-[11px] leading-4 text-neutral-700">
+        <div className="mt-1 break-all text-[11px] leading-4 text-neutral-600">
           {cut(where, 110)}
         </div>
       )}
@@ -4318,7 +4500,7 @@ function TopicEvidence({
       title: "Unknown",
       hint: "Not enough evidence to claim either way",
       color: CORAL,
-      icon: <Flame size={14} color={CORAL} />,
+      icon: <Flame size={14} color="#c9503f" />,
       claims: k.unknown,
       empty: "No open unknowns are recorded.",
     },
@@ -4332,21 +4514,22 @@ function TopicEvidence({
     note: string,
   ) => (
     <div
-      className="rounded-xl p-3"
+      className="rounded-xl p-4"
       style={{
         backgroundColor: WHITE,
         border: `2px solid ${INK}`,
         borderTop: `6px solid ${color}`,
+        boxShadow: shadow(2),
       }}
     >
-      <div className="text-[12px] font-black text-neutral-700">{title}</div>
+      <div className="text-[12px] font-bold text-neutral-600">{title}</div>
       <div
-        className="mt-0.5 text-[20px] font-black leading-none"
+        className="mt-1 text-[22px] font-bold leading-none"
         style={{ fontFamily: DISPLAY_FONT }}
       >
         {value}
       </div>
-      <div className="mt-1 text-[12px] leading-4 text-neutral-700">{sub}</div>
+      <div className="mt-1.5 text-[12px] leading-4 text-neutral-600">{sub}</div>
       <div className="mt-0.5 text-[12px] font-bold leading-4">{note}</div>
     </div>
   );
@@ -4354,28 +4537,26 @@ function TopicEvidence({
   return (
     <section
       id={EVIDENCE_ID}
-      className="mt-6 scroll-mt-20 rounded-2xl p-4"
+      className="mt-10 scroll-mt-24 rounded-2xl p-5 sm:p-6"
       style={{
-        backgroundColor: CARD,
+        backgroundColor: PAPER,
         ...border,
         boxShadow: shadow(4),
         animation: "oslide .25s ease-out both",
       }}
     >
-      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-[12px] font-black uppercase tracking-[.14em] text-neutral-700">
-            Why Pathway believes this
-          </p>
+          <Eyebrow>WHY PATHWAY BELIEVES THIS</Eyebrow>
           <h2
-            className="text-[24px] font-black leading-tight"
+            className="mt-1 text-[30px] font-bold leading-tight tracking-tight"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             {name}
           </h2>
-          <p className="mt-0.5 text-[13px] font-semibold text-neutral-800">
-            {LEVEL_LABEL[asString(detail.topic?.level)] ?? ""} ·{" "}
-            {asString(tr.assessment?.confidence)} confidence ·{" "}
+          <p className="mt-1 text-[13px] font-semibold text-neutral-600">
+            {LEVEL_LABEL[asString(detail.topic?.level)] ?? ""},{" "}
+            {asString(tr.assessment?.confidence)} confidence,{" "}
             {num(detail.topic?.evidence?.files)} files across{" "}
             {num(detail.topic?.evidence?.repos)} repositor
             {num(detail.topic?.evidence?.repos) === 1 ? "y" : "ies"}
@@ -4386,7 +4567,7 @@ function TopicEvidence({
             onClick={() =>
               onAsk(`Show me the code that demonstrates my ${name}`)
             }
-            bg={LAVENDER}
+            bg={WHITE}
           >
             <MessageCircle size={13} /> Ask for the code
           </Btn>
@@ -4401,13 +4582,13 @@ function TopicEvidence({
       <EvidenceGraph slug={slug} detail={detail} onPick={onPick} />
 
       {/* three separate answers */}
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
+      <div className="mt-6 grid gap-4 md:grid-cols-3">
         {measure(
           "Developer proficiency",
           "Judged from cited evidence, checked by guard-rails",
           PURPLE,
           LEVEL_LABEL[asString(structure.proficiency?.level)] ?? "–",
-          `Score ${num(structure.proficiency?.score)} · ${AUTH_LABEL[asString(structure.proficiency?.authenticity)] ?? ""}`,
+          `Score ${num(structure.proficiency?.score)}, ${AUTH_LABEL[asString(structure.proficiency?.authenticity)] ?? ""}`,
         )}
         {measure(
           "Assessment confidence",
@@ -4424,19 +4605,19 @@ function TopicEvidence({
           "Role in the shared topic map. Not your skill.",
           SKY,
           roles.length ? roles.map(humanize).join(" + ") : "Specialised",
-          `PageRank ${fix(structure.taxonomyImportance?.foundationRank)} · Betweenness ${fix(structure.taxonomyImportance?.bridgeScore)}`,
+          `PageRank ${fix(structure.taxonomyImportance?.foundationRank)}, Betweenness ${fix(structure.taxonomyImportance?.bridgeScore)}`,
         )}
       </div>
 
       {flags.length > 0 && (
         <div
-          className="mt-3 rounded-xl p-3"
+          className="mt-4 rounded-xl p-4"
           style={{ backgroundColor: `${CORAL}22`, ...border }}
         >
-          <div className="text-[13px] font-black">
+          <div className="text-[13px] font-bold">
             Where the evidence conflicts or is out of date
           </div>
-          <ul className="mt-1 space-y-1">
+          <ul className="mt-1.5 space-y-1">
             {flags.map((f, i) => (
               <li key={i} className="text-[13px] leading-5">
                 {f}
@@ -4446,26 +4627,27 @@ function TopicEvidence({
         </div>
       )}
 
-      <div className="mt-3 grid gap-3 lg:grid-cols-3">
+      <div className="mt-4 grid gap-4 lg:grid-cols-3">
         {columns.map((c) => (
           <div
             key={c.key}
-            className="rounded-xl p-3"
+            className="rounded-xl p-4"
             style={{
               backgroundColor: WHITE,
               border: `2px solid ${INK}`,
               borderTop: `6px solid ${c.color}`,
+              boxShadow: shadow(2),
             }}
           >
-            <div className="flex items-center gap-1.5 text-[14px] font-black">
+            <div className="flex items-center gap-1.5 text-[14px] font-bold">
               {c.icon} {c.title}
-              <span className="ml-auto text-[12px] text-neutral-700">
+              <span className="ml-auto text-[12px] text-neutral-600">
                 {c.claims.length}
               </span>
             </div>
-            <div className="text-[12px] text-neutral-700">{c.hint}</div>
+            <div className="text-[12px] text-neutral-600">{c.hint}</div>
             {c.claims.length ? (
-              <ul className="mt-2 space-y-1.5">
+              <ul className="mt-3 space-y-2">
                 {c.claims.slice(0, 6).map((x, i) => (
                   <li key={i} className="text-[13px] leading-5">
                     {cut(asString(x.text), 200)}
@@ -4473,7 +4655,7 @@ function TopicEvidence({
                       <span
                         key={id}
                         title={asString(evById.get(id)?.source)}
-                        className="ml-1 rounded-full px-1.5 text-[10px] font-black"
+                        className="ml-1 rounded-full px-1.5 text-[10px] font-bold"
                         style={{
                           backgroundColor: LAVENDER,
                           border: `1.5px solid ${INK}`,
@@ -4486,7 +4668,7 @@ function TopicEvidence({
                 ))}
               </ul>
             ) : (
-              <p className="mt-2 text-[13px] leading-5 text-neutral-700">
+              <p className="mt-3 text-[13px] leading-5 text-neutral-600">
                 {c.empty}
               </p>
             )}
@@ -4496,16 +4678,19 @@ function TopicEvidence({
 
       {approaches.length > 0 && (
         <div
-          className="mt-4 rounded-xl p-3"
-          style={{ backgroundColor: WHITE, ...border }}
+          className="mt-6 rounded-xl p-4"
+          style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
         >
-          <div className="text-[14px] font-black">
+          <div
+            className="text-[16px] font-bold"
+            style={{ fontFamily: DISPLAY_FONT }}
+          >
             Approaches demonstrated ({approaches.length})
           </div>
-          <p className="text-[12px] text-neutral-700">
+          <p className="text-[12px] text-neutral-600">
             Each approach is judged on its own evidence.
           </p>
-          <div className="mt-2 grid gap-3 lg:grid-cols-2">
+          <div className="mt-3 grid gap-4 lg:grid-cols-2">
             {approaches.map((a, i) => {
               const ev = approachEvidence(a, all);
               const hardening = asArray<string>(a.hardening).filter(Boolean);
@@ -4514,7 +4699,7 @@ function TopicEvidence({
               return (
                 <div
                   key={`${asString(a.slug)}-${i}`}
-                  className="rounded-xl p-3"
+                  className="rounded-xl p-3.5"
                   style={{
                     backgroundColor: PAPER,
                     border: `2px solid ${INK}`,
@@ -4522,7 +4707,7 @@ function TopicEvidence({
                   }}
                 >
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[14px] font-black">
+                    <span className="text-[14px] font-bold">
                       {asString(a.name ?? a.slug)}
                     </span>
                     <Chip
@@ -4533,19 +4718,19 @@ function TopicEvidence({
                     {a.isPrimary && <Chip text="primary" background={YELLOW} />}
                   </div>
                   {a.howImplemented && (
-                    <p className="mt-1.5 text-[13px] leading-5 text-neutral-900">
+                    <p className="mt-2 text-[13px] leading-5 text-neutral-800">
                       {cut(asString(a.howImplemented), 240)}
                     </p>
                   )}
                   {hardening.length > 0 && (
-                    <p className="mt-1 text-[12px] leading-4 text-neutral-800">
+                    <p className="mt-1.5 text-[12px] leading-4 text-neutral-700">
                       <b>Hardening seen:</b> {hardening.slice(0, 3).join("; ")}
                     </p>
                   )}
                   {gaps.length > 0 && (
                     <p
-                      className="mt-1 text-[12px] font-bold leading-4"
-                      style={{ color: CORAL }}
+                      className="mt-1.5 text-[12px] font-bold leading-4"
+                      style={{ color: "#b8392a" }}
                     >
                       Not shown: {gaps.slice(0, 2).join("; ")}
                     </p>
@@ -4569,19 +4754,27 @@ function TopicEvidence({
         </div>
       )}
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      <div className="mt-6 grid gap-4 lg:grid-cols-2">
         <div
-          className="rounded-xl p-3"
-          style={{ backgroundColor: WHITE, ...border }}
+          className="rounded-xl p-4"
+          style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
         >
-          <div className="mb-1 text-[14px] font-black">Foundation paths</div>
+          <div
+            className="mb-2 text-[16px] font-bold"
+            style={{ fontFamily: DISPLAY_FONT }}
+          >
+            Foundation paths
+          </div>
           <PrereqPaths paths={prereqs} onPick={onPick} />
         </div>
         <div
-          className="rounded-xl p-3"
-          style={{ backgroundColor: WHITE, ...border }}
+          className="rounded-xl p-4"
+          style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
         >
-          <div className="mb-1 text-[14px] font-black">
+          <div
+            className="mb-2 text-[16px] font-bold"
+            style={{ fontFamily: DISPLAY_FONT }}
+          >
             Why this confidence level
           </div>
           <ConfidenceBox c={detail.confidence} />
@@ -4590,19 +4783,20 @@ function TopicEvidence({
 
       {(story || storyErr) && (
         <div
-          className="mt-4 rounded-xl p-4"
+          className="mt-6 rounded-xl p-5"
           style={{
             backgroundColor: WHITE,
             ...border,
+            boxShadow: shadow(3),
             animation: "oslide .25s ease-out both",
           }}
         >
           <div className="flex items-center justify-between gap-2">
-            <span className="flex items-center gap-2 text-[13px] font-black">
+            <span className="flex items-center gap-2 text-[13px] font-bold">
               <Sparkles size={14} /> In plain English
             </span>
             {story && (
-              <span className="text-[12px] font-bold text-neutral-700">
+              <span className="text-[12px] font-semibold text-neutral-600">
                 {storySrc === "llm"
                   ? "Written by the Pathway agent, numbers checked against your graph"
                   : "Summary built from your graph"}
@@ -4610,44 +4804,45 @@ function TopicEvidence({
             )}
           </div>
           {storyErr && (
-            <p className="mt-2 text-[13px] font-bold" style={{ color: CORAL }}>
+            <p
+              className="mt-2 text-[13px] font-bold"
+              style={{ color: "#b8392a" }}
+            >
               {storyErr}
             </p>
           )}
           {story && (
             <>
               <h3
-                className="mt-2 text-[17px] font-black leading-snug"
+                className="mt-3 text-[20px] font-bold leading-snug"
                 style={{ fontFamily: DISPLAY_FONT }}
               >
                 {asString(story.headline)}
               </h3>
-              <p className="mt-1 text-[14px] leading-6 text-neutral-900">
+              <p className="mt-1.5 text-[14px] leading-6 text-neutral-800">
                 {asString(story.summary)}
               </p>
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <div
-                  className="rounded-xl p-3"
+                  className="rounded-xl p-3.5"
                   style={{
                     backgroundColor: `${GREEN}22`,
                     border: `2px solid ${INK}`,
                   }}
                 >
-                  <div className="text-[12px] font-black uppercase">
-                    What it means
-                  </div>
+                  <div className="text-[12px] font-bold">What it means</div>
                   <p className="mt-1 text-[13px] leading-5">
                     {asString(story.meaning)}
                   </p>
                 </div>
                 <div
-                  className="rounded-xl p-3"
+                  className="rounded-xl p-3.5"
                   style={{
                     backgroundColor: `${CORAL}22`,
                     border: `2px solid ${INK}`,
                   }}
                 >
-                  <div className="text-[12px] font-black uppercase">
+                  <div className="text-[12px] font-bold">
                     What is not proven
                   </div>
                   <p className="mt-1 text-[13px] leading-5">
@@ -4656,8 +4851,8 @@ function TopicEvidence({
                 </div>
               </div>
               {asArray<string>(story.followups).length > 0 && (
-                <div className="mt-3 flex flex-wrap items-center gap-2">
-                  <span className="text-[12px] font-black text-neutral-700">
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <span className="text-[12px] font-bold text-neutral-600">
                     Ask the agent:
                   </span>
                   {asArray<string>(story.followups)
@@ -4668,7 +4863,7 @@ function TopicEvidence({
                         type="button"
                         onClick={() => onAsk(q)}
                         className="press rounded-full px-3 py-1 text-[12px] font-bold"
-                        style={{ backgroundColor: LAVENDER, ...border }}
+                        style={{ backgroundColor: WHITE, ...border }}
                       >
                         {q}
                       </button>
@@ -4696,13 +4891,13 @@ function PrereqPaths({
 }) {
   if (!paths.length)
     return (
-      <p className="text-[13px] leading-5 text-neutral-800">
+      <p className="text-[13px] leading-5 text-neutral-700">
         No confirmed foundation is recorded for this topic. Related topics are
         associations, not prerequisites.
       </p>
     );
   return (
-    <div className="space-y-2.5">
+    <div className="space-y-3">
       {paths.slice(0, 6).map((p, i) => {
         const st = PREREQ_STYLE[asString(p.status)] ?? PREREQ_STYLE.unverified;
         const steps = asArray<Obj>(p.steps);
@@ -4710,7 +4905,7 @@ function PrereqPaths({
         return (
           <div
             key={i}
-            className="rounded-lg p-2.5"
+            className="rounded-lg p-3"
             style={{ backgroundColor: PAPER, border: `1.5px solid ${INK}` }}
           >
             <Chip text={st.label} background={st.bg} color={st.color} />
@@ -4744,7 +4939,7 @@ function PrereqPaths({
               })}
             </div>
             {reasons[0] && (
-              <p className="mt-1.5 text-[12px] leading-4 text-neutral-800">
+              <p className="mt-2 text-[12px] leading-4 text-neutral-700">
                 {cut(reasons[0], 170)}
               </p>
             )}
@@ -4768,28 +4963,28 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
           color={eff === "high" ? WHITE : INK}
         />
         {asString(c.stated) !== eff && (
-          <span className="text-[12px] leading-4 text-neutral-800">
+          <span className="text-[12px] leading-4 text-neutral-700">
             Stored as {asString(c.stated)}; current evidence supports{" "}
             {asString(c.derived)}.
           </span>
         )}
       </div>
-      <div className="mt-2 space-y-1.5">
+      <div className="mt-3 space-y-2.5">
         {factors.map((f) => (
           <div key={asString(f.id)}>
             <div className="flex items-center gap-2 text-[12px]">
-              <span className="w-32 shrink-0 font-black">
+              <span className="w-32 shrink-0 font-bold">
                 {asString(f.label)}
               </span>
               <div
-                className="h-2 flex-1 overflow-hidden rounded-full"
-                style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
+                className="h-2.5 flex-1 overflow-hidden rounded-full"
+                style={{ backgroundColor: LINE }}
               >
                 <div
-                  className="h-full transition-all duration-700"
+                  className="h-full rounded-full transition-all duration-700"
                   style={{
                     width: `${(num(f.value) / Math.max(1, num(f.max))) * 100}%`,
-                    backgroundColor: SKY,
+                    backgroundColor: INK,
                   }}
                 />
               </div>
@@ -4797,7 +4992,7 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
                 {num(f.value)}/{num(f.max)}
               </span>
             </div>
-            <div className="pl-[8.5rem] text-[11px] leading-4 text-neutral-700">
+            <div className="pl-[8.5rem] text-[11px] leading-4 text-neutral-600">
               {asString(f.note)}
             </div>
           </div>
@@ -4811,10 +5006,38 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
 /* SMALL PIECES                                                               */
 /* ========================================================================== */
 
+function Mark() {
+  return (
+    <svg
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle cx="5" cy="19" r="2.4" fill={INK} />
+      <circle cx="19" cy="5" r="2.4" fill={INK} />
+      <circle cx="19" cy="19" r="2.4" fill={YELLOW} />
+      <path d="M5 19L19 5M19 19L5 19" stroke={INK} strokeWidth="1.6" />
+    </svg>
+  );
+}
+
+function Eyebrow({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className="text-[10px] font-bold tracking-[0.18em] text-neutral-400"
+      style={{ fontFamily: MONO }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function Row({ children }: { children: ReactNode }) {
   return (
     <div
-      className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:gap-6"
+      className="flex flex-col gap-2 py-3.5 sm:flex-row sm:items-center sm:gap-6"
       style={{ borderBottom: `1px solid ${LINE}` }}
     >
       {children}
@@ -4848,17 +5071,17 @@ function Tile({
 }) {
   return (
     <div
-      className="rounded-xl p-3"
-      style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
+      className="rounded-2xl p-4"
+      style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(3) }}
     >
       <div
-        className="text-[26px] font-black leading-none"
+        className="text-[32px] font-bold leading-none"
         style={{ fontFamily: DISPLAY_FONT }}
       >
         {typeof value === "number" ? value.toLocaleString() : value}
       </div>
-      <div className="mt-1 text-[13px] font-black">{label}</div>
-      <div className="text-[12px] leading-4 text-neutral-700">{hint}</div>
+      <div className="mt-2 text-[13px] font-bold">{label}</div>
+      <div className="text-[12px] leading-4 text-neutral-600">{hint}</div>
     </div>
   );
 }
@@ -4884,7 +5107,7 @@ function Fold({
       }}
     >
       <summary
-        className={`press flex cursor-pointer items-center gap-1.5 font-black ${small ? "mt-1.5 text-[12px] text-neutral-700" : "py-2.5 text-[13px]"}`}
+        className={`flex cursor-pointer items-center gap-1.5 font-bold ${small ? "mt-2 text-[12px] text-neutral-600" : "py-3 text-[13px]"}`}
       >
         <ChevronRight
           size={small ? 12 : 14}
@@ -4893,7 +5116,7 @@ function Fold({
         />
         {title}
       </summary>
-      <div className={small ? "pt-1" : "pb-3"}>{children}</div>
+      <div className={small ? "pt-1.5" : "pb-3"}>{children}</div>
     </details>
   );
 }
@@ -4914,7 +5137,7 @@ function TopicSelect({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={placeholder}
-      className="press max-w-[210px] rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
+      className="max-w-[210px] rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
       style={border}
     >
       <option value="">{placeholder}</option>
@@ -4948,7 +5171,7 @@ function FilterSelect({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={label}
-      className="press rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
+      className="rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
       style={border}
     >
       {allowEmpty && <option value="">{label}: all</option>}
@@ -4978,8 +5201,13 @@ function TopicChip({ t, onClick }: { t: Obj; onClick: () => void }) {
 function Block({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section>
-      <div className="text-[13px] font-black text-neutral-800">{title}</div>
-      <div className="mt-1.5">{children}</div>
+      <div
+        className="text-[15px] font-bold"
+        style={{ fontFamily: DISPLAY_FONT }}
+      >
+        {title}
+      </div>
+      <div className="mt-2">{children}</div>
     </section>
   );
 }
@@ -4987,7 +5215,7 @@ function Block({ title, children }: { title: string; children: ReactNode }) {
 function Btn({
   onClick,
   children,
-  bg = CARD,
+  bg = WHITE,
   disabled = false,
 }: {
   onClick: () => void;
@@ -5000,7 +5228,7 @@ function Btn({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="press inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-black disabled:opacity-50"
+      className="hard inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[13px] font-bold disabled:opacity-50"
       style={{ backgroundColor: bg, color: INK, ...border }}
     >
       {children}
@@ -5019,7 +5247,7 @@ function Chip({
 }) {
   return (
     <span
-      className="inline-flex rounded-full px-2.5 py-0.5 text-[12px] font-black"
+      className="inline-flex rounded-full px-2.5 py-0.5 text-[12px] font-bold"
       style={{ backgroundColor: background, color, ...border }}
     >
       {text}
@@ -5031,13 +5259,16 @@ function MiniStat({ label, value }: { label: string; value: number }) {
   return (
     <div className="text-center">
       <div
-        className="text-[18px] font-black leading-none"
+        className="text-[22px] font-bold leading-none"
         style={{ fontFamily: DISPLAY_FONT }}
       >
         {value.toLocaleString()}
       </div>
-      <div className="mt-0.5 text-[11px] font-bold uppercase text-neutral-700">
-        {label}
+      <div
+        className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500"
+        style={{ fontFamily: MONO }}
+      >
+        {label.toUpperCase()}
       </div>
     </div>
   );
@@ -5046,7 +5277,7 @@ function MiniStat({ label, value }: { label: string; value: number }) {
 function Empty({ text }: { text: string }) {
   return (
     <div
-      className="rounded-xl border-2 border-dashed p-5 text-[13px] text-neutral-800"
+      className="rounded-xl border-2 border-dashed p-5 text-[13px] text-neutral-700"
       style={{ borderColor: LINE }}
     >
       {text}
@@ -5068,7 +5299,7 @@ function Screen({ children }: { children: ReactNode }) {
     <div
       className="flex min-h-screen items-center justify-center p-6"
       style={{
-        backgroundColor: PAPER,
+        backgroundColor: WHITE,
         color: INK,
         fontFamily: BODY_FONT,
         fontWeight: 500,
