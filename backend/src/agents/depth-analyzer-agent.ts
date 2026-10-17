@@ -318,8 +318,18 @@ class LlmGateway {
     return this.llm.model;
   }
 
+  private openedAt = 0;
+
   get open(): boolean {
-    return this.breaker > 0 && this.consecutiveFailures >= this.breaker;
+    if (!(this.breaker > 0 && this.consecutiveFailures >= this.breaker))
+      return false;
+    if (Date.now() - this.openedAt > 30_000) {
+      // half-open: allow one probe call; one more failure re-opens it
+      this.consecutiveFailures = this.breaker - 1;
+      this.announcedOpen = false;
+      return false;
+    }
+    return true;
   }
 
   private async acquire(): Promise<void> {
@@ -352,10 +362,11 @@ class LlmGateway {
 
   private noteFailure(stage: string, message: string): void {
     this.consecutiveFailures += 1;
+    if (this.consecutiveFailures >= this.breaker) this.openedAt = Date.now();
     if (this.open && !this.announcedOpen) {
       this.announcedOpen = true;
       log(
-        `LLM circuit OPEN after ${this.consecutiveFailures} failures in a row: remaining steps use graph baselines only`,
+        `LLM circuit OPEN after ${this.consecutiveFailures} failures in a row: pausing 30s, then probing`,
         { lastStage: stage, lastError: message },
       );
     }
@@ -428,9 +439,9 @@ class LlmGateway {
 function makeGateway(options: DepthAnalyzerOptions): LlmGateway {
   return new LlmGateway(
     options.llm,
-    Math.max(1, options.llmConcurrency ?? envNum("DEPTH_LLM_CONCURRENCY", 4)),
+    Math.max(1, options.llmConcurrency ?? envNum("DEPTH_LLM_CONCURRENCY", 2)),
     options.llmTpm ?? envNum("DEPTH_LLM_TPM", 0),
-    options.llmBreaker ?? envNum("DEPTH_LLM_BREAKER", 3),
+    options.llmBreaker ?? envNum("DEPTH_LLM_BREAKER", 6),
   );
 }
 
@@ -1675,6 +1686,14 @@ function reconcile(
     level = baseline.level;
     authenticity = fallbackAuthenticity(ev);
     level = minLevel(level, MAX_LEVEL_BY_AUTHENTICITY[authenticity]);
+    // Counts alone cannot prove depth: when no model read the code, the level
+    // never goes above "proficient" (the same principle as the model branch).
+    if (DEPTH_RANK[level] > DEPTH_RANK.proficient) {
+      guards.push(
+        `level lowered from ${level} to proficient: no model reviewed the code, so the level comes from counts only`,
+      );
+      level = "proficient";
+    }
     score = clampScore(level, baseline.score);
     confidence = "low";
     verdict = `Estimated from graph statistics only (${ev.totals.files} files, ${ev.totals.commits} commits, ${ev.totals.repos} repositories); no model judgement was available.`;
@@ -1856,11 +1875,22 @@ function reconcile(
     ...(judgement?.evidence ?? []),
     ...records.flatMap((r) => r.evidenceRefs),
   ]).filter((k) => refByKey.has(k));
+
   if (citedKeys.length === 0) {
     citedKeys = uniq([
       ...ev.samples.slice(0, 3).map((s) => s.ref),
       ...ev.demonstrations.slice(0, 2).map((d) => d.ref),
     ]);
+  }
+
+  // Fallback used to cite only code samples, so "kinds of evidence" always read 1 of 4.
+  if (fallback) {
+    citedKeys = uniq([
+      ...citedKeys,
+      ...ev.demonstrations.slice(0, 2).map((d) => d.ref),
+      ...ev.experiences.slice(0, 2).map((e) => e.ref),
+      ...ev.commits.slice(0, 3).map((c) => c.ref),
+    ]).filter((k) => refByKey.has(k));
   }
   const evidence: EvidenceRef[] = citedKeys
     .slice(0, 14)
@@ -1910,7 +1940,22 @@ function reconcile(
     implementations,
     approaches: records,
     evidence,
-    stats: ev.totals,
+    // the extra count rides inside stats_json: it explains why the topic total
+    // (all matched files) can be larger than any single approach's file count
+    stats: {
+      ...ev.totals,
+      unattributedFiles: ev.unattributedFiles,
+      baselineComponents: baseline.components,
+      baselineCaps: baseline.caps,
+      evidenceKinds: {
+        code: ev.samples.length,
+        demonstration: ev.demonstrations.length,
+        experience: ev.experiences.length,
+        commit: ev.commits.length,
+      },
+      timeline: ev.timeline,
+      hardening: ev.hardening.slice(0, 8),
+    } as DepthAssessmentRecord["stats"],
     spec: ev.spec,
     fallback,
   };

@@ -16,9 +16,11 @@ import {
   ensureDepthSchema,
   findTopicsByText,
   readDeveloperTopicProfile,
+  readLearningFrontier,
   readTaxonomyEdges,
   readTopicDepthDetail,
   readTopicGraphEvidence,
+  readTopicLearningGraph,
   readTopicPathDetailed,
   slugify,
   type Authenticity,
@@ -379,6 +381,7 @@ const BASELINE_COMPONENTS = [
 const GUARD_RAILS = [
   "The final level can be at most one level above the deterministic baseline.",
   "Authenticity caps the level: genuine_implementation up to deep, working_usage up to proficient, incidental up to working, boilerplate and insufficient_evidence up to surface.",
+  "When no model reviewed the code (graph baseline only), the level can never exceed proficient: counts alone are not depth.",
   "Genuine implementation is downgraded to working usage when there are no own definitions, no built mechanism and fewer than 3 files.",
   "When 70% or more of the evidence sits in scaffold-like commits the topic is marked boilerplate.",
   "Confidence follows the strength and the diversity of the evidence: fewer than 3 files or fewer than 2 commits is always low; evidence from a single repository, from fewer than three kinds, or with no directly observed work cannot be high. The model may lower confidence, never raise it above this cap. The API shows the lower of the stored value and the value re-derived from the current evidence.",
@@ -437,6 +440,12 @@ const ENDPOINTS = [
     method: "GET",
     path: "/api/topics/:slug/graph",
     purpose: "Evidence map, assessment steps and plain-language story",
+  },
+  {
+    method: "GET",
+    path: "/api/topics/:slug/reasoning",
+    purpose:
+      "Build/mission, depth change, graph walk and next action as ordered steps",
   },
   {
     method: "GET",
@@ -2352,6 +2361,8 @@ interface ConfidenceView {
   factors: ConfidenceFactor[];
   strengths: string[];
   limits: string[];
+  /** the rules that actually hold confidence down, in plain words */
+  binding: string[];
 }
 
 const CONF_RANK: Record<string, number> = { low: 1, medium: 2, high: 3 };
@@ -2462,6 +2473,19 @@ function buildConfidence(
   const effective =
     (CONF_RANK[derived] ?? 1) < (CONF_RANK[stated] ?? 1) ? derived : stated;
 
+  // The rules that actually hold confidence down, said once in plain words.
+  const binding: string[] = [];
+  if (card.fallback)
+    binding.push(
+      "no model reviewed the code, so the level comes from counts only",
+    );
+  if (ev.files < 3 || ev.commits < 2) binding.push("very few files or commits");
+  if (kindsSeen.length < 3)
+    binding.push(`only ${kindsSeen.length} of 4 kinds of evidence`);
+  if (ev.repos < 2) binding.push("all of the evidence is in one project");
+  if (observedReal === 0)
+    binding.push("no skill has a detected example in your own code");
+
   return {
     stated,
     derived,
@@ -2474,6 +2498,7 @@ function buildConfidence(
     limits: factors
       .filter((f) => f.value / f.max < 0.5)
       .map((f) => `${f.label}: ${f.note}`),
+    binding,
   };
 }
 
@@ -2591,6 +2616,10 @@ function contradictionsFor(
   const observedReal = ctx.proof.items.filter(
     (i) => i.class === "observed" && !i.practiceOnly,
   ).length;
+  if (card.fallback && card.levelRank > DEPTH_RANK.proficient)
+    out.push(
+      `Rated ${card.levelLabel.toLowerCase()} from counts alone: no model reviewed the code. Re-judge this topic; new analyses cap this case at proficient.`,
+    );
   if (card.level === "deep" && card.authenticity !== "genuine_implementation")
     out.push("Rated deep, but authenticity is not a genuine implementation.");
   if (card.levelRank >= 3 && ctx.proof.items.length > 0 && observedReal === 0)
@@ -2683,27 +2712,44 @@ function buildTrace(
   for (const c of ctx.proof.topicCitations)
     addEvidence(c, `topic: ${card.name}`);
 
+  // ---- scope: why the topic total can be larger than an approach's count ----
+  const approachRows = asRows(detail.approaches);
+  const storedStats = (detail.stats ?? {}) as Row;
+  const scope = {
+    topicFiles: card.evidence.files,
+    topicCommits: card.evidence.commits,
+    topicRepos: card.evidence.repos,
+    approaches: approachRows.map((a) => ({
+      name: str(a.name ?? a.slug),
+      files: num(a.files),
+      commits: num(a.commits),
+    })),
+    unattributedFiles: nullableNum(storedStats.unattributedFiles),
+    note: `${card.evidence.files} files across ${card.evidence.commits} commits match the topic as a whole. Each approach counts only the files that match its own packages and signals, so an approach can show fewer.`,
+  };
+
   // ---- claims: observed / inferred / unknown ----
   const observed: Claim[] = [];
   const inferred: Claim[] = [];
   const unknown: Claim[] = [];
-  for (const a of asRows(detail.approaches)) {
+  for (const a of approachRows) {
     const refs = asArray(a.evidenceRefs ?? a.evidence ?? a.evidenceItems);
     const how = str(a.howImplemented);
     const depth = LEVEL_META[str(a.depth) as DepthLevel]?.label ?? str(a.depth);
     const name = str(a.name ?? a.slug);
+    const own = `${plural(num(a.files), "file")} / ${plural(num(a.commits), "commit")} for this approach`;
     if (
       refs.length > 0 ||
       (how && str(a.authenticity) === "genuine_implementation")
     )
       observed.push({
-        text: `${name} (${depth}): ${how || plural(refs.length, "cited piece") + " of code"}`,
+        text: `Approach ${name} (${depth}, ${own}): ${how || plural(refs.length, "cited piece") + " of code"}`,
         evidenceIds: [],
         slug: str(a.slug),
       });
     else
       inferred.push({
-        text: `${name} (${depth}): judged from the topic rating, no code cited for this approach.`,
+        text: `Approach ${name} (${depth}, ${own}): judged from the topic rating, no code cited for this approach.`,
         evidenceIds: [],
         slug: str(a.slug),
       });
@@ -2746,7 +2792,7 @@ function buildTrace(
       explanation: `Developer was assessed on ${card.name}.`,
     },
   ];
-  for (const a of asRows(detail.approaches))
+  for (const a of approachRows)
     graphPaths.push({
       kind: "approach",
       nodeIds: [assessmentNode, `approach:${str(a.slug)}`],
@@ -2859,6 +2905,7 @@ function buildTrace(
       model: d.analysis?.model ?? null,
       lastAnalyzedAt: d.analysis?.updatedAt ?? null,
     },
+    scope,
     // three different things, never collapsed into one score
     structure: {
       taxonomyImportance: {
@@ -2881,6 +2928,7 @@ function buildTrace(
         stored: ctx.confidence.stated,
         derived: ctx.confidence.derived,
         ratio: ctx.confidence.score,
+        binding: ctx.confidence.binding,
         note: "How strong and varied the evidence is. Not how good the developer is.",
       },
     },
@@ -3071,7 +3119,7 @@ function plainStory(f: Row, ctx: ProofContext): PlainStory {
   const unverified = paths.filter((p) => p.status === "unverified").length;
   const prerequisiteSummary = paths.length
     ? `${plural(paths.length, "foundation path")}: ${demonstrated} backed by your code, ${weak} shallow, ${unverified} not assessed.${paths[0].weakest && paths[0].status !== "demonstrated" ? ` Weakest link: ${paths[0].weakest}.` : ""}`
-    : "No foundation path is recorded for this topic.";
+    : "No prerequisite links are recorded for this topic. Connections are associations only.";
 
   const confidenceNote = `Confidence is ${confidence.effective}. ${[
     confidence.strengths[0],
@@ -3686,6 +3734,15 @@ topicsRouter.post(
           refinements: r.refinements,
           durationMs: r.durationMs,
           metrics: r.metrics,
+          // why prerequisite links were or were not stored (shown in the UI)
+          relations: {
+            requested: r.diagnostics.storage?.relationsRequested ?? 0,
+            persisted: r.diagnostics.storage?.relationsPersisted ?? 0,
+            rejectedBeforeWrite: r.diagnostics.rejectedRelations.slice(0, 20),
+            rejectedByDatabase: (
+              r.diagnostics.storage?.rejectedRelations ?? []
+            ).slice(0, 20),
+          },
         };
       });
       return res.status(202).json({
@@ -3944,6 +4001,179 @@ topicsRouter.get(
     } catch (err) {
       console.error("GET /api/topics/:slug/graph failed:", err);
       return res.status(500).json({ error: "Failed to build graph evidence" });
+    }
+  },
+);
+
+// ---- reasoning: build/mission -> depth change -> graph walk -> next action ------
+// Built only from data the graph already holds. When no BUILDS_ON edge exists the
+// walk step says so and the next action is labelled a ranking, never a prerequisite.
+
+topicsRouter.get(
+  "/api/topics/:slug/reasoning",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const slug = slugify(str(req.params.slug));
+    if (!SLUG.test(slug))
+      return res.status(400).json({ error: "Invalid topic slug." });
+    try {
+      const d = await dossierFor(req);
+      if (!d) return res.status(404).json(NOT_SYNCED);
+      const card = d.bySlug.get(slug);
+      if (!card)
+        return res
+          .status(404)
+          .json({ error: `No assessment for topic "${slug}".` });
+
+      const graph = await getGraphForDeveloper(d.developerId);
+      const [ev, lg, frontier, detail] = await Promise.all([
+        readTopicGraphEvidence(graph, d.developerId, slug),
+        readTopicLearningGraph(graph, d.developerId, slug),
+        readLearningFrontier(graph, d.developerId, { limit: 10 }),
+        readTopicDepthDetail(graph, d.developerId, slug),
+      ]);
+
+      // 1. what just happened: the newest linked build or mission
+      const builds = ev?.builds ?? [];
+      const trigger = builds[0] ?? null;
+      const buildTotals = ev?.buildTotals ?? { missions: 0, builds: 0 };
+      const triggerKind = trigger?.kind === "mission" ? "Mission" : "Build";
+      const triggerText = trigger
+        ? `${triggerKind} “${trigger.title}”${trigger.repository ? ` in ${trigger.repository}` : ""}${trigger.createdAt ? ` (${trigger.createdAt.slice(0, 10)})` : ""}, linked to ${trigger.capability || "this topic"}.`
+        : "No build or mission is linked to this topic in the graph yet.";
+
+      // 2. what changed: a real diff of the last two stored snapshots
+      const history = detail?.history ?? [];
+      const after = history[0];
+      const before = history[1];
+      let change: {
+        from: string;
+        to: string;
+        scoreDelta: number;
+        since: string;
+        until: string;
+        linkedWork: number;
+      } | null = null;
+      if (after && before) {
+        const from = Date.parse(before.assessedAt);
+        const to = Date.parse(after.assessedAt);
+        const linkedWork = builds.filter((b) => {
+          const t = Date.parse(b.createdAt);
+          return Number.isFinite(t) && t > from && t <= to;
+        }).length;
+        change = {
+          from: before.level,
+          to: after.level,
+          scoreDelta: after.score - before.score,
+          since: before.assessedAt,
+          until: after.assessedAt,
+          linkedWork,
+        };
+      }
+      const changeText = change
+        ? change.from !== change.to
+          ? `Between the last two analyses depth moved from ${change.from} to ${change.to} (score ${change.scoreDelta >= 0 ? "+" : ""}${change.scoreDelta}); ${plural(change.linkedWork, "linked build or mission")} fall in that window.`
+          : `Between the last two analyses depth stayed ${change.to} (score ${change.scoreDelta >= 0 ? "+" : ""}${change.scoreDelta}); ${plural(change.linkedWork, "linked build or mission")} fall in that window.`
+        : "Only one analysis exists for this topic, so no change can be shown yet.";
+
+      // 3. the walk: prerequisites if they exist, associations otherwise
+      const prereqs = lg?.prerequisites ?? [];
+      const related = lg?.related ?? [];
+      const mode: "prerequisite" | "association_only" = prereqs.length
+        ? "prerequisite"
+        : "association_only";
+      const metCount = prereqs.filter((p) => p.met).length;
+      const missingCount = prereqs.length - metCount;
+      const walkText =
+        mode === "prerequisite"
+          ? `Walked ${plural(prereqs.length, "prerequisite")} up to ${Math.max(0, ...prereqs.map((p) => p.hops))} step(s) down: ${metCount} met, ${missingCount} missing.`
+          : related.length
+            ? `0 prerequisite edges are recorded, so this step used associations only: ${joinList(
+                related.map(
+                  (r) => `${r.name} (${r.developer?.level ?? "not assessed"})`,
+                ),
+                4,
+              )}. Associations are not prerequisites.`
+            : "0 prerequisite edges and no related topics are recorded, so the graph had nothing to walk.";
+
+      // 4. the next action, with its basis stated
+      const unmet = lg?.readiness.learningOrder ?? [];
+      let next: {
+        slug: string;
+        name: string;
+        basis: "unmet_prerequisite" | "ranking";
+        basisText: string;
+        why: string;
+      } | null = null;
+      if (mode === "prerequisite" && unmet.length) {
+        const target = prereqs.find((p) => p.slug === unmet[0]);
+        next = {
+          slug: unmet[0],
+          name: target?.name ?? unmet[0],
+          basis: "unmet_prerequisite",
+          basisText: "A required prerequisite is not shown at working depth.",
+          why: `${target?.name ?? unmet[0]} is a required foundation of ${card.name}${target?.edge.reason ? `: ${target.edge.reason}` : "."}`,
+        };
+      } else {
+        const pick =
+          frontier.find((f) => f.ready && f.topic.slug !== slug) ??
+          frontier.find((f) => f.topic.slug !== slug);
+        if (pick)
+          next = {
+            slug: pick.topic.slug,
+            name: pick.topic.name,
+            basis: "ranking",
+            basisText:
+              mode === "prerequisite"
+                ? "All prerequisites are met, so the next topic is ranked by PageRank and how many topics it unlocks."
+                : "No prerequisite edges exist. This is a ranking by PageRank and topics unlocked, not a prerequisite chain.",
+            why: pick.why,
+          };
+      }
+      const nextText = next
+        ? `Next: ${next.name}. ${next.basisText}`
+        : "No next topic could be ranked from the graph.";
+
+      return res.json({
+        slug,
+        topic: card.name,
+        mode,
+        graphPrerequisiteEdges: d.taxonomy.buildsOn,
+        steps: [
+          { id: "trigger", title: "Build or mission", text: triggerText },
+          { id: "change", title: "Depth change", text: changeText },
+          { id: "walk", title: "Graph walk", text: walkText },
+          { id: "next", title: "Next action", text: nextText },
+        ],
+        trigger,
+        linked: {
+          builds: buildTotals.builds,
+          missions: buildTotals.missions,
+        },
+        change,
+        walked: prereqs.map((p) => ({
+          slug: p.slug,
+          topic: p.name,
+          hops: p.hops,
+          met: p.met,
+          required: p.edge.strength === "required",
+          level: p.developer?.level ?? "not assessed",
+          reason: p.edge.reason,
+        })),
+        related: related.map((r) => ({
+          slug: r.slug,
+          topic: r.name,
+          level: r.developer?.level ?? "not assessed",
+        })),
+        evidence: (lg?.capabilityPaths ?? []).map((c) => ({
+          capability: c.capability,
+          demonstrations: c.demonstrations,
+        })),
+        next,
+      });
+    } catch (err) {
+      console.error("GET /api/topics/:slug/reasoning failed:", err);
+      return res.status(500).json({ error: "Failed to build reasoning" });
     }
   },
 );
