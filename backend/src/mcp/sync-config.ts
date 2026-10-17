@@ -24,33 +24,34 @@ export function envFlag(name: string, fallback: boolean): boolean {
   return raw === "true" || raw === "1";
 }
 
-
-export const REPO_CONCURRENCY = envNumber("GITHUB_CONCURRENCY", 8);
-export const COMMIT_CONCURRENCY = envNumber("GITHUB_COMMIT_CONCURRENCY", 3);
-export const PR_DETAIL_CONCURRENCY = envNumber("GITHUB_PR_DETAIL_CONCURRENCY", 4);
+export const REPO_CONCURRENCY = envNumber("GITHUB_CONCURRENCY", 10);
+export const COMMIT_CONCURRENCY = envNumber("GITHUB_COMMIT_CONCURRENCY", 12);
+export const PR_DETAIL_CONCURRENCY = envNumber(
+  "GITHUB_PR_DETAIL_CONCURRENCY",
+  8,
+);
 
 export const CONCURRENCY = REPO_CONCURRENCY;
 
 export const PAGE_SIZE = envNumber("GITHUB_PAGE_SIZE", 100, 1, 100);
 
-
 export const DEVELOPER_HISTORY_DAYS = envNumber("GITHUB_HISTORY_DAYS", 365);
 
 export const MAX_INITIAL_COMMITS_PER_REPO = envNumber(
   "GITHUB_MAX_INITIAL_COMMITS_PER_REPO",
-  200,
+  60,
 );
 
 export const MAX_INITIAL_COMMITS_TOTAL = envNumber(
   "GITHUB_MAX_INITIAL_COMMITS_TOTAL",
-  1500,
+  400,
 );
 
 export const SYNC_OVERLAP_DAYS = envNumber("GITHUB_SYNC_OVERLAP_DAYS", 7, 0);
 
-export const MAX_PR_DETAILS = envNumber("GITHUB_MAX_PR_DETAILS", 80, 0);
-export const MAX_ACTIVITY_ITEMS = envNumber("GITHUB_MAX_ACTIVITY_ITEMS", 150, 0);
-export const MAX_WORKFLOW_FILES = envNumber("GITHUB_MAX_WORKFLOW_FILES", 4, 0);
+export const MAX_PR_DETAILS = envNumber("GITHUB_MAX_PR_DETAILS", 20, 0);
+export const MAX_ACTIVITY_ITEMS = envNumber("GITHUB_MAX_ACTIVITY_ITEMS", 50, 0);
+export const MAX_WORKFLOW_FILES = envNumber("GITHUB_MAX_WORKFLOW_FILES", 2, 0);
 
 export const EXCLUDED_REPOS = new Set(
   process.env.GITHUB_EXCLUDE_REPOS?.split(",")
@@ -58,7 +59,10 @@ export const EXCLUDED_REPOS = new Set(
     .filter(Boolean),
 );
 
-export function isExcludedRepo(repo: { name?: string; full_name?: string }): boolean {
+export function isExcludedRepo(repo: {
+  name?: string;
+  full_name?: string;
+}): boolean {
   const name = String(repo.name ?? "").toLowerCase();
   const full = String(repo.full_name ?? "").toLowerCase();
   const short = full.split("/").pop() ?? "";
@@ -70,16 +74,19 @@ export function isExcludedRepo(repo: { name?: string; full_name?: string }): boo
   );
 }
 
-
 export const FETCH_PRS = envFlag("GITHUB_FETCH_PRS", true);
 
-export const FETCH_PR_DETAILS = envFlag("GITHUB_FETCH_PR_DETAILS", true);
+// PR detail fetches are one MCP call each: off by default for onboarding.
+export const FETCH_PR_DETAILS = envFlag("GITHUB_FETCH_PR_DETAILS", false);
 
 export const FETCH_PR_FILES = envFlag("GITHUB_FETCH_PR_FILES", false);
 
 export const FETCH_ACTIVITY = envFlag("GITHUB_FETCH_ACTIVITY", true);
 
-export const INCLUDE_EXTENDED_EVIDENCE = envFlag("GITHUB_EXTENDED_EVIDENCE", true);
+export const INCLUDE_EXTENDED_EVIDENCE = envFlag(
+  "GITHUB_EXTENDED_EVIDENCE",
+  true,
+);
 
 export const FETCH_FULL_FILE_FALLBACK = envFlag(
   "GITHUB_FETCH_FULL_FILE_FALLBACK",
@@ -88,23 +95,29 @@ export const FETCH_FULL_FILE_FALLBACK = envFlag(
 
 export const DEBUG_GITHUB_PATCH = envFlag("GITHUB_SYNC_DEBUG", false);
 
+// Repair re-fetches commits: skipped on onboarding, run it in a later refresh.
 export const REPAIR_INCOMPLETE_FILECHANGES = envFlag(
   "GITHUB_REPAIR_INCOMPLETE_FILECHANGES",
-  true,
+  false,
 );
 
 export const ANALYSIS_VERSION = 4;
 
-
-export const MAX_PATCH_CHARS = envNumber("GITHUB_MAX_PATCH_CHARS", 250_000, 10_000);
+// Smaller stored patches = far less data over MCP, into FalkorDB and back out
+// for analysis. 60k chars of diff per file is plenty for pattern detection.
+export const MAX_PATCH_CHARS = envNumber(
+  "GITHUB_MAX_PATCH_CHARS",
+  60_000,
+  10_000,
+);
 export const MAX_ADDED_CODE_CHARS = envNumber(
   "GITHUB_MAX_ADDED_CODE_CHARS",
-  160_000,
+  40_000,
   5_000,
 );
 export const MAX_DELETED_CODE_CHARS = envNumber(
   "GITHUB_MAX_DELETED_CODE_CHARS",
-  80_000,
+  10_000,
   5_000,
 );
 
@@ -116,8 +129,10 @@ export const MAX_REVIEW_COMMENTS_STORED = 12;
 
 export const DB_BATCH_SIZE = envNumber("FALKORDB_BATCH_SIZE", 500);
 
-export const FILECHANGE_BATCH_SIZE = envNumber("FALKORDB_FILECHANGE_BATCH_SIZE", 15);
-
+export const FILECHANGE_BATCH_SIZE = envNumber(
+  "FALKORDB_FILECHANGE_BATCH_SIZE",
+  40,
+);
 
 export const SOURCE_EXTENSIONS = new Set([
   ".ts",
@@ -317,7 +332,6 @@ export const MIGRATION_PATH_RE = /(?:^|\/)(?:migrations?|db\/migrate)\//;
 export const INFRA_PATH_RE =
   /(?:^|\/)(?:\.github\/workflows|\.circleci|k8s|kubernetes|helm|terraform|deploy|infra)\/|docker-compose[\w.-]*\.ya?ml$|(?:^|\/)compose\.ya?ml$|(?:^|\/)\.gitlab-ci\.yml$/;
 
-
 export const MANIFEST_FILENAMES = [
   "package.json",
   "pyproject.toml",
@@ -352,7 +366,6 @@ export const REPO_CONTEXT_REFRESH_DAYS = envNumber(
   7,
 );
 
-
 export const SAFE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export function assertSafeIdentifier(value: string): string {
@@ -364,7 +377,6 @@ export function assertSafeIdentifier(value: string): string {
 
   return value;
 }
-
 
 export const INGESTION_INDEXES: Array<{ label: string; property: string }> = [
   { label: "Repository", property: "id" },
@@ -403,12 +415,13 @@ export async function ensureIngestionIndexes(graph: Graph): Promise<void> {
   }
 }
 
-export const FULLTEXT_INDEXES: Array<{ label: string; properties: string[] }> = [
-  { label: "Commit", properties: ["message"] },
-  { label: "FileChange", properties: ["path", "added_code"] },
-  { label: "PullRequest", properties: ["title", "body"] },
-  { label: "Issue", properties: ["title", "body"] },
-];
+export const FULLTEXT_INDEXES: Array<{ label: string; properties: string[] }> =
+  [
+    { label: "Commit", properties: ["message"] },
+    { label: "FileChange", properties: ["path", "added_code"] },
+    { label: "PullRequest", properties: ["title", "body"] },
+    { label: "Issue", properties: ["title", "body"] },
+  ];
 
 export async function ensureFulltextIndexes(graph: Graph): Promise<void> {
   for (const { label, properties } of FULLTEXT_INDEXES) {

@@ -3,10 +3,7 @@ import { getGraphForDeveloper } from "../db/falkordb.js";
 import { syncDeveloperGithubData } from "../mcp/sync-github.js";
 import { analyzeDeveloperSkills } from "../graph/skill-category-graph.js";
 import { buildOverviewIntelligenceGraph } from "../graph/developer-knowledge-graph.js";
-import {
-  ensureJourneySchema,
-  readJourney,
-} from "../graph/developer-journey-graph.js";
+import { ensureJourneySchema } from "../graph/developer-journey-graph.js";
 import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
 import {
   getGithubAccessToken,
@@ -18,6 +15,54 @@ export const onboardingRouter = Router();
 
 const errorMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
+
+type Graph = Awaited<ReturnType<typeof getGraphForDeveloper>>;
+
+async function one(
+  graph: Graph,
+  query: string,
+  developerId: string,
+): Promise<Record<string, any>> {
+  const result = await graph.query(query, { params: { dev: developerId } });
+  return ((result.data ?? []) as Record<string, any>[])[0] ?? {};
+}
+
+/** Cheap counts only. The full journey is read on demand by the journey API. */
+async function readJourneyCounts(graph: Graph, developerId: string) {
+  const [caps, exps, demos] = await Promise.all([
+    one(
+      graph,
+      `MATCH (d:Developer {id: $dev})-[hc:HAS_CAPABILITY]->(c:Capability)
+       WHERE c.parent_id <> ""
+       RETURN count(c) AS capabilities,
+              sum(CASE WHEN hc.level IN ["implementation","strong"] THEN 1 ELSE 0 END) AS built,
+              sum(CASE WHEN hc.level IN ["usage","repeated_usage"] THEN 1 ELSE 0 END) AS partial`,
+      developerId,
+    ),
+    one(
+      graph,
+      `MATCH (d:Developer {id: $dev})-[:EXPERIENCED]->(e:Experience)
+       OPTIONAL MATCH (e)-[:OCCURS_IN]->(r:Repository)
+       RETURN count(DISTINCT e) AS experiences, count(DISTINCT r) AS repositories`,
+      developerId,
+    ),
+    one(
+      graph,
+      `MATCH (d:Developer {id: $dev})-[:DEMONSTRATED]->(x:Demonstration)
+       RETURN count(x) AS n`,
+      developerId,
+    ),
+  ]);
+
+  return {
+    capabilities: Number(caps.capabilities ?? 0),
+    built: Number(caps.built ?? 0),
+    partial: Number(caps.partial ?? 0),
+    experiences: Number(exps.experiences ?? 0),
+    repositories: Number(exps.repositories ?? 0),
+    demonstrations: Number(demos.n ?? 0),
+  };
+}
 
 onboardingRouter.get(
   "/api/onboard/stream",
@@ -37,8 +82,7 @@ onboardingRouter.get(
         res.write(`data: ${JSON.stringify({ stage, ...detail })}\n\n`);
     };
 
-    // Topic analysis can sit on a slow LLM call for a while: keep proxies from
-    // closing an idle stream.
+    // Keep proxies from closing an idle stream during slow steps.
     const keepAlive = setInterval(() => {
       if (!res.writableEnded) res.write(`: ping\n\n`);
     }, 15_000);
@@ -70,7 +114,7 @@ onboardingRouter.get(
           }),
       );
 
-      // 3. Knowledge graph
+      // 3. Knowledge graph (needs HAS_SKILL from step 2)
       await buildOverviewIntelligenceGraph(
         graph,
         developer.developerId,
@@ -81,58 +125,50 @@ onboardingRouter.get(
           }),
       );
 
-      // 4. Journey graph preparation
+      // 4 + 5. Journey index and a light verification, in parallel
       send("journey-graph:schema", {
         message: "Preparing journey search index on capabilities",
       });
-      try {
-        await ensureJourneySchema(graph);
+      const [schemaResult, countsResult] = await Promise.allSettled([
+        ensureJourneySchema(graph),
+        readJourneyCounts(graph, developer.developerId),
+      ]);
+
+      if (schemaResult.status === "fulfilled") {
         send("journey-graph:schema_ready", {
           message: "Journey search index ready",
         });
-      } catch (err) {
-        console.error("[onboarding] journey schema failed", err);
+      } else {
+        console.error(
+          "[onboarding] journey schema failed",
+          schemaResult.reason,
+        );
         send("journey-graph:warning", {
-          message: `Journey search index could not be prepared: ${errorMessage(err)}`,
+          message: `Journey search index could not be prepared: ${errorMessage(schemaResult.reason)}`,
         });
       }
 
-      // 5. Verify journey layer
-      send("journey-graph:verify", {
-        message: "Verifying journey graph (capabilities, experiences, proof)",
-      });
-      try {
-        const journey = await readJourney(graph, developer.developerId);
-        if (!journey) {
-          send("journey-graph:warning", {
-            message: "Journey could not be read: Developer node not found",
-          });
-        } else {
-          send("journey-graph:ready", {
-            message: `Journey ready: ${journey.summary.capabilitiesWithEvidence} capabilities, ${journey.summary.strengths} strengths, ${journey.summary.repositories} repositories with evidence`,
-            capabilities: journey.summary.capabilitiesWithEvidence,
-            built: journey.summary.built,
-            partial: journey.summary.partial,
-            strengths: journey.summary.strengths,
-            repositories: journey.summary.repositories,
-            repositoriesTouched: journey.summary.repositoriesTouched,
-            experiences: journey.self.totals.experiences,
-            demonstrations: journey.self.totals.demonstrations,
-            coverageKnown: journey.coverage.known,
-            incompleteRepositories: journey.coverage.incomplete,
-          });
-        }
-      } catch (err) {
-        console.error("[onboarding] journey verify failed", err);
+      if (countsResult.status === "fulfilled") {
+        const c = countsResult.value;
+        send("journey-graph:ready", {
+          message: `Journey ready: ${c.capabilities} capabilities, ${c.built} strengths, ${c.repositories} repositories with evidence`,
+          capabilities: c.capabilities,
+          built: c.built,
+          partial: c.partial,
+          strengths: c.built,
+          repositories: c.repositories,
+          experiences: c.experiences,
+          demonstrations: c.demonstrations,
+        });
+      } else {
+        console.error(
+          "[onboarding] journey counts failed",
+          countsResult.reason,
+        );
         send("journey-graph:warning", {
-          message: `Journey verification failed: ${errorMessage(err)}`,
+          message: `Journey verification failed: ${errorMessage(countsResult.reason)}`,
         });
       }
-
-      send("depth-graph:verify", {
-        message:
-          "Verifying depth graph (code DNA, rhythm, collaboration, hotspots, stack)",
-      });
 
       send("complete", {
         message:

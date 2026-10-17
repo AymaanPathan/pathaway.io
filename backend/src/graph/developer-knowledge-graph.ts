@@ -29,9 +29,13 @@ function positiveIntegerEnv(
 const DB_BATCH_SIZE = positiveIntegerEnv("FALKORDB_BATCH_SIZE", 500);
 const EVIDENCE_PAGE_SIZE = positiveIntegerEnv(
   "DEMONSTRATION_PAGE_SIZE",
-  100,
+  200,
   10,
 );
+
+// Patches / added code are cut inside the database so huge diffs never cross
+// the wire. Signal rules only need the first part of a diff.
+const MAX_PATCH_SCAN_CHARS = 60_000;
 
 const MAX_SNIPPET_CHARS = 700;
 const SNIPPET_LINES_BEFORE = 2;
@@ -4423,7 +4427,26 @@ const DEMONSTRATION_INDEXES: Array<{ label: string; property: string }> = [
   { label: "Safeguard", property: "id" },
 ];
 
-async function ensureDemonstrationIndexes(graph: Graph): Promise<void> {
+// Index creation is idempotent but costs ~12 round trips, so it runs once per
+// process. A failed attempt is not cached, so the next run retries.
+let demonstrationIndexesReady: Promise<void> | null = null;
+
+function ensureDemonstrationIndexes(graph: Graph): Promise<void> {
+  if (!demonstrationIndexesReady) {
+    const pending: Promise<void> = createDemonstrationIndexes(graph).catch(
+      (error) => {
+        if (demonstrationIndexesReady === pending) {
+          demonstrationIndexesReady = null;
+        }
+        throw error;
+      },
+    );
+    demonstrationIndexesReady = pending;
+  }
+  return demonstrationIndexesReady;
+}
+
+async function createDemonstrationIndexes(graph: Graph): Promise<void> {
   for (const { label, property } of DEMONSTRATION_INDEXES) {
     try {
       await graph.query(`CREATE INDEX FOR (n:${label}) ON (n.${property})`);
@@ -4456,8 +4479,13 @@ async function ensureDemonstrationIndexes(graph: Graph): Promise<void> {
  * Seeds the capability taxonomy and the capability map. ensureCapabilityGraph
  * owns every write (nodes, SPECIALIZES, PREREQUISITE_OF, RELATED_TO, stale
  * cleanup, stamp) so there is exactly one definition of what gets written.
+ *
+ * ensureCapabilityGraph writes its version stamp LAST, so "current" means a
+ * complete seeding of exactly these definitions already exists and the ~25
+ * write queries can be skipped.
  */
 async function storeCapabilities(graph: Graph): Promise<void> {
+  if (await isCapabilityGraphCurrent(graph)) return;
   await ensureCapabilityGraph(graph);
 }
 
@@ -4517,30 +4545,34 @@ async function loadCommitMessages(
   );
 }
 
+/**
+ * Keyset pagination (WHERE id > afterId) instead of SKIP: SKIP re-scans every
+ * skipped row on each page, so later pages get slower and slower. Patch and
+ * added_code are truncated inside the database so huge diffs never cross the
+ * wire.
+ */
 async function fetchEvidencePage(
   graph: Graph,
   developerId: string,
-  skip: number,
+  afterId: string,
 ): Promise<EvidenceInput[]> {
-  const safeSkip = Math.max(0, Math.floor(skip));
-
   const rows = await queryRows(
     graph,
     `
     MATCH (d:Developer {id: $developer_id})-[:AUTHORED_CODE]->(fc:FileChange)
+    WHERE fc.id > $after_id
     RETURN fc.id AS id,
            fc.path AS path,
            fc.language AS language,
-           fc.patch AS patch,
-           fc.added_code AS added_code,
+           substring(coalesce(fc.patch, ""), 0, ${MAX_PATCH_SCAN_CHARS}) AS patch,
+           substring(coalesce(fc.added_code, ""), 0, ${MAX_PATCH_SCAN_CHARS}) AS added_code,
            fc.commit_sha AS commit_sha,
            fc.repository_id AS repository_id,
            fc.created_at AS created_at
     ORDER BY fc.id
-    SKIP ${safeSkip}
     LIMIT ${EVIDENCE_PAGE_SIZE}
     `,
-    { developer_id: developerId },
+    { developer_id: developerId, after_id: afterId },
   );
 
   return rows.map((row) => ({
@@ -5091,12 +5123,12 @@ export async function buildOverviewIntelligenceGraph(
   const repositoryIds = new Set<string>();
 
   let scanned = 0;
-  let skip = 0;
+  let lastId = "";
 
   // One paged pass over the evidence feeds both derivations, so patches are
   // never all in memory at once.
   while (true) {
-    const page = await fetchEvidencePage(graph, developerId, skip);
+    const page = await fetchEvidencePage(graph, developerId, lastId);
 
     for (const fc of page) {
       if (fc.repositoryId) repositoryIds.add(fc.repositoryId);
@@ -5123,7 +5155,7 @@ export async function buildOverviewIntelligenceGraph(
     });
 
     if (page.length < EVIDENCE_PAGE_SIZE) break;
-    skip += EVIDENCE_PAGE_SIZE;
+    lastId = page[page.length - 1].id;
   }
 
   onProgress("overview_graph_evidence_loaded", {

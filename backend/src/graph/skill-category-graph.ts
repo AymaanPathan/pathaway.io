@@ -1010,7 +1010,7 @@ const DB_BATCH_SIZE = Math.max(
 );
 const FETCH_PAGE_SIZE = Math.max(
   100,
-  Number(process.env.SKILL_AGENT_PAGE_SIZE ?? 1000),
+  Number(process.env.SKILL_AGENT_PAGE_SIZE ?? 500),
 );
 
 function dayKey(iso: string): string | null {
@@ -1096,13 +1096,18 @@ interface FileChangeEvidenceRow {
   created_at: string;
 }
 
+/**
+ * Keyset pagination (WHERE id > last) instead of SKIP: SKIP re-scans every
+ * skipped row on each page, so it gets slower with every page. added_code is
+ * truncated INSIDE the database so huge diffs never cross the wire.
+ */
 async function fetchFileChangeEvidence(
   graph: Graph,
   developerId: string,
   onProgress: ProgressFn,
 ): Promise<FileChangeEvidenceRow[]> {
   const rows: FileChangeEvidenceRow[] = [];
-  let skip = 0;
+  let lastId = "";
   let page = 0;
 
   const startedAt = nowMs();
@@ -1117,21 +1122,21 @@ async function fetchFileChangeEvidence(
     const result = await graph.query(
       `
       MATCH (d:Developer {id: $developer_id})-[:AUTHORED_CODE]->(fc:FileChange)
+      WHERE fc.id > $last_id
       RETURN
         fc.id AS id,
         fc.path AS path,
         fc.language AS language,
-        fc.added_code AS added_code,
+        substring(coalesce(fc.added_code, ""), 0, ${MAX_CODE_SCAN_CHARS}) AS added_code,
         fc.additions AS additions,
         fc.deletions AS deletions,
         fc.commit_sha AS commit_sha,
         fc.repository_id AS repository_id,
         fc.created_at AS created_at
       ORDER BY fc.id
-      SKIP ${skip}
       LIMIT ${FETCH_PAGE_SIZE}
       `,
-      { params: { developer_id: developerId } },
+      { params: { developer_id: developerId, last_id: lastId } },
     );
 
     const pageRows = (result.data ?? []) as AnyObject[];
@@ -1142,7 +1147,7 @@ async function fetchFileChangeEvidence(
         id: safeString(row.id),
         path: safeString(row.path),
         language: safeString(row.language),
-        added_code: safeString(row.added_code).slice(0, MAX_CODE_SCAN_CHARS),
+        added_code: safeString(row.added_code),
         additions: safeNumber(row.additions),
         deletions: safeNumber(row.deletions),
         commit_sha: safeString(row.commit_sha),
@@ -1159,11 +1164,8 @@ async function fetchFileChangeEvidence(
 
     onProgress("skill_evidence_page", { fetched: rows.length });
 
-    if (pageRows.length < FETCH_PAGE_SIZE) {
-      break;
-    }
-
-    skip += FETCH_PAGE_SIZE;
+    if (pageRows.length < FETCH_PAGE_SIZE) break;
+    lastId = safeString(pageRows[pageRows.length - 1].id);
   }
 
   log("fetching FileChange evidence — done", {
@@ -1742,6 +1744,28 @@ async function storeSkillDefinitions(graph: Graph): Promise<void> {
   );
 }
 
+/**
+ * The taxonomy is static, so indexes, categories, skill definitions and the
+ * IMPLIES / ADJACENT_TO edges are written once per process instead of on
+ * every onboarding. A failed attempt is not cached, so the next run retries.
+ */
+let skillTaxonomyReady: Promise<void> | null = null;
+
+function ensureSkillTaxonomy(graph: Graph): Promise<void> {
+  if (!skillTaxonomyReady) {
+    const pending: Promise<void> = (async () => {
+      await ensureSkillIndexes(graph);
+      await storeSkillCategories(graph);
+      await storeSkillDefinitions(graph);
+    })().catch((error) => {
+      if (skillTaxonomyReady === pending) skillTaxonomyReady = null;
+      throw error;
+    });
+    skillTaxonomyReady = pending;
+  }
+  return skillTaxonomyReady;
+}
+
 async function storeDeveloperSkills(
   graph: Graph,
   developerId: string,
@@ -1940,7 +1964,7 @@ export async function analyzeDeveloperSkills(
   log("=== skill graph build: START ===", { developerId });
 
   try {
-    await ensureSkillIndexes(graph);
+    await ensureSkillTaxonomy(graph);
 
     onProgress("skill_analysis_start", { developerId });
 
@@ -1965,8 +1989,6 @@ export async function analyzeDeveloperSkills(
 
     const updatedAt = new Date().toISOString();
 
-    await storeSkillCategories(graph);
-    await storeSkillDefinitions(graph);
     await storeDeveloperSkills(graph, developerId, profile, updatedAt);
 
     onProgress("skill_relationships", { coOccurrence: coOccurrence.length });
