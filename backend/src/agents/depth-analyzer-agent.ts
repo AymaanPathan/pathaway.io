@@ -82,7 +82,7 @@ const envNum = (name: string, fallback: number): number => {
 };
 
 export interface DepthLlmRequest {
-  stage: "discover" | "judge" | "synthesize" | "explain";
+  stage: "discover" | "judge" | "synthesize" | "explain" | "relate";
   system: string;
   user: string;
   maxTokens?: number;
@@ -2170,6 +2170,103 @@ export interface DepthAnalyzerOptions {
   onProgress?: ProgressFn;
 }
 
+const RELATE_SYSTEM = `You link engineering topics for Pathway, a developer-memory system.
+You receive the FINAL list of topics assessed for ONE developer. Decide which topics are genuine PREREQUISITES of others.
+
+RULES
+1. Output "links": each is {"from","to","reason","strength"} meaning "from" BUILDS ON "to" (you cannot do "from" well without "to").
+2. "from" and "to" MUST be slugs copied exactly from the given list. Never invent a slug.
+3. Only real prerequisites. Topics that merely appear together are NOT links. Never link in both directions. Never create a cycle.
+4. "reason" is ONE concrete sentence of at least 8 words naming the real mechanism (for example "retry logic only works if errors are classified first, so it depends on error handling"). Never write "X builds on Y" as the reason.
+5. "strength" is "required" or "helpful".
+6. At most 3 links per "from" topic. Prefer the foundation that is most direct. Skip a topic when no real prerequisite exists in the list.
+7. Output minified JSON on one line, no commentary, no code fences. Do not think out loud.
+
+Return ONLY this JSON:
+{"links":[{"from":"","to":"","reason":"","strength":"required|helpful"}]}`;
+
+async function proposeFoundations(
+  gateway: LlmGateway,
+  specs: TopicSpec[],
+): Promise<TopicSpec[]> {
+  if (specs.length < 2 || gateway.open) return specs;
+
+  const valid = new Set(specs.map((s) => s.slug));
+  const raw = await gateway.json({
+    stage: "relate",
+    system: RELATE_SYSTEM,
+    user: `TOPICS:\n${JSON.stringify(
+      specs.map((s) => ({
+        slug: s.slug,
+        name: s.name,
+        domain: s.domain,
+        description: asStr(s.description, 160),
+        approaches: s.approaches.slice(0, 4).map((a) => a.name),
+        packages: s.packages.slice(0, 6),
+      })),
+    )}`,
+    maxTokens: 3000,
+    temperature: 0,
+  });
+  if (!raw) {
+    log("relate pass: no usable output, keeping discovery relations");
+    return specs;
+  }
+
+  const perFrom = new Map<string, number>();
+  const added = new Map<string, RelationDetail[]>();
+  let rejected = 0;
+
+  for (const l of asObjects(raw.links)) {
+    const from = slugify(asStr(l.from, 80));
+    const to = slugify(asStr(l.to, 80));
+    const reason = asStr(l.reason, 300);
+    if (
+      !valid.has(from) ||
+      !valid.has(to) ||
+      from === to ||
+      !isSpecificRationale(reason) ||
+      (perFrom.get(from) ?? 0) >= 3
+    ) {
+      rejected += 1;
+      continue;
+    }
+    const list = added.get(from) ?? [];
+    if (list.some((d) => d.slug === to)) continue;
+    list.push({
+      slug: to,
+      reason,
+      confidence: 0.75,
+      strength: asStr(l.strength, 20) === "required" ? "required" : "helpful",
+      basis: "llm_inferred",
+    });
+    added.set(from, list);
+    perFrom.set(from, (perFrom.get(from) ?? 0) + 1);
+  }
+
+  let total = 0;
+  const merged = specs.map((s) => {
+    const extra = added.get(s.slug);
+    if (!extra?.length) return s;
+    const have = new Set(s.buildsOn);
+    const fresh = extra.filter((d) => !have.has(d.slug));
+    total += fresh.length;
+    return {
+      ...s,
+      buildsOn: [...s.buildsOn, ...fresh.map((d) => d.slug)],
+      buildsOnDetail: [...(s.buildsOnDetail ?? []), ...fresh],
+    };
+  });
+
+  log("relate pass", {
+    topics: specs.length,
+    proposed: asObjects(raw.links).length,
+    added: total,
+    rejected,
+  });
+  return merged;
+}
+
 export interface RelationRejection {
   from: string;
   to: string;
@@ -2653,7 +2750,10 @@ export async function analyzeDeveloperDepth(
 
   assessments.sort((a, b) => a.topic.name.localeCompare(b.topic.name));
 
-  const finalSpecs = assessments.map((a) => a.spec);
+  const finalSpecs = await proposeFoundations(
+    gateway,
+    assessments.map((a) => a.spec),
+  );
   const coverage = computeCoverage(
     atlas,
     finalSpecs,

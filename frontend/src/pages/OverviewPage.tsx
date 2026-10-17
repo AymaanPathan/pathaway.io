@@ -1472,6 +1472,7 @@ export default function OverviewPage() {
   const [pathTo, setPathTo] = useState("");
   const [pathRes, setPathRes] = useState<Obj | null>(null);
   const [pathErr, setPathErr] = useState<string | null>(null);
+  const [pathBusy, setPathBusy] = useState(false);
   const [groupDim, setGroupDim] = useState("domain");
 
   const [messages, setMessages] = useState<ChatMsg[]>([
@@ -1667,6 +1668,49 @@ export default function OverviewPage() {
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, sideTab]);
 
+  /* the path renders on its own as soon as both topics are picked */
+  useEffect(() => {
+    if (!pathFrom || !pathTo) {
+      setPathRes(null);
+      setPathErr(null);
+      setPathBusy(false);
+      return;
+    }
+    if (pathFrom === pathTo) {
+      setPathRes(null);
+      setPathErr("Pick two different topics.");
+      setPathBusy(false);
+      return;
+    }
+    let live = true;
+    setPathBusy(true);
+    setPathErr(null);
+    call(
+      `/api/topics/path?from=${encodeURIComponent(pathFrom)}&to=${encodeURIComponent(pathTo)}`,
+    )
+      .then((r) => {
+        if (!live) return;
+        if (r.ok) {
+          setPathRes(r.data);
+          setPathErr(null);
+        } else {
+          setPathRes(null);
+          setPathErr(asString(r.data.error, "No path found."));
+        }
+      })
+      .catch(() => {
+        if (!live) return;
+        setPathRes(null);
+        setPathErr("Could not compute the path.");
+      })
+      .finally(() => {
+        if (live) setPathBusy(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [pathFrom, pathTo]);
+
   /* ---------------- derived ---------------- */
 
   const nodes = useMemo(() => asArray<Obj>(graph?.nodes), [graph]);
@@ -1776,17 +1820,6 @@ export default function OverviewPage() {
     setSel(null);
     setSelEdge(null);
     setSideTab("ask");
-  };
-
-  const findPath = async () => {
-    setPathErr(null);
-    setPathRes(null);
-    if (!pathFrom || !pathTo) return;
-    const r = await call(
-      `/api/topics/path?from=${encodeURIComponent(pathFrom)}&to=${encodeURIComponent(pathTo)}`,
-    );
-    if (r.ok) setPathRes(r.data);
-    else setPathErr(asString(r.data.error, "No path found."));
   };
 
   const send = async (raw?: string) => {
@@ -2915,9 +2948,9 @@ export default function OverviewPage() {
             {lens === "paths" && (
               <div>
                 <p className="mb-4 text-[13px] text-neutral-700">
-                  Pick two topics to see the shortest route through the graph.
-                  Each hop says whether it is a foundation or just an
-                  association.
+                  Pick two topics and the shortest route through the graph
+                  appears automatically, with the number of hops. Each hop says
+                  whether it is a foundation or just an association.
                 </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <RouteIcon size={15} />
@@ -2934,16 +2967,12 @@ export default function OverviewPage() {
                     nodes={nodes}
                     placeholder="To…"
                   />
-                  <Btn
-                    onClick={() => void findPath()}
-                    bg={YELLOW}
-                    disabled={!pathFrom || !pathTo}
-                  >
-                    Find path
-                  </Btn>
-                  {(pathRes || pathErr) && (
+                  {pathBusy && <RefreshCw size={14} className="animate-spin" />}
+                  {(pathFrom || pathTo) && (
                     <Btn
                       onClick={() => {
+                        setPathFrom("");
+                        setPathTo("");
                         setPathRes(null);
                         setPathErr(null);
                       }}
@@ -2952,41 +2981,66 @@ export default function OverviewPage() {
                     </Btn>
                   )}
                 </div>
+
                 {pathRes && (
                   <div
-                    className="mt-5 flex flex-wrap items-center gap-2"
+                    className="mt-5"
                     style={{ animation: "oslide .25s ease-out both" }}
                   >
-                    {asArray<Obj>(pathRes.steps).map((s, i) => {
-                      const seg = asArray<Obj>(pathRes.segments)[i - 1];
+                    {(() => {
+                      const segs = asArray<Obj>(pathRes.segments);
+                      const hops = num(pathRes.hops, segs.length);
+                      const builds = segs.filter(
+                        (s) => s.type === "BUILDS_ON",
+                      ).length;
                       return (
-                        <span
-                          key={i}
-                          className="inline-flex items-center gap-2"
-                        >
-                          {seg && (
-                            <span
-                              className="rounded-full px-2 py-0.5 text-[11px] font-bold"
-                              style={{
-                                backgroundColor:
-                                  seg.type === "BUILDS_ON" ? SKY : LAVENDER,
-                                ...border,
-                              }}
-                            >
-                              {seg.type === "BUILDS_ON"
-                                ? "builds on"
-                                : "goes with"}
-                            </span>
-                          )}
-                          <TopicChip
-                            t={s}
-                            onClick={() =>
-                              s.assessed ? pick(asString(s.slug)) : undefined
+                        <div className="mb-3 flex flex-wrap items-center gap-2">
+                          <Chip
+                            text={
+                              hops === 1 ? "1 hop, direct link" : `${hops} hops`
                             }
+                            background={YELLOW}
                           />
-                        </span>
+                          <span className="text-[12px] font-semibold text-neutral-700">
+                            {builds} foundation link{builds === 1 ? "" : "s"},{" "}
+                            {hops - builds} association
+                            {hops - builds === 1 ? "" : "s"}
+                          </span>
+                        </div>
                       );
-                    })}
+                    })()}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {asArray<Obj>(pathRes.steps).map((s, i) => {
+                        const seg = asArray<Obj>(pathRes.segments)[i - 1];
+                        return (
+                          <span
+                            key={i}
+                            className="inline-flex items-center gap-2"
+                          >
+                            {seg && (
+                              <span
+                                className="rounded-full px-2 py-0.5 text-[11px] font-bold"
+                                style={{
+                                  backgroundColor:
+                                    seg.type === "BUILDS_ON" ? SKY : LAVENDER,
+                                  ...border,
+                                }}
+                              >
+                                {seg.type === "BUILDS_ON"
+                                  ? "builds on"
+                                  : "goes with"}
+                              </span>
+                            )}
+                            <TopicChip
+                              t={s}
+                              onClick={() =>
+                                s.assessed ? pick(asString(s.slug)) : undefined
+                              }
+                            />
+                          </span>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
                 {pathErr && (
@@ -4757,7 +4811,7 @@ function TopicEvidence({
         </div>
       )}
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+      <div className="mt-6 grid items-start gap-4 lg:grid-cols-2">
         <div
           className="rounded-xl p-4"
           style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
@@ -4769,6 +4823,25 @@ function TopicEvidence({
             Foundation paths
           </div>
           <PrereqPaths paths={prereqs} onPick={onPick} />
+          {prereqs.length === 0 && (
+            <div className="mt-4 space-y-3">
+              <RefList
+                title="Linked foundations (no confirmed path)"
+                list={asObjects(detail.graph?.foundations)}
+                onPick={onPick}
+              />
+              <RefList
+                title="Built on top of this"
+                list={asObjects(detail.graph?.unlocks)}
+                onPick={onPick}
+              />
+              <RefList
+                title="Goes with (association only)"
+                list={asObjects(detail.graph?.related)}
+                onPick={onPick}
+              />
+            </div>
+          )}
         </div>
         <div
           className="rounded-xl p-4"
