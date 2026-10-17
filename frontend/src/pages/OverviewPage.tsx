@@ -950,8 +950,11 @@ function EvidenceGraph({
 
       <div className="mt-2 overflow-x-auto">
         <div
-          className="relative mx-auto w-full min-w-[760px]"
-          style={{ aspectRatio: `${EGO_W} / ${EGO_H}` }}
+          className="relative mx-auto w-full min-w-[720px]"
+          style={{
+            aspectRatio: `${EGO_W} / ${EGO_H}`,
+            maxWidth: (EGO_W / EGO_H) * 520,
+          }}
         >
           {loading && (
             <div className="absolute left-4 top-2 z-10 flex items-center gap-2 text-[12px] font-bold">
