@@ -8,7 +8,6 @@ import {
   readJourney,
 } from "../graph/developer-journey-graph.js";
 import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
-import { onTopicsChanged } from "./topics-route.js";
 import {
   getGithubAccessToken,
   humanizeSkillStage,
@@ -19,32 +18,6 @@ export const onboardingRouter = Router();
 
 const errorMessage = (err: unknown): string =>
   err instanceof Error ? err.message : String(err);
-
-function humanizeTopicStage(
-  stage: string,
-  detail: Record<string, unknown>,
-): string {
-  switch (stage) {
-    case "depth_start":
-      return "Starting topic analysis";
-    case "depth_atlas_ready":
-      return "Evidence atlas built from your authored code";
-    case "depth_discovering":
-      return "Discovering the topics you have touched";
-    case "depth_topics_proposed":
-      return `${detail.count ?? 0} topics proposed`;
-    case "depth_evidence_gathered":
-      return `Gathered evidence for ${detail.topic ?? "a topic"}`;
-    case "depth_refining":
-      return `Looking for more evidence on ${detail.topic ?? "a topic"}`;
-    case "depth_topic_assessed":
-      return `${detail.topic ?? "Topic"} judged: ${detail.level ?? "?"}`;
-    case "depth_complete":
-      return "Running PageRank, betweenness, communities and components";
-    default:
-      return stage;
-  }
-}
 
 onboardingRouter.get(
   "/api/onboard/stream",

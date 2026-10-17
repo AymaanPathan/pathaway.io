@@ -97,19 +97,15 @@ section[id], div[id="top"] { scroll-margin-top: 72px; }
   -webkit-tap-highlight-color: transparent;
   user-select: none;
 }
-.pw-btn:hover { transform: translate(-2px, -2px); box-shadow: calc(var(--sh) + 2px) calc(var(--sh) + 2px) 0 0 ${INK}; }
 .pw-btn:active {
   transform: translate(var(--sh), var(--sh));
   box-shadow: 0 0 0 0 ${INK};
   transition-duration: .06s;
 }
 .pw-btn .pw-arrow { transition: transform .25s var(--pw-ease); }
-.pw-btn:hover .pw-arrow { transform: translateX(4px); }
-.pw-btn:active .pw-arrow { transform: translateX(1px); }
 
 /* flat pill press (no shadow, for chips/tabs) */
 .pw-chip { transition: transform .2s var(--pw-spring), background-color .25s ease, box-shadow .25s ease; }
-.pw-chip:hover { transform: translateY(-2px); }
 .pw-chip:active { transform: translateY(1px) scale(.95); transition-duration: .06s; }
 
 /* ---------- cards ---------- */
@@ -123,18 +119,9 @@ section[id], div[id="top"] { scroll-margin-top: 72px; }
 /* ---------- progress bar ---------- */
 .pw-progress { position: fixed; top: 0; left: 0; right: 0; height: 4px; z-index: 60; transform-origin: 0 50%; transform: scaleX(0); background: ${YELLOW}; border-bottom: 1px solid ${INK}; }
 
-/* ---------- hero card tilt ---------- */
-.pw-tilt { transform-style: preserve-3d; transition: transform .5s var(--pw-ease); will-change: transform; }
-.pw-tilt.pw-live { transition: transform .08s linear; }
-
 /* ---------- floating ---------- */
 @keyframes pw-float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
 .pw-float { animation: pw-float 4.5s ease-in-out infinite; }
-
-/* ---------- marquee ---------- */
-@keyframes pw-marquee { to { transform: translateX(-50%); } }
-.pw-marquee { display: flex; width: max-content; animation: pw-marquee 36s linear infinite; }
-.pw-marquee-wrap:hover .pw-marquee { animation-play-state: paused; }
 
 /* ---------- graph draw + pop ---------- */
 .pw-draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: pw-draw 1.1s var(--pw-ease) forwards; animation-delay: var(--d, 0ms); }
@@ -168,7 +155,7 @@ section[id], div[id="top"] { scroll-margin-top: 72px; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .pw-reveal, .pw-word > span, .pw-fade-up, .pw-draw, .pw-node, .pw-swap, .pw-pop-in { opacity: 1 !important; transform: none !important; animation: none !important; transition: none !important; stroke-dashoffset: 0 !important; }
-  .pw-marquee, .pw-float, .pw-ping, .pw-flow, .pw-circuit path, .pw-blink { animation: none !important; }
+  .pw-float, .pw-ping, .pw-flow, .pw-circuit path, .pw-blink { animation: none !important; }
 }
 `;
 
@@ -275,14 +262,6 @@ function Headline({
 /* -------------------------------------------------------------------------- */
 /* DATA                                                                       */
 /* -------------------------------------------------------------------------- */
-
-const capabilities = [
-  { name: "Data Layer Engineering", level: "strong", evidence: 26 },
-  { name: "Reliability & Resilience", level: "strong", evidence: 24 },
-  { name: "API Design & Security", level: "implementation", evidence: 8 },
-  { name: "Concurrency & Consistency", level: "implementation", evidence: 3 },
-  { name: "Asynchronous Processing", level: "implementation", evidence: 1 },
-];
 
 const faqs = [
   {
@@ -498,10 +477,7 @@ function Hero() {
               className={`group inline-flex items-center gap-1.5 text-[13px] font-bold underline underline-offset-4 ${focus}`}
             >
               Explore the graph
-              <ArrowRight
-                size={14}
-                className="transition-transform duration-300 group-hover:translate-x-1"
-              />
+              <ArrowRight size={14} />
             </Link>
           </div>
 
@@ -541,309 +517,557 @@ function Hero() {
   );
 }
 
-function HeroProduct() {
-  const wrap = useRef<HTMLDivElement>(null);
-  const tilt = useRef<HTMLDivElement>(null);
-  const [mission, setMission] = useState(false);
+type HeroLeaf = { name: string; gap?: boolean };
+type HeroTopic = {
+  id: string;
+  name: string;
+  proofs: number;
+  angle: number;
+  leaves: HeroLeaf[];
+};
 
-  const onMove = (e: React.MouseEvent) => {
-    const el = wrap.current;
-    const t = tilt.current;
-    if (!el || !t) return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const r = el.getBoundingClientRect();
-    const px = (e.clientX - r.left) / r.width - 0.5;
-    const py = (e.clientY - r.top) / r.height - 0.5;
-    t.classList.add("pw-live");
-    t.style.transform = `perspective(1200px) rotateY(${px * 6}deg) rotateX(${-py * 5}deg) translateZ(0)`;
+const HERO_TOPICS: HeroTopic[] = [
+  {
+    id: "data",
+    name: "Data Layer",
+    proofs: 26,
+    angle: -90,
+    leaves: [{ name: "Postgres" }, { name: "Redis" }, { name: "Prisma" }],
+  },
+  {
+    id: "rel",
+    name: "Reliability",
+    proofs: 24,
+    angle: -18,
+    leaves: [{ name: "Retries" }, { name: "Circuit breaker" }],
+  },
+  {
+    id: "api",
+    name: "API Design",
+    proofs: 8,
+    angle: 54,
+    leaves: [{ name: "REST routes" }, { name: "Auth" }, { name: "Validation" }],
+  },
+  {
+    id: "conc",
+    name: "Concurrency",
+    proofs: 3,
+    angle: 126,
+    leaves: [{ name: "Locks" }, { name: "Transactions" }],
+  },
+  {
+    id: "async",
+    name: "Async Processing",
+    proofs: 1,
+    angle: 198,
+    leaves: [
+      { name: "Promises" },
+      { name: "Job queue", gap: true },
+      { name: "Workers", gap: true },
+    ],
+  },
+];
+
+const HW = 760;
+const HH = 470;
+const HCX = 380;
+const HCY = 235;
+const hpt = (deg: number, rx: number, ry: number) => ({
+  x: HCX + Math.cos((deg * Math.PI) / 180) * rx,
+  y: HCY + Math.sin((deg * Math.PI) / 180) * ry,
+});
+
+const HERO_LAYOUT = HERO_TOPICS.map((t) => {
+  const p = hpt(t.angle, 135, 92);
+  const offs =
+    t.leaves.length === 3
+      ? [-24, 0, 24]
+      : t.leaves.length === 2
+        ? [-17, 17]
+        : [0];
+  return {
+    ...t,
+    ...p,
+    r: 17 + Math.min(t.proofs, 26) * 0.3,
+    leaves: t.leaves.map((l, i) => ({
+      ...l,
+      ...hpt(t.angle + offs[i], 275, 185),
+    })),
   };
-  const onLeave = () => {
-    const t = tilt.current;
-    if (!t) return;
-    t.classList.remove("pw-live");
-    t.style.transform = "perspective(1200px) rotateY(0) rotateX(0)";
-  };
+});
+
+function HeroProduct() {
+  const [sel, setSel] = useState<string | null>("async");
+  const [accepted, setAccepted] = useState(false);
+  const active = HERO_LAYOUT.find((t) => t.id === sel) ?? null;
+  const hasGap = !!active?.leaves.some((l) => l.gap);
+  const total = HERO_TOPICS.reduce((s, t) => s + t.proofs, 0);
+  const toggle = (id: string) => setSel((cur) => (cur === id ? null : id));
+  const dim = (id: string) => (sel === null || sel === id ? 1 : 0.16);
 
   return (
-    <div
-      ref={wrap}
-      className="relative"
-      onMouseMove={onMove}
-      onMouseLeave={onLeave}
-    >
-      <div ref={tilt} className="pw-tilt">
+    <div className="relative">
+      <div
+        className="overflow-hidden rounded-3xl bg-white"
+        style={{ ...border, boxShadow: shadow(6) }}
+      >
+        {/* window chrome */}
         <div
-          className="overflow-hidden rounded-3xl bg-white"
-          style={{ ...border, boxShadow: shadow(6) }}
+          className="flex items-center gap-3 px-4 py-3"
+          style={{ borderBottom: `2px solid ${INK}` }}
         >
-          <div
-            className="flex items-center gap-3 px-4 py-3"
-            style={{ borderBottom: `2px solid ${INK}` }}
-          >
-            <div className="flex gap-1.5">
-              <span className="h-3 w-3 rounded-full border-2 border-black bg-[#F0776B]" />
-              <span
-                className="h-3 w-3 rounded-full border-2 border-black"
-                style={{ backgroundColor: YELLOW }}
-              />
-              <span
-                className="h-3 w-3 rounded-full border-2 border-black"
-                style={{ backgroundColor: GREEN }}
-              />
-            </div>
+          <div className="flex gap-1.5">
+            <span className="h-3 w-3 rounded-full border-2 border-black bg-[#F0776B]" />
             <span
-              className="text-[10px] text-neutral-500"
-              style={{ fontFamily: MONO }}
-            >
-              pathway / developer / next
+              className="h-3 w-3 rounded-full border-2 border-black"
+              style={{ backgroundColor: YELLOW }}
+            />
+            <span
+              className="h-3 w-3 rounded-full border-2 border-black"
+              style={{ backgroundColor: GREEN }}
+            />
+          </div>
+          <span
+            className="text-[10px] text-neutral-500"
+            style={{ fontFamily: MONO }}
+          >
+            pathway / your developer graph
+          </span>
+          <span className="ml-auto text-[10px] font-bold text-neutral-500">
+            <CountUp to={total} /> PROOFS FROM YOUR CODE
+          </span>
+        </div>
+
+        {/* graph */}
+        <div className="bg-[#111311] px-3 pb-2 pt-4 text-white sm:px-5">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[11px] font-semibold text-neutral-400">
+              YOUR GITHUB → TOPICS → SKILLS
             </span>
-            <span className="ml-auto hidden text-[10px] font-bold text-neutral-500 sm:block">
-              GOAL · BACKEND ENGINEER
+            <span
+              className="pw-pop-in rounded-full px-2 py-1 text-[10px] font-bold"
+              style={
+                {
+                  backgroundColor: YELLOW,
+                  color: INK,
+                  "--d": "2000ms",
+                } as CSSProperties
+              }
+            >
+              2 gaps found
             </span>
           </div>
 
-          <div className="grid md:grid-cols-[1.15fr_0.85fr]">
-            <div className="min-h-[350px] bg-[#111311] p-5 text-white">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-semibold text-neutral-400">
-                  CAPABILITY GRAPH
-                </span>
-                <span
-                  className="pw-pop-in rounded-full px-2 py-1 text-[10px] font-bold"
-                  style={
-                    {
-                      backgroundColor: YELLOW,
-                      color: INK,
-                      "--d": "2200ms",
-                    } as CSSProperties
-                  }
-                >
-                  1 gap found
-                </span>
-              </div>
-              <GraphPreview />
-            </div>
+          <svg
+            viewBox={`0 0 ${HW} ${HH}`}
+            className="mt-1 block w-full"
+            role="group"
+            aria-label="Your GitHub account in the centre, connected to engineering topics, each connected to the skills that back it"
+          >
+            {/* ring guides */}
+            <ellipse
+              cx={HCX}
+              cy={HCY}
+              rx={135}
+              ry={92}
+              fill="none"
+              stroke="#fff"
+              strokeOpacity=".08"
+              strokeDasharray="3 6"
+            />
+            <ellipse
+              cx={HCX}
+              cy={HCY}
+              rx={275}
+              ry={185}
+              fill="none"
+              stroke="#fff"
+              strokeOpacity=".06"
+              strokeDasharray="3 6"
+            />
 
-            <div className="flex flex-col justify-between p-5">
-              <div>
-                <div className="text-[11px] font-semibold text-neutral-400">
-                  YOUR EVIDENCE
-                </div>
-                <div className="mt-3 space-y-2">
-                  {capabilities.slice(0, 3).map((c, i) => (
-                    <div
-                      key={c.name}
-                      className="pw-fade-up flex items-center justify-between rounded-lg px-3 py-2 transition-transform duration-300 hover:-translate-y-0.5 hover:translate-x-0.5"
+            {/* edges: account -> topic -> skill */}
+            {HERO_LAYOUT.map((t, ti) => (
+              <g
+                key={`e-${t.id}`}
+                style={{ opacity: dim(t.id), transition: "opacity .4s ease" }}
+              >
+                <line
+                  x1={HCX}
+                  y1={HCY}
+                  x2={t.x}
+                  y2={t.y}
+                  pathLength={1}
+                  stroke="#d8d5c8"
+                  strokeWidth="2.2"
+                  className="pw-draw"
+                  style={{ "--d": `${250 + ti * 120}ms` } as CSSProperties}
+                />
+                {t.leaves.map((l, li) => (
+                  <line
+                    key={l.name}
+                    x1={t.x}
+                    y1={t.y}
+                    x2={l.x}
+                    y2={l.y}
+                    pathLength={1}
+                    stroke={l.gap ? YELLOW : "#8a8d85"}
+                    strokeWidth={l.gap ? 2 : 1.4}
+                    className={l.gap ? "pw-flow" : "pw-draw"}
+                    style={
+                      {
+                        "--d": `${800 + ti * 120 + li * 90}ms`,
+                      } as CSSProperties
+                    }
+                  />
+                ))}
+              </g>
+            ))}
+
+            {/* skill nodes */}
+            {HERO_LAYOUT.map((t, ti) =>
+              t.leaves.map((l, li) => {
+                const right = l.x > HCX + 30;
+                const left = l.x < HCX - 30;
+                const above = l.y < HCY;
+                const tx = right ? l.x + 13 : left ? l.x - 13 : l.x;
+                const ty =
+                  right || left ? l.y + 3.5 : above ? l.y - 13 : l.y + 21;
+                return (
+                  <g
+                    key={`${t.id}-${l.name}`}
+                    style={{
+                      opacity: dim(t.id),
+                      transition: "opacity .4s ease",
+                    }}
+                  >
+                    <g
+                      className="pw-node"
                       style={
                         {
-                          ...border,
-                          backgroundColor: "#fff",
-                          "--d": `${900 + i * 150}ms`,
+                          "--d": `${1000 + ti * 120 + li * 90}ms`,
+                          cursor: "pointer",
                         } as CSSProperties
                       }
+                      onClick={() => toggle(t.id)}
                     >
-                      <span className="max-w-[150px] text-[11px] font-bold">
-                        {c.name}
-                      </span>
-                      <span
-                        className="text-[10px] text-neutral-500"
-                        style={{ fontFamily: MONO }}
+                      {l.gap && (
+                        <circle
+                          cx={l.x}
+                          cy={l.y}
+                          r={8}
+                          fill="none"
+                          stroke={YELLOW}
+                          strokeWidth="2"
+                          className="pw-ping"
+                        />
+                      )}
+                      <circle
+                        cx={l.x}
+                        cy={l.y}
+                        r={8}
+                        fill={l.gap ? YELLOW : "#e8e4d6"}
+                        stroke={l.gap ? "#fff" : INK}
+                        strokeWidth="2"
+                        strokeDasharray={l.gap ? "3 2" : undefined}
+                      />
+                      <text
+                        x={tx}
+                        y={ty}
+                        textAnchor={right ? "start" : left ? "end" : "middle"}
+                        fontSize="10.5"
+                        fontWeight={700}
+                        fontFamily={BODY}
+                        fill={l.gap ? YELLOW : "#e8e4d6"}
+                        style={{
+                          paintOrder: "stroke",
+                          stroke: "#111311",
+                          strokeWidth: 3,
+                          strokeLinejoin: "round",
+                        }}
                       >
-                        <CountUp to={c.evidence} /> proofs
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+                        {l.name}
+                        {l.gap ? " · gap" : ""}
+                      </text>
+                    </g>
+                  </g>
+                );
+              }),
+            )}
 
-              <div
-                className="mt-6 rounded-xl p-4"
-                style={{
-                  ...border,
-                  backgroundColor: YELLOW,
-                  boxShadow: shadow(3),
-                }}
-              >
-                <div className="text-[10px] font-bold uppercase tracking-wider">
-                  NEXT MISSION
-                </div>
-                <div
-                  className="mt-1 text-[18px] font-bold"
-                  style={{ fontFamily: DISPLAY }}
+            {/* topic nodes */}
+            {HERO_LAYOUT.map((t, ti) => {
+              const gap = t.leaves.some((l) => l.gap);
+              const on = sel === t.id;
+              return (
+                <g
+                  key={t.id}
+                  style={{ opacity: dim(t.id), transition: "opacity .4s ease" }}
                 >
-                  Build a job queue
-                </div>
-                <p className="mt-2 text-[11px] leading-relaxed">
-                  You have async processing evidence, but almost no queue/worker
-                  evidence. This contribution closes that gap.
-                </p>
-                <div className="mt-3 flex items-center gap-2 text-[10px] font-bold">
-                  <GitPullRequest size={12} />
-                  Real GitHub issue
-                  <ArrowRight size={11} />
-                  Personalized mission
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setMission((v) => !v)}
-                  aria-pressed={mission}
-                  className={`pw-btn mt-3 inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-bold ${focus}`}
-                  style={
-                    {
-                      ...border,
-                      "--sh": "2px",
-                      backgroundColor: mission ? GREEN : INK,
-                      color: "#fff",
-                    } as CSSProperties
-                  }
-                >
-                  {mission ? (
-                    <>
-                      <Check size={11} /> Accepted
-                    </>
-                  ) : (
-                    <>
-                      Accept mission{" "}
-                      <ArrowRight size={11} className="pw-arrow" />
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+                  <g
+                    className="pw-node"
+                    tabIndex={0}
+                    role="button"
+                    aria-pressed={on}
+                    aria-label={`${t.name}, ${t.proofs} proofs`}
+                    onClick={() => toggle(t.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        toggle(t.id);
+                      }
+                    }}
+                    style={
+                      {
+                        "--d": `${500 + ti * 120}ms`,
+                        cursor: "pointer",
+                        outline: "none",
+                      } as CSSProperties
+                    }
+                  >
+                    {on && (
+                      <circle
+                        cx={t.x}
+                        cy={t.y}
+                        r={t.r + 7}
+                        fill="none"
+                        stroke={YELLOW}
+                        strokeWidth="3"
+                      />
+                    )}
+                    <circle
+                      cx={t.x}
+                      cy={t.y}
+                      r={t.r}
+                      fill={gap ? YELLOW : "#ffffff"}
+                      stroke={INK}
+                      strokeWidth="3"
+                    />
+                    <text
+                      x={t.x}
+                      y={t.y + 4}
+                      textAnchor="middle"
+                      fontSize="12"
+                      fontWeight={800}
+                      fontFamily={MONO}
+                      fill={INK}
+                    >
+                      {t.proofs}
+                    </text>
+                    <text
+                      x={t.x}
+                      y={t.y + t.r + 15}
+                      textAnchor="middle"
+                      fontSize="12"
+                      fontWeight={700}
+                      fontFamily={DISPLAY}
+                      fill="#ffffff"
+                      style={{
+                        paintOrder: "stroke",
+                        stroke: "#111311",
+                        strokeWidth: 4,
+                        strokeLinejoin: "round",
+                      }}
+                    >
+                      {t.name}
+                    </text>
+                  </g>
+                </g>
+              );
+            })}
 
-      <span
-        className="pw-float absolute -bottom-4 -left-3 hidden rounded-full bg-white px-3 py-1.5 text-[11px] font-bold sm:flex"
-        style={{ ...border, boxShadow: shadow(2) }}
-      >
-        <span
-          className="pw-blink mr-1.5 h-2 w-2 self-center rounded-full"
-          style={{ backgroundColor: GREEN }}
-        />
-        <CountUp to={63} />
-        &nbsp;demonstrations
-      </span>
-    </div>
-  );
-}
-
-function GraphPreview() {
-  const nodes = [
-    { x: 48, y: 80, label: "Developer", type: "dev" },
-    { x: 150, y: 45, label: "Data Layer", type: "strong" },
-    { x: 150, y: 125, label: "Reliability", type: "strong" },
-    { x: 255, y: 80, label: "Async", type: "mid" },
-    { x: 345, y: 45, label: "Queues", type: "gap" },
-    { x: 345, y: 125, label: "Workers", type: "gap" },
-    { x: 255, y: 180, label: "Goal", type: "goal" },
-  ];
-
-  const byLabel = Object.fromEntries(nodes.map((n) => [n.label, n]));
-
-  const links = [
-    ["Developer", "Data Layer"],
-    ["Developer", "Reliability"],
-    ["Data Layer", "Async"],
-    ["Reliability", "Async"],
-    ["Async", "Queues"],
-    ["Async", "Workers"],
-    ["Goal", "Async"],
-  ];
-
-  return (
-    <svg
-      viewBox="0 0 400 230"
-      className="mt-8 w-full"
-      role="img"
-      aria-label="Developer capability graph showing a gap between asynchronous processing and queue workers"
-    >
-      {links.map(([a, b], i) => {
-        const A = byLabel[a];
-        const B = byLabel[b];
-        const dashed = a === "Async" || a === "Goal";
-        return (
-          <line
-            key={`${a}-${b}`}
-            x1={A.x}
-            y1={A.y}
-            x2={B.x}
-            y2={B.y}
-            pathLength={1}
-            stroke={dashed ? YELLOW : "#777"}
-            strokeWidth="1.5"
-            className={dashed ? "pw-flow" : "pw-draw"}
-            style={{ "--d": `${600 + i * 160}ms` } as CSSProperties}
-            opacity={dashed ? 0.9 : 1}
-          />
-        );
-      })}
-
-      {nodes.map((n, i) => {
-        const fill =
-          n.type === "gap"
-            ? YELLOW
-            : n.type === "goal"
-              ? GREEN
-              : n.type === "strong"
-                ? "#ffffff"
-                : n.type === "mid"
-                  ? "#b8b8b8"
-                  : "#101210";
-        const text = n.type === "dev" ? "#ffffff" : INK;
-
-        return (
-          <g
-            key={n.label}
-            className="pw-node"
-            style={{ "--d": `${i * 180}ms` } as CSSProperties}
-          >
-            {n.type === "gap" && (
+            {/* account node (centre) */}
+            <g className="pw-node" style={{ "--d": "0ms" } as CSSProperties}>
               <circle
-                cx={n.x}
-                cy={n.y}
-                r={19}
+                cx={HCX}
+                cy={HCY}
+                r={36}
                 fill="none"
-                stroke={YELLOW}
+                stroke={GREEN}
                 strokeWidth="2"
                 className="pw-ping"
               />
-            )}
-            <circle
-              cx={n.x}
-              cy={n.y}
-              r={n.type === "dev" ? 24 : 19}
-              fill={fill}
-              stroke={n.type === "dev" ? YELLOW : "#ffffff"}
-              strokeWidth="2"
+              <circle
+                cx={HCX}
+                cy={HCY}
+                r={36}
+                fill={GREEN}
+                stroke="#fff"
+                strokeWidth="3"
+              />
+              <text
+                x={HCX}
+                y={HCY - 2}
+                textAnchor="middle"
+                fontSize="14"
+                fontWeight={800}
+                fontFamily={DISPLAY}
+                fill="#fff"
+              >
+                YOU
+              </text>
+              <text
+                x={HCX}
+                y={HCY + 12}
+                textAnchor="middle"
+                fontSize="8.5"
+                fontFamily={MONO}
+                fill="#fff"
+              >
+                @github
+              </text>
+              <text
+                x={HCX}
+                y={HCY + 54}
+                textAnchor="middle"
+                fontSize="10"
+                fontWeight={700}
+                fontFamily={BODY}
+                fill="#bdbab0"
+              >
+                Your GitHub account
+              </text>
+            </g>
+          </svg>
+        </div>
+
+        {/* legend */}
+        <div
+          className="flex flex-wrap items-center gap-x-5 gap-y-1.5 px-4 py-2.5 text-[11px] font-semibold text-neutral-600"
+          style={{ borderBlock: `2px solid ${INK}`, backgroundColor: SOFT }}
+        >
+          <span className="flex items-center gap-1.5">
+            <span
+              className="h-3 w-3 rounded-full"
+              style={{ backgroundColor: GREEN, border: `2px solid ${INK}` }}
             />
-            <text
-              x={n.x}
-              y={n.y + 4}
-              textAnchor="middle"
-              fontSize="8"
-              fontWeight="700"
-              fill={text}
-              fontFamily={MONO}
-            >
-              {n.type === "gap" ? "GAP" : n.type === "goal" ? "GOAL" : "✓"}
-            </text>
-            <text
-              x={n.x}
-              y={n.y + 34}
-              textAnchor="middle"
-              fontSize="10"
-              fontWeight="700"
-              fill="#ffffff"
-              fontFamily={DISPLAY}
-            >
-              {n.label}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
+            Account
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="h-3 w-3 rounded-full bg-white"
+              style={{ border: `2px solid ${INK}` }}
+            />
+            Topic (number = proofs)
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="h-2.5 w-2.5 rounded-full"
+              style={{ backgroundColor: "#e8e4d6", border: `2px solid ${INK}` }}
+            />
+            Skill seen in code
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="h-2.5 w-2.5 rounded-full"
+              style={{ backgroundColor: YELLOW, border: `2px dashed ${INK}` }}
+            />
+            Gap
+          </span>
+        </div>
+
+        {/* detail */}
+        <div className="min-h-[148px] p-4 sm:p-5">
+          <div key={sel ?? "none"} className="pw-swap">
+            {active ? (
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3
+                    className="text-[18px] font-bold"
+                    style={{ fontFamily: DISPLAY }}
+                  >
+                    {active.name}
+                  </h3>
+                  <span
+                    className="rounded-full px-2 py-0.5 text-[10px] font-bold"
+                    style={{
+                      ...border,
+                      backgroundColor: hasGap ? YELLOW : "#fff",
+                    }}
+                  >
+                    {active.proofs} proof{active.proofs === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <p className="mt-1.5 text-[12px] leading-relaxed text-neutral-600">
+                  {hasGap
+                    ? "Almost no proof here, and it is part of your goal. These skills are missing from your code."
+                    : `Backed by ${active.proofs} demonstrations in your repositories. Built from these skills:`}
+                </p>
+                <div className="mt-2.5 flex flex-wrap gap-1.5">
+                  {active.leaves.map((l) => (
+                    <span
+                      key={l.name}
+                      className="rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                      style={{
+                        border: `1.5px ${l.gap ? "dashed" : "solid"} ${INK}`,
+                        backgroundColor: l.gap ? YELLOW : "#fff",
+                      }}
+                    >
+                      {l.name}
+                      {l.gap ? " · missing" : ""}
+                    </span>
+                  ))}
+                </div>
+
+                {hasGap && (
+                  <div
+                    className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl p-3"
+                    style={{ ...border, backgroundColor: SOFT }}
+                  >
+                    <div>
+                      <div
+                        className="text-[10px] font-bold text-neutral-500"
+                        style={{ fontFamily: MONO }}
+                      >
+                        NEXT MISSION
+                      </div>
+                      <div
+                        className="text-[14px] font-bold"
+                        style={{ fontFamily: DISPLAY }}
+                      >
+                        Build a durable job queue
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-[10px] font-semibold text-neutral-500">
+                        <GitPullRequest size={11} /> Real GitHub issue
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAccepted((v) => !v)}
+                      aria-pressed={accepted}
+                      className={`pw-btn inline-flex items-center gap-1.5 rounded-full px-3.5 py-2 text-[11px] font-bold ${focus}`}
+                      style={
+                        {
+                          ...border,
+                          "--sh": "2px",
+                          backgroundColor: accepted ? GREEN : INK,
+                          color: "#fff",
+                        } as CSSProperties
+                      }
+                    >
+                      {accepted ? (
+                        <>
+                          <Check size={12} /> Accepted
+                        </>
+                      ) : (
+                        <>
+                          Accept mission <ArrowRight size={12} />
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="pt-2 text-[13px] leading-relaxed text-neutral-600">
+                Tap any topic in the graph to see which skills it is built from
+                and how much proof your code gives it.
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
