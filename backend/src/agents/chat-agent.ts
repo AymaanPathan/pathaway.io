@@ -105,6 +105,8 @@ export interface Proficiency {
   /** CONFIDENCE: strength of the evidence behind this assessment (not the skill itself) */
   confidence: "low" | "medium" | "high" | null;
   assessed: boolean;
+  /** model = judged from evidence; heuristic = graph-statistics estimate; unknown = not reported */
+  source: "model" | "heuristic" | "unknown";
 }
 
 /** GRAPH IMPORTANCE: structural role in the topic graph. Says nothing about skill. */
@@ -526,6 +528,22 @@ const normLevel = (s: unknown): string =>
 const cap = (s: string): string => (s ? s[0].toUpperCase() + s.slice(1) : s);
 const CONF_RANK = { low: 0, medium: 1, high: 2 } as const;
 
+const HEURISTIC_RE = /graph statistics only|no model judg/i;
+
+/** Field names are guesses, since DevTopic wasn't visible. Adjust here only. */
+function sourceOf(t: any): Proficiency["source"] {
+  const tag = normLevel(
+    t?.assessmentSource ?? t?.judgedBy ?? t?.method ?? t?.source,
+  );
+  if (/heuristic|statistic|baseline|estimate|fallback/.test(tag))
+    return "heuristic";
+  if (/model|llm|judge/.test(tag)) return "model";
+  const text = [t?.verdict, t?.rationale, t?.summary]
+    .filter((s) => typeof s === "string")
+    .join(" ");
+  return HEURISTIC_RE.test(text) ? "heuristic" : "unknown";
+}
+
 interface ProfRef {
   slug: string | null;
   name: string;
@@ -562,6 +580,7 @@ function profOf(topics: DevTopic[], ref: string, toolLevel?: unknown): ProfRef {
       score: Number.isFinite(n) && t?.score != null ? n : null,
       confidence: c === "low" || c === "medium" || c === "high" ? c : null,
       assessed: level !== "not assessed",
+      source: sourceOf(t),
     },
   };
 }
@@ -569,7 +588,7 @@ function profOf(topics: DevTopic[], ref: string, toolLevel?: unknown): ProfRef {
 const fmtProf = (p: Proficiency): string =>
   !p.assessed
     ? "Not assessed"
-    : `${cap(p.level)}${p.score != null ? ` (${p.score}/100)` : ""}`;
+    : `${cap(p.level)}${p.score != null ? ` (${p.score}/100)` : ""}${p.source === "heuristic" ? " · estimate" : ""}`;
 
 /* ========================================================================== */
 /* ROUND 1 PLANNER                                                            */
@@ -633,19 +652,44 @@ async function planWithLlm(
   return { calls, direct };
 }
 
+const stem = (w: string) => (w.length > 3 ? w.replace(/s$/, "") : w);
+const sameWord = (a: string, b: string) => {
+  const x = stem(a);
+  const y = stem(b);
+  return (
+    x === y ||
+    (Math.min(x.length, y.length) >= 4 && (x.startsWith(y) || y.startsWith(x)))
+  );
+};
+
+/** Exact name first, then token match ("rest api" -> REST API design, "backoffs" -> Retry with backoff). */
 function mentionedTopics(message: string, topics: DevTopic[]): string[] {
-  const s = message.toLowerCase();
+  const lower = message.toLowerCase();
+  const words = tokens(message);
   return topics
     .map((t) => {
       const names = [t.name.toLowerCase(), t.slug.replace(/_/g, " ")];
-      const at = Math.min(
-        ...names.map((n) => (s.includes(n) ? s.indexOf(n) : Infinity)),
+      const exact = Math.min(
+        ...names.map((n) => (lower.includes(n) ? lower.indexOf(n) : Infinity)),
       );
-      return { t, at };
+      if (Number.isFinite(exact)) return { slug: t.slug, at: exact };
+
+      const nt = tokens(t.name);
+      if (!nt.length) return { slug: t.slug, at: Infinity };
+      const hits = nt
+        .map((n) => words.findIndex((w) => sameWord(w, n)))
+        .filter((i) => i >= 0);
+      const need =
+        nt.length === 1 ? 1 : Math.max(2, Math.ceil(nt.length * 0.6));
+      if (hits.length < need) return { slug: t.slug, at: Infinity };
+      return {
+        slug: t.slug,
+        at: Math.max(0, lower.indexOf(words[Math.min(...hits)])),
+      };
     })
     .filter((x) => Number.isFinite(x.at))
     .sort((a, b) => a.at - b.at)
-    .map((x) => x.t.slug);
+    .map((x) => x.slug);
 }
 
 function routeByRules(
@@ -660,10 +704,14 @@ function routeByRules(
   const push = (tool: string, args: Row = {}) => {
     if (!calls.some((c) => c.tool === tool)) calls.push({ tool, args });
   };
+  const asksHops = has(/\bhops?\b|how far|distance|separat/);
 
   if (m.length >= 2 && has(/compare|versus|\bvs\b|difference|stronger/))
     push("compare_topics", { topics: m.slice(0, 3).join(", ") });
-  else if (m.length >= 2 && has(/connect|path|between|relat|link|route|lead/))
+  else if (
+    m.length >= 2 &&
+    (asksHops || has(/connect|path|between|relat|link|route|lead/))
+  )
     push("connect_topics", { from: m[0], to: m[1] });
   else if (
     m.length &&
@@ -674,7 +722,9 @@ function routeByRules(
     push("learning_path_to_topic", { topic: m[0] });
   else if (
     (m.length || selected) &&
-    has(/around|neighbou?r|surround|depends|unlock|what builds/)
+    has(
+      /around|neighbou?r|surround|depends|dependenc|multi.?hop|unlock|what builds/,
+    )
   )
     push("explore_neighborhood", { topic: m[0] ?? selected });
 
@@ -697,7 +747,11 @@ function routeByRules(
     push("recent_activity");
   if (has(/strong|best|deep|good at|expert|top skill/))
     push("strongest_topics");
-  if (has(/summary|overview|about me|profile|how many|who am i/))
+  if (
+    has(
+      /summary|overview|about me|profile|how many (topics|skills|domains)|who am i/,
+    )
+  )
     push("profile_overview");
   if (!calls.length && has(/search|find|which topics|do i have|related/))
     push("search_topics", {
@@ -1040,6 +1094,24 @@ function evidenceLines(r: AgentRun): string[] {
     .slice(0, 8);
 }
 
+/** Topics whose explain output says the score is a graph-statistics estimate. */
+function heuristicSlugs(runs: AgentRun[], topics: DevTopic[]): Set<string> {
+  const out = new Set<string>();
+  for (const r of runs) {
+    if (!r.ok || !r.result) continue;
+    const f = (r.result.facts ?? {}) as Row;
+    const text = [
+      r.result.summary,
+      ...evidenceLines(r),
+      String(f.verdict ?? ""),
+    ].join(" ");
+    if (!HEURISTIC_RE.test(text)) continue;
+    const slug = resolveTopic(String(f.topic ?? ""), topics);
+    if (slug) out.add(slug);
+  }
+  return out;
+}
+
 /** Reliability of a TOOL RESULT (query health). This is not skill confidence. */
 function resultReliability(r: AgentRun): "low" | "medium" | "high" {
   if (r.degraded?.length) return "low";
@@ -1119,6 +1191,14 @@ function buildInvestigation(runs: AgentRun[], topics: DevTopic[]) {
           if (!direct)
             limitations.push(
               `Intermediate topics on this ${x.hops}-hop path are not listed by the graph tool; only the two endpoints are shown.`,
+            );
+          if (x.top.prof.source === "heuristic")
+            limitations.push(
+              `${x.top.name}'s level is an estimate from graph statistics, not a model judgement.`,
+            );
+          if (x.fo.prof.source === "heuristic")
+            limitations.push(
+              `${x.fo.name}'s level is an estimate from graph statistics, not a model judgement.`,
             );
           for (const c of [x.top.conflict, x.fo.conflict])
             if (c) limitations.push(c);
@@ -1294,15 +1374,20 @@ function buildGraphPaths(
     }
 
     if (r.tool === "explain_topic" && Array.isArray(f.buildsOn)) {
-      for (const b of f.buildsOn.slice(0, 2)) {
+      for (const b of f.buildsOn.slice(0, 3)) {
+        const raw = String(b);
+        /* "Rate-limit handling (2 hops)" -> 2. No suffix means 1. */
+        const hops = Math.max(1, Number(/(\d+)\s*hops?/i.exec(raw)?.[1]) || 1);
         const from = node(String(f.topic));
-        const to = node(String(b).replace(/\s*\(.*\)$/, ""));
+        const to = node(raw.replace(/\s*\(.*\)$/, ""));
         out.push({
           id: newPathId(),
           tool: r.tool,
           findingId,
           nodes: [from.name, to.name],
-          relationships: ["BUILDS_ON"],
+          relationships: [
+            hops === 1 ? "BUILDS_ON" : `BUILDS_ON (${hops} hops)`,
+          ],
           steps: [from, to],
           edges: [
             {
@@ -1310,11 +1395,11 @@ function buildGraphPaths(
               to: to.name,
               type: "BUILDS_ON",
               label: "builds on",
-              relation: "direct",
-              hops: 1,
+              relation: hops === 1 ? "direct" : "multi_hop",
+              hops,
             },
           ],
-          meaning: `${from.name} builds on ${to.name}.`,
+          meaning: `${from.name} builds on ${to.name}${hops > 1 ? ` (${hops} hops)` : ""}.`,
         });
       }
     }
@@ -1474,7 +1559,7 @@ function buildInsight(
 
 const COMPOSE_SYSTEM = `You write the chat reply for Pathway's topic assistant. The interface already shows tables, rankings, lists, evidence and graph paths built from the tool results, so DO NOT repeat every item.
 Write 2 to 4 plain sentences that interpret the result for the developer: the key takeaway, one notable detail, and one concrete next step. Name in plain words which graph analysis produced the key finding (for example "the betweenness ranking" or "the BUILDS_ON traversal"). Use ONLY the supplied facts. Never invent topics, levels, numbers or relationships. Address the developer as "you". No markdown, no bullet lists, no headings.
-Keep four ideas apart and never use one word for two of them: proficiency (how deep the developer's skill is), confidence (how strong the evidence behind a rating is), graph importance (how central a topic is in the graph, not a skill), gap priority (why one gap comes first). Say "direct prerequisite" for a 1-hop BUILDS_ON link and "multi-hop dependency" for longer ones.
+Keep four ideas apart and never use one word for two of them: proficiency (how deep the developer's skill is), confidence (how strong the evidence behind a rating is; low confidence means thin evidence, NOT wrong code), graph importance (how central a topic is, not a skill), gap priority (why one gap comes first). If a proficiency is marked "estimate", say it is an estimate. Hop language comes ONLY from the "relationships" list: use its labels exactly and never infer or count hops from any other fact. If a relationship is not listed, do not call it direct or multi-hop. Never write tool names like explain_topic; say "the topic explanation" instead.
 Each result may carry "limitations". If a limitation affects the conclusion, state it plainly in one clause. Never turn a limitation into a claim: for example never say no gaps exist when a result says it could not be verified, and never call a topic weak when its foundation is merely unassessed.
 If the developer asked about something the graph has no topic for, say so plainly in one sentence and use the closest topics the tools did return.
 Also give:
@@ -1548,10 +1633,38 @@ function followupsFor(runs: AgentRun[]): string[] {
   return (out.length ? out : DEFAULT_FOLLOWUPS).slice(0, 3);
 }
 
+const PREREQ_TYPES = new Set(["BUILDS_ON", "FOUNDATION_OF"]);
+
+/** Returns null when the prose makes a hop claim that no real path supports. */
+function sanitizeAnswer(answer: string, paths: GraphPath[]): string | null {
+  let out = answer;
+  for (const t of ALL_TOOLS)
+    out = out.split(t.name).join(t.title.toLowerCase());
+
+  const edges = paths.flatMap((p) => p.edges);
+  const allowed = new Set<number>([
+    ...edges.map((e) => e.hops),
+    ...paths.map((p) => p.edges.length),
+  ]);
+  const hasDirect = edges.some(
+    (e) => e.relation === "direct" && PREREQ_TYPES.has(e.type),
+  );
+  const hasMulti =
+    edges.some((e) => e.relation === "multi_hop") ||
+    paths.some((p) => p.edges.length > 1);
+
+  if (/direct prerequisite/i.test(out) && !hasDirect) return null;
+  if (/multi-?hop/i.test(out) && !hasMulti) return null;
+  for (const m of out.matchAll(/\b(\d+)[- ]hops?\b/gi))
+    if (!allowed.has(Number(m[1]))) return null;
+  return out;
+}
+
 async function compose(
   llm: ChatLlm | null,
   message: string,
   runs: AgentRun[],
+  paths: GraphPath[],
 ): Promise<{
   answer: string;
   followups: string[];
@@ -1576,14 +1689,30 @@ async function compose(
       usedLlm: false,
     };
 
+  const relationships = paths.flatMap((p) =>
+    p.edges.map((e) => ({
+      edge: `${e.from} ${e.type} ${e.to}`,
+      label: PREREQ_TYPES.has(e.type)
+        ? e.relation === "direct"
+          ? "direct prerequisite"
+          : `multi-hop dependency, ${e.hops} hops`
+        : `${e.label} link (association, not a prerequisite)`,
+    })),
+  );
+
   const raw = await askJson(
     llm,
     "synthesize",
     COMPOSE_SYSTEM,
-    JSON.stringify({ question: message, results: fitFacts(usable) }),
+    JSON.stringify({
+      question: message,
+      results: fitFacts(usable),
+      relationships,
+    }),
     450,
   );
-  const answer = asText(raw?.answer, 900);
+  const draft = asText(raw?.answer, 900);
+  const answer = draft ? sanitizeAnswer(draft, paths) : null;
   if (!answer)
     return {
       answer: fallback,
@@ -1661,7 +1790,8 @@ export async function answerTopicQuestion(
    * planner only runs for vague questions or greetings.
    */
   const ruled = routeByRules(input.message, topics, selected);
-  const OVERVIEW_RE = /summary|overview|about me|profile|how many|who am i/i;
+  const OVERVIEW_RE =
+    /summary|overview|about me|profile|how many (topics|skills|domains)|who am i/i;
   const vague =
     ruled.length === 1 &&
     ruled[0].tool === "profile_overview" &&
@@ -1762,6 +1892,25 @@ export async function answerTopicQuestion(
   }
   const toolsMs = Date.now() - t1;
 
+  /* build findings and paths first, so the composer can only use real labels */
+  const heur = heuristicSlugs(runs, topics);
+  const viewTopics = heur.size
+    ? topics.map((t) =>
+        heur.has(t.slug)
+          ? ({ ...t, assessmentSource: "heuristic" } as DevTopic)
+          : t,
+      )
+    : topics;
+  const inv = buildInvestigation(runs, viewTopics);
+  const otherPaths = buildGraphPaths(
+    runs,
+    viewTopics,
+    inv.mainByTool,
+    inv.nextPathId,
+  );
+  const graphPaths = [...inv.gapPaths, ...otherPaths].slice(0, 8);
+  const nextActions = buildNextActions(runs, viewTopics, inv.findings);
+
   emit?.({
     type: "stage",
     stage: "composing",
@@ -1773,6 +1922,7 @@ export async function answerTopicQuestion(
     input.llm,
     input.message,
     runs,
+    graphPaths,
   );
   const composeMs = Date.now() - t2;
   emit?.({ type: "compose_done", usedLlm, ms: composeMs });
@@ -1789,15 +1939,6 @@ export async function answerTopicQuestion(
     ),
   ].slice(0, 12);
 
-  const inv = buildInvestigation(runs, topics);
-  const otherPaths = buildGraphPaths(
-    runs,
-    topics,
-    inv.mainByTool,
-    inv.nextPathId,
-  );
-  const graphPaths = [...inv.gapPaths, ...otherPaths].slice(0, 8);
-  const nextActions = buildNextActions(runs, topics, inv.findings);
   const insight = buildInsight(inv.findings, graphPaths, nextActions, answer);
 
   return {

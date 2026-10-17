@@ -38,7 +38,7 @@ const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 const fmtProf = (p?: Obj | null) =>
   !p || !p.assessed
     ? "Not assessed"
-    : `${cap(String(p.level))}${p.score != null ? ` (${p.score}/100)` : ""}`;
+    : `${cap(String(p.level))}${p.score != null ? ` (${p.score}/100)` : ""}${p.source === "heuristic" ? " · estimate" : ""}`;
 
 /* ------------------------------------------------------------------ */
 /* The four measures, each with its own label so they can't be confused */
@@ -87,7 +87,11 @@ function Measures({ f }: { f: Obj }) {
     <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
       <Measure
         name="Proficiency"
-        meaning="Assessed depth of your skill"
+        meaning={
+          top?.source === "heuristic"
+            ? "Estimate from graph stats. No model judgement."
+            : "Assessed depth of your skill"
+        }
         color={PURPLE}
       >
         {top ? (
