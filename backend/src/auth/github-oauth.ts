@@ -1,4 +1,6 @@
 import { getGraphForDeveloper } from "../db/falkordb.js";
+import { withGithubMcp } from "../mcp/github-mcp.js";
+import { getMe } from "../github-mcp-tools/index.js";
 
 export function getGithubAuthorizeUrl(state: string): string {
   const params = new URLSearchParams({
@@ -47,18 +49,11 @@ export interface GithubUser {
 export async function fetchGithubUser(
   accessToken: string,
 ): Promise<GithubUser> {
-  const res = await fetch("https://api.github.com/user", {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/vnd.github+json",
-    },
+  return withGithubMcp(accessToken, ["get_me"], async (call) => {
+    const result = await getMe(call);
+    if (!result.ok) throw new Error(`GitHub MCP /user failed: ${result.text}`);
+    return result.data as GithubUser;
   });
-
-  if (!res.ok) {
-    throw new Error(`GitHub /user failed: ${res.status}`);
-  }
-
-  return res.json() as Promise<GithubUser>;
 }
 
 

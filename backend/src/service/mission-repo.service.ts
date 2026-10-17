@@ -1,4 +1,11 @@
 import type { MissionRepoPin } from "../graph/mission-graph.js";
+import { withGithubMcp } from "../mcp/github-mcp.js";
+import {
+  getCommit,
+  getFileContents,
+  getMe,
+  searchRepositories,
+} from "../github-mcp-tools/index.js";
 
 export type CiState = "success" | "failure" | "pending" | "none";
 
@@ -107,37 +114,85 @@ export function githubInspector(
       throw new Error(`"${repo}" is not an owner/name repository`);
     return repo;
   };
-  const encodePath = (p: string): string =>
-    p.split("/").map(encodeURIComponent).join("/");
+  const requireToken = (): string => {
+    if (!token) throw new Error("GitHub MCP requires an access token");
+    return token;
+  };
 
   return {
     async resolveHead(repo) {
       checked(repo);
-      const info = await getJson<{ default_branch: string }>(`/repos/${repo}`);
-      const commit = await getJson<{ sha: string }>(
-        `/repos/${repo}/commits/${encodeURIComponent(info.default_branch)}`,
-      );
-      return { branch: info.default_branch, sha: commit.sha };
+      return withGithubMcp(requireToken(), ["search_repositories", "get_commit"], async (call) => {
+        const result = await searchRepositories(call, {
+          query: `repo:${repo}`,
+          perPage: 1,
+          page: 1,
+        });
+        const data = result.data;
+        const info = (Array.isArray(data) ? data[0] : data?.items?.[0]) as
+          | { default_branch?: string }
+          | undefined;
+        const branch = info?.default_branch ?? "main";
+        const commitResult = await getCommit(call, {
+          owner: repo.split("/")[0],
+          repo: repo.split("/")[1],
+          sha: branch,
+        });
+        const commit = commitResult.data as { sha?: string };
+        if (!commit?.sha) throw new Error(`GitHub MCP could not resolve ${repo}@${branch}`);
+        return { branch, sha: commit.sha };
+      });
     },
 
     async listFiles(repo, sha) {
       checked(repo);
-      const tree = await getJson<{
-        tree: Array<{ path: string; type: string }>;
-      }>(`/repos/${repo}/git/trees/${encodeURIComponent(sha)}?recursive=1`);
-      return tree.tree.filter((t) => t.type === "blob").map((t) => t.path);
+      return withGithubMcp(requireToken(), ["get_file_contents"], async (call) => {
+        const files: string[] = [];
+        const visit = async (path: string): Promise<void> => {
+          const result = await getFileContents(call, {
+            owner: repo.split("/")[0],
+            repo: repo.split("/")[1],
+            path,
+            ref: sha,
+          });
+          if (!result.ok) throw new Error(result.text || `GitHub MCP could not read ${path || repo}`);
+          const entries = Array.isArray(result.data)
+            ? result.data
+            : Array.isArray(result.data?.entries)
+              ? result.data.entries
+              : [];
+          for (const entry of entries) {
+            const entryPath = String(entry?.path ?? entry?.name ?? "");
+            if (!entryPath) continue;
+            if (entry?.type === "directory" || entry?.type === "tree") {
+              await visit(entryPath);
+            } else if (entry?.type === "file" || entry?.type === "blob") {
+              files.push(entryPath);
+            }
+          }
+        };
+        await visit("");
+        return files;
+      });
     },
 
     async readFile(repo, sha, path) {
       checked(repo);
-      const res = await get(
-        `/repos/${repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(sha)}`,
-        "application/vnd.github.raw+json",
-      );
-      if (res.status === 404) return null;
-      if (res.status < 200 || res.status >= 300)
-        throw new Error(`GitHub ${res.status} reading ${path}`);
-      return res.text;
+      return withGithubMcp(requireToken(), ["get_file_contents"], async (call) => {
+        const result = await getFileContents(call, {
+          owner: repo.split("/")[0],
+          repo: repo.split("/")[1],
+          path,
+          ref: sha,
+        });
+        if (!result.ok) return null;
+        const data = result.data as { content?: unknown } | string;
+        return typeof data === "string"
+          ? data
+          : typeof data?.content === "string"
+            ? data.content
+            : null;
+      });
     },
 
     async compare(repo, baseRef, head) {
@@ -218,7 +273,13 @@ export function githubInspector(
     },
 
     async currentUser() {
-      return (await getJson<{ login: string }>(`/user`)).login;
+      return withGithubMcp(requireToken(), ["get_me"], async (call) => {
+        const result = await getMe(call);
+        const login = (result.data as { login?: unknown })?.login;
+        if (typeof login !== "string" || !login)
+          throw new Error("GitHub MCP did not return the current user");
+        return login;
+      });
     },
 
     async forkRepo(repo) {

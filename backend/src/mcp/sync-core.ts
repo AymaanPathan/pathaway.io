@@ -146,6 +146,18 @@ import {
   capEntries,
   parseManifestDependencies,
 } from "./sync-manifest.js";
+import {
+  clientCall,
+  getCommit,
+  getFileContents,
+  getMe,
+  listCommits,
+  listPullRequests,
+  readPullRequest,
+  searchIssues,
+  searchRepositories,
+  type GithubMcpCall,
+} from "../github-mcp-tools/index.js";
 
 export class GithubSync {
   private rateLimited = false;
@@ -157,12 +169,16 @@ export class GithubSync {
     private readonly owner: string,
     private readonly developerId: string,
     private readonly onProgress: ProgressFn,
-  ) {}
+    ) {
+      this.mcpCall = clientCall(mcp);
+    }
 
-  private async callGitHub(
-    name: string,
-    args: Record<string, unknown>,
-    retries = 3,
+    private readonly mcpCall: GithubMcpCall;
+
+    private async callGitHub(
+      name: string,
+      args: Record<string, unknown>,
+      retries = 3,
   ): Promise<any> {
     if (this.rateLimited) {
       throw new Error(`GitHub rate limit previously hit — skipped "${name}"`);
@@ -172,12 +188,21 @@ export class GithubSync {
 
     for (let attempt = 1; attempt <= retries; attempt++) {
       try {
-        const response = await this.mcp.callTool({
-          name,
-          arguments: args,
-        });
+        const tool = {
+          get_me: getMe,
+          search_repositories: searchRepositories,
+          list_pull_requests: listPullRequests,
+          pull_request_read: readPullRequest,
+          list_commits: listCommits,
+          get_commit: getCommit,
+          get_file_contents: getFileContents,
+          search_issues: searchIssues,
+        }[name] as
+          | ((call: GithubMcpCall, args: Record<string, unknown>) => Promise<unknown>)
+          | undefined;
+        if (!tool) throw new Error(`Unsupported GitHub MCP tool "${name}"`);
 
-        return parseToolResponse(response);
+        return parseToolResponse(await tool(this.mcpCall, args));
       } catch (error) {
         lastError = error;
 
