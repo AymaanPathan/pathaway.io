@@ -34,6 +34,7 @@ import {
   type LiveStep,
   type TraceEvent,
 } from "../compoenents/ChatBlock";
+import DepthProfile from "../compoenents/DepthProfile";
 
 /* ========================================================================== */
 /* DESIGN TOKENS (shared with the landing page)                               */
@@ -4637,6 +4638,7 @@ function TopicEvidence({
 
       {/* THE GRAPH: topic in the middle, everything the graph connects to it around it */}
       <EvidenceGraph slug={slug} detail={detail} onPick={onPick} />
+      <DepthProfile p={detail.depthProfile} name={name} />
 
       {/* three separate answers */}
       <div className="mt-6 grid gap-4 md:grid-cols-3">

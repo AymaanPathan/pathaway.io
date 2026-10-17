@@ -69,7 +69,7 @@ const DEMO_LIMIT = envInt("DEPTH_DEMO_LIMIT", 1500, 50, 10_000);
 const TAXONOMY_TTL_MS = envInt("DEPTH_TAXONOMY_CACHE_MS", 15_000, 0, 600_000);
 const DAY_MS = 86_400_000;
 
-export const DEPTH_ANALYSIS_VERSION = 2;
+export const DEPTH_ANALYSIS_VERSION = 3;
 
 // ---- query helpers ---------------------------------------------------------
 

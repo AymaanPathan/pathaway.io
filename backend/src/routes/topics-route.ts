@@ -2377,9 +2377,16 @@ function buildConfidence(
   const ev = card.evidence;
   const step = (v: number, steps: number[]): number =>
     steps.filter((s) => v >= s).length;
-  const kindsSeen = EVIDENCE_KINDS.filter((k) =>
-    asRows(detail.evidence).some((e) => str(e.kind) === k),
+
+  const storedKinds = ((detail.stats ?? {}) as Row).evidenceKinds as
+    | Record<string, number>
+    | undefined;
+  const kindsSeen = EVIDENCE_KINDS.filter(
+    (k) =>
+      (storedKinds && num(storedKinds[k]) > 0) ||
+      asRows(detail.evidence).some((e) => str(e.kind) === k),
   );
+
   const observedReal = proof.items.filter(
     (i) => i.class === "observed" && !i.practiceOnly,
   ).length;
@@ -3427,8 +3434,50 @@ async function buildGraphPayload(d: Dossier, slug: string) {
     },
   ];
 
+  const enrichedNodes: Row[] = (ev.nodes as unknown as Row[]).map((n) => {
+    if (n.kind === "topic_neighbor") {
+      const s = str(n.meta?.slug);
+      const c = d.bySlug.get(s);
+      return {
+        ...n,
+        kind: "topic",
+        slug: s,
+        level: c?.level,
+        assessed: Boolean(c),
+        note: c ? c.verdict : "Linked in the topic map, not assessed.",
+      };
+    }
+    if (n.kind === "demonstration") {
+      const b = ev.builds.find((x) => `demo:${x.id}` === n.id);
+      return {
+        ...n,
+        permalink: b?.permalink || undefined,
+        note: `Depth: ${str(n.meta?.depth)}${n.meta?.mission ? " (practice mission)" : ""}`,
+      };
+    }
+    return n;
+  });
+  const backedNodes: Row[] = ev.backedBy.map((b) => ({
+    id: `backed:${b.kind}`,
+    kind: "evidence",
+    label: `${b.count} cited ${b.kind.toLowerCase()}`,
+    hop: 1,
+    meta: {},
+    note: `${b.count} ${b.kind} item(s) back this assessment (BACKED_BY).`,
+  }));
+  const backedEdges: Row[] = ev.backedBy.map((b) => ({
+    id: `topic:${slug}|BACKED_BY|backed:${b.kind}`,
+    source: `topic:${slug}`,
+    target: `backed:${b.kind}`,
+    type: "BACKED_BY",
+    hop: 1,
+    note: "",
+  }));
+
   const base = {
     ...ev,
+    nodes: [...enrichedNodes, ...backedNodes],
+    edges: [...(ev.edges as unknown as Row[]), ...backedEdges],
     topic: mini(card),
     algorithms,
     proof: ctx.proof.items,
@@ -3829,6 +3878,9 @@ topicsRouter.get(
               )
               .map(mini);
 
+      const st = (detail.stats ?? {}) as Row;
+      const comps = (st.baselineComponents ?? {}) as Record<string, number>;
+
       return res.json({
         topic: {
           ...card,
@@ -3836,63 +3888,32 @@ topicsRouter.get(
           statedConfidence: card.confidence,
         },
         trace,
-        verdict: detail.summary.verdict,
-        rationale: detail.rationale,
-        strengths: detail.strengths,
-        gaps: detail.gaps,
-        limitations,
-        implementations: detail.implementations,
-        safeguards: detail.safeguards,
-        capabilityPaths: detail.capabilityPaths,
-        proof: ctx.proof.items,
-        proofCounts: ctx.proof.counts,
-        topicCitations: ctx.proof.topicCitations,
-        prerequisitePaths: ctx.paths,
-        confidence: ctx.confidence,
-        approaches: [...detail.approaches].sort(
-          (a, b) =>
-            Number(b.isPrimary) - Number(a.isPrimary) ||
-            DEPTH_RANK[b.depth] - DEPTH_RANK[a.depth],
-        ),
-        evidence: { total: detail.evidence.length, byKind: evidenceByKind },
-        stats: detail.stats,
-        history: detail.history,
-        dimensions: detail.dimensions,
-        evidenceBand: detail.evidenceBand,
-        approachEvidence: detail.approachEvidence,
-        learning: detail.learning,
-        scoring: {
-          level: card.level,
+        depthProfile: {
           score: card.score,
-          band: DEPTH_BANDS[card.level],
+          baseline: card.baselineScore,
+          level: card.level,
           nextLevel,
           pointsToNextLevel: nextLevel
             ? Math.max(0, DEPTH_BANDS[nextLevel][0] - card.score)
             : 0,
-          baseline: { score: card.baselineScore, level: detail.baselineLevel },
-          adjustment: card.scoreDelta,
-          decidedBy: card.fallback
-            ? "graph baseline only (no model judgement)"
-            : "model judgement checked by guard-rails",
-        },
-        graph: {
-          metrics: card.graph,
-          context: detail.context,
-          foundations: detail.context?.foundations ?? [],
-          unlocks: detail.unlocks,
-          related: detail.related,
-          community:
-            card.graph.clusterId == null
-              ? null
-              : { clusterId: card.graph.clusterId, peers: clusterPeers },
-          explain: {
-            foundationRank:
-              "PageRank over BUILDS_ON: how many topics build on this one. Structural, not proof of skill.",
-            bridgeScore:
-              "Betweenness: how much this topic connects separate areas. Structural, not proof of skill.",
-            clusterId:
-              "Label propagation over RELATED_TOPIC: which community it belongs to.",
-          },
+          fallback: card.fallback,
+          hasBreakdown: Object.keys(comps).length > 0,
+          ladder: DEPTH_LEVELS.filter((l) => l !== "none").map((l) => ({
+            id: l,
+            label: LEVEL_META[l].label,
+            min: DEPTH_BANDS[l][0],
+            max: DEPTH_BANDS[l][1],
+          })),
+          components: BASELINE_COMPONENTS.map((c) => ({
+            id: c.id,
+            meaning: c.meaning,
+            max: c.max,
+            value: num(comps[c.id]),
+          })),
+          caps: asArray<string>(st.baselineCaps),
+          evidenceKinds: st.evidenceKinds ?? null,
+          timeline: asArray(st.timeline),
+          hardening: asArray(st.hardening),
         },
       });
     } catch (err) {
