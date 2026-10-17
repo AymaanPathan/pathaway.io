@@ -7,12 +7,41 @@ import {
   type LlmClient,
 } from "../agents/goal-agent.js";
 import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
+import { goalSetLocks } from "./route-context.js";
 
 export const goalRouter = Router();
 
-const llmClient: LlmClient = cerebrasClient();
+const SLUG = /^[a-z0-9_]{1,60}$/;
+const MAX_GOAL_TOPICS = 4;
+
+// Created on first use so a missing key surfaces as the agent's
+// "llm_unavailable" status (HTTP 503) instead of failing at server start.
+let llmClient: LlmClient | null | undefined;
 function getLlm(): LlmClient | null {
+  if (llmClient !== undefined) return llmClient;
+  try {
+    llmClient = cerebrasClient();
+  } catch (error) {
+    console.warn(
+      "[goal-route] LLM unavailable:",
+      error instanceof Error ? error.message : error,
+    );
+    llmClient = null;
+  }
   return llmClient;
+}
+
+/** Topic slugs the client already resolved (for example a clarification suggestion). */
+function cleanTopics(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .filter((v): v is string => typeof v === "string")
+        .map((v) => v.trim().toLowerCase())
+        .filter((v) => SLUG.test(v)),
+    ),
+  ].slice(0, MAX_GOAL_TOPICS);
 }
 
 function explain(plan: GoalPlan) {
@@ -32,6 +61,8 @@ function explain(plan: GoalPlan) {
       commit: e.commit,
       permalink: e.permalink,
     })),
+    // what the data showed, what the agent concluded, what has no evidence
+    basis: task?.decision.basis ?? null,
     alternatives: task?.decision.considered ?? [],
     challenge: task?.challenge ?? null,
     graph: plan.graph
@@ -72,9 +103,22 @@ goalRouter.post("/api/goal", requireAuth, async (req: AuthedRequest, res) => {
       error: "goal must be 3-500 characters, or empty for an automatic goal",
     });
 
+  const goalTopics = cleanTopics(req.body?.topics ?? req.body?.goalTopics);
+
+  // planning replaces the stored NextMove for this goal, so never run two at once
+  if (goalSetLocks.has(developerId))
+    return res
+      .status(409)
+      .json({ error: "A goal is already being planned. Please wait." });
+  goalSetLocks.add(developerId);
+
   try {
     const graph = await getGraphForDeveloper(developerId);
-    const plan = await planGoal(graph, getLlm(), { developerId, wish });
+    const plan = await planGoal(graph, getLlm(), {
+      developerId,
+      wish,
+      ...(goalTopics.length ? { goalTopics } : {}),
+    });
 
     switch (plan.status) {
       case "needs_clarification":
@@ -125,21 +169,34 @@ goalRouter.post("/api/goal", requireAuth, async (req: AuthedRequest, res) => {
       status: "goal",
       goal: {
         id: plan.stored?.goalId ?? null,
+        moveId: plan.stored?.nextMoveId ?? null,
         title: t.title,
         steps: t.steps,
         doneWhen: t.doneWhen,
         why: t.why,
         focus: t.focus,
+        // the approach of the focus topic this move changes; null = adds a new one
+        approach: t.approach,
         targetCapability: t.targetCapability,
         startingPoint: t.startingPoint,
         challenge: t.challenge,
+        decision: {
+          approachSlug: t.decision.approachSlug,
+          capabilityId: t.decision.capabilityId,
+          buildsOnSlugs: t.decision.buildsOnSlugs,
+          gapSlugs: t.decision.gapSlugs,
+          basis: t.decision.basis,
+        },
         evidenceIds: t.evidenceIds,
         saved: plan.stored?.stored ?? false,
+        saveIssues: plan.stored?.rejected ?? [],
       },
       explanation: explain(plan),
     });
   } catch (error) {
     console.error("[goal-route] failed", error);
     return res.status(500).json({ error: "could not generate a goal" });
+  } finally {
+    goalSetLocks.delete(developerId);
   }
 });

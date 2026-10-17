@@ -116,9 +116,13 @@ export interface GraphOperation {
 }
 
 export interface Approach {
+  /** stable id the goal agent copies into decision.approachSlug */
+  slug: string;
   name: string;
   isPrimary: boolean;
   depth: DepthLevel;
+  /** assessor's authenticity verdict for this approach (empty when not stored) */
+  authenticity: string;
   howImplemented: string;
 }
 
@@ -208,6 +212,14 @@ export interface CodeContext {
   excerpt: string;
 }
 
+/** A mission this developer already completed and had verified. The agent must not repeat it. */
+export interface CompletedMove {
+  title: string;
+  /** focus topic of the mission, when the stored mission records one */
+  topicSlug: string;
+  verifiedAt: string;
+}
+
 export type ContextKind =
   | "topic"
   | "assessment"
@@ -283,6 +295,8 @@ export interface GoalGraphResult {
   code: CodeContext[];
   /** the NextMove currently stored for this goal, so the agent does not repeat it */
   previousMove: { title: string; doneWhen: string } | null;
+  /** missions already verified on the topics in this neighbourhood, so the agent does not repeat them */
+  completedMoves: CompletedMove[];
   clarification: {
     reason: string;
     suggestions: Array<{ slug: string; name: string; domain: string }>;
@@ -753,8 +767,10 @@ async function readDepth(
       MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment)-[u:USES_APPROACH]->(ap:Approach)
       WHERE a.topic_slug IN $slugs
       RETURN a.topic_slug AS slug, ap.name AS name,
+             coalesce(ap.slug, u.slug, "") AS approach_slug,
              coalesce(u.is_primary, false) AS is_primary,
              coalesce(u.depth, "") AS depth,
+             coalesce(u.authenticity, "") AS authenticity,
              coalesce(u.how_implemented, "") AS how
       ORDER BY coalesce(u.depth_rank, 0) DESC
       `,
@@ -765,10 +781,14 @@ async function readDepth(
   const byTopic = new Map<string, Approach[]>();
   for (const r of approaches ?? []) {
     const list = byTopic.get(str(r.slug)) ?? [];
+    const name = str(r.name);
     list.push({
-      name: str(r.name),
+      // fall back to a slug derived from the name when the node stores none
+      slug: str(r.approach_slug) || slugify(name),
+      name,
       isPrimary: r.is_primary === true || r.is_primary === "true",
       depth: asLevel(r.depth),
+      authenticity: str(r.authenticity),
       howImplemented: str(r.how).slice(0, 400),
     });
     byTopic.set(str(r.slug), list);
@@ -827,6 +847,48 @@ async function readCoverage(
   }));
 }
 
+/**
+ * Missions this developer completed and had verified, on the topics in this
+ * neighbourhood. The goal agent uses them so it never proposes the same move
+ * twice.
+ *
+ * ADJUST TO YOUR MISSION SCHEMA: this assumes
+ *   (:Developer)-[:HAS_MISSION]->(:Mission {title, verification_state,
+ *   focus_slug, verified_at})
+ * Change the label, relationship and property names below to match what the
+ * mission store actually writes. A wrong name returns zero rows (the agent then
+ * simply has no completed moves); it does not throw.
+ */
+async function readCompletedMoves(
+  graph: Graph,
+  developerId: string,
+  slugs: string[],
+): Promise<CompletedMove[] | null> {
+  const rows = await query(
+    graph,
+    "completed missions",
+    `
+    MATCH (:Developer {id: $dev})-[:HAS_MISSION]->(m:Mission)
+    WHERE m.verification_state = "verified"
+      AND (m.focus_slug IN $slugs OR m.topic_slug IN $slugs)
+    RETURN coalesce(m.title, "") AS title,
+           coalesce(m.focus_slug, m.topic_slug, "") AS topic,
+           coalesce(m.verified_at, m.updated_at, "") AS verified_at
+    ORDER BY verified_at DESC
+    LIMIT 30
+    `,
+    { dev: developerId, slugs },
+  );
+  if (rows === null) return null;
+  return rows
+    .map((r) => ({
+      title: str(r.title).slice(0, 200),
+      topicSlug: str(r.topic),
+      verifiedAt: str(r.verified_at),
+    }))
+    .filter((m) => m.title);
+}
+
 const SKIP_ROLES = ["config", "infra", "dependency_manifest"];
 const GENERIC_PACKAGES = new Set([
   "react",
@@ -848,7 +910,12 @@ function githubLink(repo: string, sha: string, path: string): string {
 }
 
 /**
- * Evidence comes from THREE places, strongest first:
+ * This file only CONSUMES the topic model: it never defines topics, approaches
+ * or depth, and it reads the canonical links written by the other graphs.
+ *
+ * Evidence comes from four places, strongest first:
+ *  0. Demonstrations linked straight to the topic (Demonstration -EVIDENCE_FOR_TOPIC-> Topic),
+ *     which carry a reason and confidence; links below 0.3 confidence are ignored
  *  1. Demonstrations  (Topic -> Capability <- Demonstration -> FileChange)
  *  2. Code the depth assessment itself cites (DepthAssessment -BACKED_BY-> FileChange)
  *  3. For the topics the developer asked about: authored files that match the
@@ -864,7 +931,36 @@ async function readEvidence(
 ): Promise<EvidenceItem[] | null> {
   if (!slugs.length) return [];
 
-  const [demoRows, citedRows, specRows] = await Promise.all([
+  const [linkedRows, demoRows, citedRows, specRows] = await Promise.all([
+    query(
+      graph,
+      "explicit evidence links",
+      `
+      MATCH (:Developer {id: $dev})-[:DEMONSTRATED]->(x:Demonstration)-[l:EVIDENCE_FOR_TOPIC]->(t:Topic)
+      WHERE t.slug IN $slugs AND l.developer_id = $dev AND coalesce(l.confidence, 0) >= 0.3
+      OPTIONAL MATCH (x)-[:OF_CAPABILITY]->(c:Capability)
+      OPTIONAL MATCH (x)-[:IN_REPOSITORY]->(r:Repository)
+      OPTIONAL MATCH (x)-[:EVIDENCED_BY]->(fc:FileChange)
+      RETURN t.slug AS slug, coalesce(c.id, "") AS capability_id,
+             coalesce(c.name, c.id, "") AS capability,
+             x.id AS id,
+             coalesce(x.technique, "") AS technique,
+             coalesce(x.summary, "") AS summary,
+             coalesce(x.depth, "") AS depth,
+             coalesce(x.depth_rank, 0) AS depth_rank,
+             coalesce(r.full_name, r.name, "") AS repository,
+             coalesce(x.path, "") AS path,
+             coalesce(x.commit_sha, "") AS commit_sha,
+             coalesce(x.commit_subject, "") AS commit_subject,
+             coalesce(x.permalink, "") AS permalink,
+             coalesce(fc.id, "") AS file_change_id,
+             coalesce(x.modifiers, "") AS modifiers,
+             coalesce(fc.is_test, false) AS is_test
+      ORDER BY coalesce(l.confidence, 0) DESC, depth_rank DESC
+      LIMIT 400
+      `,
+      { dev: developerId, slugs },
+    ),
     query(
       graph,
       "evidence chain",
@@ -922,7 +1018,8 @@ async function readEvidence(
       { dev: developerId, slugs },
     ),
   ]);
-  if (demoRows === null && citedRows === null) return null;
+  if (demoRows === null && citedRows === null && linkedRows === null)
+    return null;
 
   // the topic's own packages / keywords (from the stored assessment spec)
   const pkgsBy = new Map<string, string[]>();
@@ -979,7 +1076,8 @@ async function readEvidence(
     });
 
   // 1. demonstrations
-  for (const r of demoRows ?? []) {
+  // explicit topic links first; the capability-mediated rows only fill the rest
+  for (const r of [...(linkedRows ?? []), ...(demoRows ?? [])]) {
     if (items.length >= MAX_EVIDENCE) break;
     const slug = str(r.slug);
     const key = `${slug}|${str(r.id)}`;
@@ -1515,6 +1613,7 @@ export async function buildGoalGraph(
       operations,
       code: [],
       previousMove: null,
+      completedMoves: [],
       clarification: {
         reason: `"${wish}" could not be tied to any topic in your knowledge graph reliably.`,
         suggestions: await clarificationSuggestions(graph, developerId),
@@ -1539,26 +1638,29 @@ export async function buildGoalGraph(
   const links = allLinks.filter((l) => inScope.has(l.a) && inScope.has(l.b));
 
   let t0 = Date.now();
-  const [topicRows, depth, coverageRows, evidenceRows] = await Promise.all([
-    query(
-      graph,
-      "topic details",
-      `
+  const [topicRows, depth, coverageRows, evidenceRows, completedRows] =
+    await Promise.all([
+      query(
+        graph,
+        "topic details",
+        `
       MATCH (t:Topic)
       WHERE t.slug IN $slugs
       RETURN t.slug AS slug, t.name AS name, coalesce(t.domain, "") AS domain,
              coalesce(t.description, "") AS description,
              t.foundation_rank AS pr, t.cluster_id AS cl
       `,
-      { slugs },
-    ),
-    readDepth(graph, developerId, slugs),
-    readCoverage(graph, developerId, slugs),
-    readEvidence(graph, developerId, slugs, seeds),
-  ]);
+        { slugs },
+      ),
+      readDepth(graph, developerId, slugs),
+      readCoverage(graph, developerId, slugs),
+      readEvidence(graph, developerId, slugs, seeds),
+      readCompletedMoves(graph, developerId, slugs),
+    ]);
   const readMs = Date.now() - t0;
   const coverage = coverageRows ?? [];
   const evidence = evidenceRows ?? [];
+  const completedMoves = completedRows ?? [];
   const detail = new Map((topicRows ?? []).map((r) => [str(r.slug), r]));
   const present = slugs.filter((s) => detail.has(s));
 
@@ -1580,6 +1682,20 @@ export async function buildGoalGraph(
       "Read evidence: demonstrations (Topic -> Capability <- Demonstration -> FileChange), code the depth assessment cites, and authored files matching the topic's own packages/keywords.",
     status: evidenceRows === null ? "failed" : evidence.length ? "ok" : "empty",
     result: `${evidence.length} evidence item(s) (${demoCount} demonstration(s), ${evidence.length - demoCount} cited/matched code) across ${uniq(evidence.map((e) => e.repository).filter(Boolean)).length} repositor(ies); ${coverage.length} topic-capability mapping(s), ${coverage.filter((c) => c.demonstrations === 0).length} with no demonstration.`,
+    durationMs: readMs,
+  });
+  operations.push({
+    id: "completed",
+    kind: "cypher",
+    purpose:
+      "Read missions this developer already completed and had verified on these topics, so the agent does not propose them again.",
+    status:
+      completedRows === null
+        ? "failed"
+        : completedMoves.length
+          ? "ok"
+          : "empty",
+    result: `${completedMoves.length} verified mission(s).`,
     durationMs: readMs,
   });
 
@@ -1674,6 +1790,7 @@ export async function buildGoalGraph(
     topics: topics.length,
     links: links.length,
     evidence: evidence.length,
+    completed: completedMoves.length,
     nodes: context.nodes.length,
     strengths: signals.strengths.length,
     unproven: signals.unproven.length,
@@ -1694,6 +1811,7 @@ export async function buildGoalGraph(
     operations,
     code,
     previousMove,
+    completedMoves,
     clarification: null,
     truncated,
   };
@@ -2062,10 +2180,13 @@ export function briefForAgent(result: GoalGraphResult): Row {
       rationale: t.depth.rationale || null,
       safeguards: t.depth.safeguards,
       built: t.depth.built,
+      // the agent copies decision.approachSlug from here, so slug must be present
       approaches: t.depth.approaches.map((a) => ({
+        slug: a.slug,
         name: a.name,
         primary: a.isPrimary,
         depth: a.depth,
+        authenticity: a.authenticity || null,
         how: a.howImplemented,
       })),
     })),
@@ -2114,6 +2235,10 @@ export function briefForAgent(result: GoalGraphResult): Row {
       })),
     },
     previousMove: result.previousMove,
+    completedMoves: result.completedMoves.slice(0, 20).map((m) => ({
+      title: m.title,
+      topic: m.topicSlug || null,
+    })),
     code: result.code,
   };
 }

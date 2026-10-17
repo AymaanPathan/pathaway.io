@@ -15,17 +15,18 @@ import {
   CheckCircle2,
   ChevronRight,
   Flame,
+  HelpCircle,
   Layers,
   MessageCircle,
   Play,
   RefreshCw,
   Route as RouteIcon,
   Send,
+  ShieldCheck,
   Sparkles,
-  Target,
   X,
 } from "lucide-react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import {
   AiMessage,
   Blocks,
@@ -34,12 +35,13 @@ import {
   type TraceEvent,
 } from "../compoenents/ChatBlock";
 
-/* -------------------------------------------------------------------------- */
-/* DESIGN TOKENS                                                              */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* DESIGN TOKENS (same theme as before)                                       */
+/* ========================================================================== */
 
 const DISPLAY_FONT = '"Space Grotesk", "Arial Black", sans-serif';
 const BODY_FONT = '"Inter", "Helvetica Neue", sans-serif';
+const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
 const YELLOW = "#F5C542";
 const CORAL = "#F2704F";
@@ -97,20 +99,6 @@ const PALETTE = [
 ];
 const PAGE = 8;
 
-/** How each kind of claim is shown: only "observed" is proof. */
-const CLASS_STYLE: Record<
-  string,
-  { label: string; bg: string; color: string; bar: string }
-> = {
-  observed: { label: "Seen in your code", bg: GREEN, color: WHITE, bar: GREEN },
-  inferred: {
-    label: "Inferred, not seen",
-    bg: YELLOW,
-    color: INK,
-    bar: YELLOW,
-  },
-  association: { label: "Linked only", bg: LAVENDER, color: INK, bar: LINE },
-};
 const PREREQ_STYLE: Record<
   string,
   { label: string; bg: string; color: string }
@@ -124,10 +112,49 @@ const CONF_COLOR: Record<string, string> = {
   medium: YELLOW,
   low: CORAL,
 };
+const AUTH_LABEL: Record<string, string> = {
+  genuine_implementation: "Built it themselves",
+  working_usage: "Working usage",
+  incidental: "Incidental",
+  boilerplate: "Boilerplate",
+  insufficient_evidence: "Insufficient evidence",
+};
 
-/* -------------------------------------------------------------------------- */
+/* kinds of node that can appear in a topic's evidence graph */
+const KIND_META: Record<string, { label: string; color: string }> = {
+  topic: { label: "Topic", color: INK },
+  approach: { label: "Approach", color: LAVENDER },
+  capability: { label: "Capability", color: SKY },
+  repository: { label: "Repository", color: YELLOW },
+  file: { label: "File", color: "#6FC3B2" },
+  code: { label: "Code", color: "#6FC3B2" },
+  commit: { label: "Commit", color: CORAL },
+  demonstration: { label: "Detected build", color: GREEN },
+  experience: { label: "Experience", color: "#E58AB4" },
+  evidence: { label: "Evidence", color: GREEN },
+  mission: { label: "Mission", color: PURPLE },
+  build: { label: "Real work", color: PURPLE },
+  assessment: { label: "Assessment", color: YELLOW },
+  developer: { label: "You", color: PAPER },
+};
+const kindMeta = (k: string) =>
+  KIND_META[k] ?? { label: humanize(k), color: "#d1d5db" };
+const EDGE_LABEL: Record<string, string> = {
+  BUILDS_ON: "builds on",
+  RELATED_TOPIC: "goes with",
+  MAPS_TO: "maps to",
+  USES_APPROACH: "uses approach",
+  BACKED_BY: "backed by",
+  OF_TOPIC: "about",
+  ASSESSED: "assessed",
+  KNOWS_TOPIC: "knows",
+};
+const edgeLabel = (t: string) =>
+  EDGE_LABEL[t] ?? t.toLowerCase().replace(/_/g, " ");
+
+/* ========================================================================== */
 /* HELPERS                                                                    */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
 
 type Obj = Record<string, any>;
 
@@ -135,26 +162,28 @@ const asString = (v: unknown, fallback = "") =>
   v == null ? fallback : String(v);
 const asArray = <T = unknown,>(v: unknown): T[] =>
   Array.isArray(v) ? (v as T[]) : [];
+const asObjects = (v: unknown): Obj[] =>
+  asArray<unknown>(v).filter(
+    (x): x is Obj => !!x && typeof x === "object" && !Array.isArray(x),
+  );
 const num = (v: unknown, d = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : d;
 };
 const cut = (s: string, n: number) =>
   s.length <= n ? s : `${s.slice(0, n - 1)}…`;
-const humanize = (s: string) =>
-  s ? s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()) : "Other";
+function humanize(s: string) {
+  return s
+    ? s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())
+    : "Other";
+}
 const fix = (v: unknown, d = 3) =>
   v == null || !Number.isFinite(Number(v)) ? "–" : Number(v).toFixed(d);
-const looksLikeCode = (s: string) =>
-  /[{};]|=>|\bfunction\b|\bimport\b|\breturn\b/.test(s);
-
-/** One short label for a citation: title, commit, snippet, then path. */
-const citeLabel = (c: Obj): string =>
-  asString(c.title) ||
-  cut(asString(c.commit), 80) ||
-  (c.snippet ? cut(asString(c.snippet).replace(/\s+/g, " "), 80) : "") ||
-  asString(c.path) ||
-  "Cited work";
+const hash = (s: string) => {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h;
+};
 
 function timeAgo(value?: string) {
   if (!value) return "";
@@ -188,11 +217,8 @@ async function getJson<T = Obj>(url: string): Promise<T> {
   return r.data as T;
 }
 
-/** Streams /api/topics/chat/stream (live tool status + streamed answer). Falls back to the plain endpoint. */
-async function chatRequest(
-  body: unknown,
-  onEvent: (e: TraceEvent) => void,
-): Promise<{ ok: boolean; status: number; data: Obj }> {
+/** Streams the chat endpoint (live tool status + streamed answer). Falls back to the plain endpoint. */
+async function chatRequest(body: unknown, onEvent: (e: TraceEvent) => void) {
   try {
     const r = await fetch("/api/topics/chat/stream", {
       method: "POST",
@@ -200,9 +226,12 @@ async function chatRequest(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (r.status === 429) {
-      return { ok: false, status: 429, data: await r.json().catch(() => ({})) };
-    }
+    if (r.status === 429)
+      return {
+        ok: false,
+        status: 429,
+        data: (await r.json().catch(() => ({}))) as Obj,
+      };
     if (r.ok && r.body) {
       const reader = r.body.getReader();
       const dec = new TextDecoder();
@@ -224,24 +253,18 @@ async function chatRequest(
             else if (ev.type === "error") err = ev.error;
             else onEvent(ev as TraceEvent);
           } catch {
-            /* ignore partial line */
+            /* partial line */
           }
         }
       }
       if (final) return { ok: true, status: 200, data: final };
-      if (err) return { ok: false, status: 500, data: { error: err } };
+      if (err) return { ok: false, status: 500, data: { error: err } as Obj };
     }
   } catch {
     /* fall back below */
   }
   return call("/api/topics/chat", "POST", body);
 }
-
-const hash = (s: string) => {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return h;
-};
 
 function stepOf(job: Obj | null): number {
   if (!job) return -1;
@@ -264,52 +287,81 @@ function stepOf(job: Obj | null): number {
   }
 }
 
-/**
- * What is NOT established for a topic. Prefers the server's `limitations`
- * (built from the stored assessment); otherwise derives them from fields the
- * detail response already carries. Never invents evidence.
- */
-function limitationsOf(detail: Obj | null): string[] {
-  if (!detail) return [];
-  const fromServer = asArray<string>(detail.limitations).filter(Boolean);
-  if (fromServer.length) return fromServer;
-  const out: string[] = [];
-  out.push(...asArray<string>(detail.gaps));
-  const t = (detail.topic ?? {}) as Obj;
-  if (t.confidence === "low")
-    out.push("Confidence is low: there is little evidence behind this level.");
-  if (t.authenticity && t.authenticity !== "genuine_implementation")
-    out.push(
-      `Authenticity is "${humanize(asString(t.authenticity)).toLowerCase()}", so this is not shown as something the developer built.`,
-    );
-  if (t.fallback)
-    out.push("No model judgement was available; the graph baseline decided.");
-  if (num(t.evidence?.commits) <= 1 && num(t.evidence?.files) > 0)
-    out.push("Only one commit touches this topic.");
-  const paths = asArray<Obj>(detail.capabilityPaths);
-  if (paths.length && paths.every((p) => num(p.demonstrations) === 0))
-    out.push(
-      "Mapped capabilities have no demonstrations for this developer; mappings are taxonomy, not proof.",
-    );
-  return out.slice(0, 8);
+interface EvItem {
+  kind: string;
+  title: string;
+  path: string;
+  repository: string;
+  commit: string;
+  permalink: string;
+  snippet: string;
+  when: string;
+}
+const toEv = (e: Obj): EvItem => ({
+  kind: asString(e.kind),
+  title: asString(
+    e.title ?? e.subject ?? e.technique ?? e.label ?? e.what ?? "",
+  ),
+  path: asString(e.path),
+  repository: asString(e.repository ?? e.repo),
+  commit: asString(e.commit ?? e.commitSubject),
+  permalink: asString(e.permalink),
+  snippet: asString(e.snippet ?? e.code ?? e.excerpt),
+  when: asString(e.createdAt ?? e.date ?? e.when),
+});
+const hasEv = (e: EvItem) =>
+  Boolean(e.title || e.path || e.permalink || e.snippet || e.commit);
+function dedupeEv(list: EvItem[]): EvItem[] {
+  const seen = new Set<string>();
+  return list.filter((e) => {
+    if (!hasEv(e)) return false;
+    const key =
+      e.permalink || [e.repository, e.path, e.title, e.commit].join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+function approachEvidence(a: Obj, all: Obj[]): EvItem[] {
+  const own = asObjects(
+    a.evidence ?? a.evidenceItems ?? a.citations ?? a.cited,
+  ).map(toEv);
+  const slug = asString(a.slug);
+  const linked = all
+    .filter(
+      (e) =>
+        asString(e.approach) === slug ||
+        asArray<string>(e.approaches).includes(slug),
+    )
+    .map(toEv);
+  return dedupeEv([...own, ...linked]);
+}
+function claimsOf(detail: Obj | null) {
+  const c = (detail?.trace?.claims ?? {}) as Obj;
+  return {
+    observed: asObjects(c.observed),
+    inferred: asObjects(c.inferred),
+    unknown: asObjects(c.unknown),
+  };
 }
 
-/* -------------------------------------------------------------------------- */
-/* GRAPH LAYOUT: domain-anchored force layout, normalised to fill the canvas  */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* MAIN KNOWLEDGE GRAPH LAYOUTS                                               */
+/* ========================================================================== */
 
 const GW = 1000;
 const GH = 600;
 const PADX = 110;
 const PADY = 70;
+type Pt = { x: number; y: number };
 
-function layout(nodes: Obj[], edges: Obj[]) {
+/** "areas": force layout, pulled toward an anchor per engineering domain. */
+function layoutAreas(nodes: Obj[], edges: Obj[]) {
   const n = nodes.length;
-  const out = new Map<string, { x: number; y: number }>();
+  const out = new Map<string, Pt>();
   if (!n) return out;
-
   const domains = [...new Set(nodes.map((x) => asString(x.domain)))];
-  const anchor = new Map<string, { x: number; y: number }>();
+  const anchor = new Map<string, Pt>();
   domains.forEach((d, i) => {
     const a = (i / Math.max(1, domains.length)) * Math.PI * 2 - Math.PI / 2;
     anchor.set(d, {
@@ -317,12 +369,8 @@ function layout(nodes: Obj[], edges: Obj[]) {
       y: GH / 2 + Math.sin(a) * GH * 0.3,
     });
   });
-
   const ids = nodes.map((x) => asString(x.id));
-  const pos = new Map<
-    string,
-    { x: number; y: number; vx: number; vy: number }
-  >();
+  const pos = new Map<string, Pt & { vx: number; vy: number }>();
   nodes.forEach((nd, i) => {
     const an = anchor.get(asString(nd.domain))!;
     const h = hash(ids[i]);
@@ -336,11 +384,10 @@ function layout(nodes: Obj[], edges: Obj[]) {
   const links = edges.filter(
     (e) => pos.has(asString(e.source)) && pos.has(asString(e.target)),
   );
-
   const iters = 320;
   for (let it = 0; it < iters; it++) {
     const cool = 1 - it / iters;
-    for (let i = 0; i < n; i++) {
+    for (let i = 0; i < n; i++)
       for (let j = i + 1; j < n; j++) {
         const a = pos.get(ids[i])!;
         const b = pos.get(ids[j])!;
@@ -354,7 +401,6 @@ function layout(nodes: Obj[], edges: Obj[]) {
         b.vx -= (dx / d) * f;
         b.vy -= (dy / d) * f;
       }
-    }
     for (const e of links) {
       const a = pos.get(asString(e.source))!;
       const b = pos.get(asString(e.target))!;
@@ -378,7 +424,6 @@ function layout(nodes: Obj[], edges: Obj[]) {
       p.y += p.vy;
     });
   }
-
   let minX = Infinity,
     maxX = -Infinity,
     minY = Infinity,
@@ -391,20 +436,818 @@ function layout(nodes: Obj[], edges: Obj[]) {
   }
   const rx = maxX - minX;
   const ry = maxY - minY;
-  for (const [k, p] of pos) {
+  for (const [k, p] of pos)
     out.set(k, {
       x: rx < 1 ? GW / 2 : PADX + ((p.x - minX) / rx) * (GW - PADX * 2),
       y: ry < 1 ? GH / 2 : PADY + ((p.y - minY) / ry) * (GH - PADY * 2),
     });
-  }
   return out;
 }
 
-/* -------------------------------------------------------------------------- */
-/* CHAT: local fallback answerer (used if /api/topics/chat isn't available)   */
-/* Every answer is read from graph data already loaded; if the graph does not */
-/* establish something, it says so.                                           */
-/* -------------------------------------------------------------------------- */
+/** "layers": rows by depth level (deep on top), sorted by area inside each row. */
+function layoutLayers(nodes: Obj[]) {
+  const out = new Map<string, Pt>();
+  const rank = (n: Obj) =>
+    n.assessed ? (LEVEL_RANK[asString(n.level)] ?? 0) : -1;
+  const ranks = [...new Set(nodes.map(rank))].sort((a, b) => b - a);
+  const bands: Array<{ rank: number; y: number }> = [];
+  ranks.forEach((r, ri) => {
+    const y =
+      ranks.length === 1 ? GH / 2 : 80 + (ri / (ranks.length - 1)) * (GH - 160);
+    bands.push({ rank: r, y });
+    const row = nodes
+      .filter((n) => rank(n) === r)
+      .sort(
+        (a, b) =>
+          asString(a.domain).localeCompare(asString(b.domain)) ||
+          asString(a.label).localeCompare(asString(b.label)),
+      );
+    row.forEach((n, i) => {
+      const x =
+        row.length === 1 ? GW / 2 : 150 + (i / (row.length - 1)) * (GW - 230);
+      out.set(asString(n.id), { x, y: y + (i % 2 ? 14 : -14) });
+    });
+  });
+  return { pos: out, bands };
+}
+
+/* ========================================================================== */
+/* PER-TOPIC EVIDENCE GRAPH (topic in the middle, everything it touches around) */
+/* ========================================================================== */
+
+interface GNode {
+  id: string;
+  label: string;
+  kind: string;
+  hop: number;
+  level?: string;
+  note?: string;
+  permalink?: string;
+  slug?: string;
+  assessed?: boolean;
+}
+interface GEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  note?: string;
+}
+
+/** Builds the ego graph from the graph payload, or from the topic detail if the payload is unavailable. */
+function buildEgo(
+  slug: string,
+  detail: Obj,
+  payload: Obj | null,
+): { nodes: GNode[]; edges: GEdge[]; centerId: string } {
+  const centerId = `topic:${slug}`;
+  const name = asString(detail.topic?.name) || humanize(slug);
+  const nodes = new Map<string, GNode>();
+  const edges: GEdge[] = [];
+  const addNode = (n: GNode) => {
+    if (!nodes.has(n.id)) nodes.set(n.id, n);
+  };
+  const addEdge = (source: string, target: string, type: string, note = "") => {
+    const id = `${type}:${source}>${target}`;
+    if (!edges.some((e) => e.id === id))
+      edges.push({ id, source, target, type, note });
+  };
+
+  const pNodes = asObjects(payload?.nodes);
+  const pEdges = asObjects(payload?.edges);
+  if (pNodes.length > 1 && pEdges.length > 0) {
+    const centerGuess =
+      pNodes.find((n) => asString(n.id) === centerId) ??
+      pNodes.find(
+        (n) => asString(n.slug) === slug && asString(n.kind) === "topic",
+      ) ??
+      pNodes.find((n) => asString(n.slug) === slug);
+    const cid = centerGuess ? asString(centerGuess.id) : centerId;
+    for (const n of pNodes) {
+      const id = asString(n.id);
+      if (!id) continue;
+      addNode({
+        id,
+        label: asString(n.label ?? n.name ?? id.replace(/^[a-z_]+:/, "")),
+        kind: asString(n.kind, id.includes(":") ? id.split(":")[0] : "topic"),
+        hop: 99,
+        level: asString(n.level) || undefined,
+        note: asString(n.note ?? n.description) || undefined,
+        permalink: asString(n.permalink) || undefined,
+        slug:
+          asString(n.slug) ||
+          (id.startsWith("topic:") ? id.slice(6) : undefined),
+        assessed: n.assessed === true,
+      });
+    }
+    if (!nodes.has(cid))
+      addNode({ id: cid, label: name, kind: "topic", hop: 0, slug });
+    for (const e of pEdges) {
+      const s = asString(e.source);
+      const t = asString(e.target);
+      if (nodes.has(s) && nodes.has(t) && s !== t)
+        addEdge(s, t, asString(e.type, "LINKED"), asString(e.note ?? e.reason));
+    }
+    return finishEgo(nodes, edges, cid, detail);
+  }
+
+  /* fallback: assemble the neighbourhood from the topic detail */
+  addNode({
+    id: centerId,
+    label: name,
+    kind: "topic",
+    hop: 0,
+    slug,
+    level: asString(detail.topic?.level),
+    assessed: true,
+  });
+  for (const a of asObjects(detail.approaches)) {
+    const id = `approach:${asString(a.slug)}`;
+    addNode({
+      id,
+      label: asString(a.name ?? a.slug),
+      kind: "approach",
+      hop: 1,
+      level: asString(a.depth),
+      note: asString(a.howImplemented),
+    });
+    addEdge(centerId, id, "USES_APPROACH");
+  }
+  const g = (detail.graph ?? {}) as Obj;
+  for (const f of asObjects(g.foundations)) {
+    const id = `topic:${asString(f.slug)}`;
+    addNode({
+      id,
+      label: asString(f.name ?? f.slug),
+      kind: "topic",
+      hop: 1,
+      slug: asString(f.slug),
+      level: asString(f.level),
+      assessed: f.assessed !== false,
+    });
+    addEdge(centerId, id, "BUILDS_ON", asString(f.reason));
+  }
+  for (const f of asObjects(g.unlocks)) {
+    const id = `topic:${asString(f.slug)}`;
+    addNode({
+      id,
+      label: asString(f.name ?? f.slug),
+      kind: "topic",
+      hop: 1,
+      slug: asString(f.slug),
+      level: asString(f.level),
+      assessed: f.assessed !== false,
+    });
+    addEdge(id, centerId, "BUILDS_ON", asString(f.reason));
+  }
+  for (const f of asObjects(g.related)) {
+    const id = `topic:${asString(f.slug)}`;
+    addNode({
+      id,
+      label: asString(f.name ?? f.slug),
+      kind: "topic",
+      hop: 1,
+      slug: asString(f.slug),
+      level: asString(f.level),
+      assessed: f.assessed !== false,
+    });
+    addEdge(centerId, id, "RELATED_TOPIC", asString(f.reason));
+  }
+  for (const c of asObjects(detail.capabilityPaths)) {
+    const id = `capability:${asString(c.capabilityId ?? c.capability)}`;
+    addNode({
+      id,
+      label: asString(c.capability ?? c.capabilityId),
+      kind: "capability",
+      hop: 1,
+    });
+    addEdge(centerId, id, "MAPS_TO");
+  }
+  for (const e of asObjects(detail.trace?.supportingEvidence).slice(0, 10)) {
+    const id = `evidence:${asString(e.evidenceId)}`;
+    addNode({
+      id,
+      label: cut(asString(e.source), 40),
+      kind: asString(e.kind, "evidence"),
+      hop: 2,
+      permalink: asString(e.permalink) || undefined,
+      note: asString(e.supports),
+    });
+    addEdge(centerId, id, "BACKED_BY");
+  }
+  return finishEgo(nodes, edges, centerId, detail);
+}
+
+function finishEgo(
+  nodes: Map<string, GNode>,
+  edges: GEdge[],
+  centerId: string,
+  detail: Obj,
+) {
+  const center = nodes.get(centerId);
+  if (center) {
+    center.hop = 0;
+    center.kind = "topic";
+    center.level = asString(detail.topic?.level) || center.level;
+    center.assessed = true;
+  }
+  const adj = new Map<string, string[]>();
+  for (const e of edges) {
+    adj.set(e.source, [...(adj.get(e.source) ?? []), e.target]);
+    adj.set(e.target, [...(adj.get(e.target) ?? []), e.source]);
+  }
+  const seen = new Set([centerId]);
+  let frontier = [centerId];
+  let hop = 0;
+  while (frontier.length && hop < 3) {
+    hop++;
+    const next: string[] = [];
+    for (const id of frontier)
+      for (const m of adj.get(id) ?? []) {
+        if (seen.has(m)) continue;
+        seen.add(m);
+        const nd = nodes.get(m);
+        if (nd) nd.hop = hop;
+        next.push(m);
+      }
+    frontier = next;
+  }
+  /* keep the picture readable: closest nodes first, cap at 44 */
+  const kept = [...nodes.values()]
+    .filter((n) => n.hop <= 3)
+    .sort((a, b) => a.hop - b.hop || a.kind.localeCompare(b.kind))
+    .slice(0, 44);
+  const keep = new Set(kept.map((n) => n.id));
+  return {
+    nodes: kept,
+    edges: edges.filter((e) => keep.has(e.source) && keep.has(e.target)),
+    centerId,
+  };
+}
+
+const EGO_W = 1000;
+const EGO_H = 620;
+
+function egoLayout(nodes: GNode[], edges: GEdge[], centerId: string) {
+  const out = new Map<string, Pt & { angle: number }>();
+  const cx = EGO_W / 2;
+  const cy = EGO_H / 2;
+  out.set(centerId, { x: cx, y: cy, angle: 0 });
+  const ring: Record<number, [number, number]> = {
+    1: [250, 165],
+    2: [430, 262],
+    3: [470, 285],
+  };
+  const byHop = (h: number) =>
+    nodes
+      .filter((n) => n.hop === h)
+      .sort(
+        (a, b) =>
+          a.kind.localeCompare(b.kind) || a.label.localeCompare(b.label),
+      );
+
+  const first = byHop(1);
+  first.forEach((n, i) => {
+    const a = (i / Math.max(1, first.length)) * Math.PI * 2 - Math.PI / 2;
+    out.set(n.id, {
+      x: cx + Math.cos(a) * ring[1][0],
+      y: cy + Math.sin(a) * ring[1][1],
+      angle: a,
+    });
+  });
+
+  for (const h of [2, 3]) {
+    const layer = byHop(h);
+    const kids = new Map<string, GNode[]>();
+    for (const n of layer) {
+      const parent =
+        edges
+          .map((e) =>
+            e.source === n.id ? e.target : e.target === n.id ? e.source : null,
+          )
+          .find((id) => id && nodes.find((x) => x.id === id)?.hop === h - 1) ??
+        centerId;
+      kids.set(parent, [...(kids.get(parent) ?? []), n]);
+    }
+    let orphan = 0;
+    for (const [parent, list] of kids) {
+      const base = out.get(parent)?.angle ?? -Math.PI / 2 + orphan++ * 0.7;
+      const spread = Math.min(0.9, 0.2 * list.length);
+      list.forEach((n, i) => {
+        const a =
+          list.length === 1
+            ? base
+            : base - spread / 2 + (i / (list.length - 1)) * spread;
+        out.set(n.id, {
+          x: cx + Math.cos(a) * ring[h][0],
+          y: cy + Math.sin(a) * ring[h][1],
+          angle: a,
+        });
+      });
+    }
+  }
+  /* anything unreachable sits on the outer ring */
+  nodes
+    .filter((n) => !out.has(n.id))
+    .forEach((n, i, arr) => {
+      const a = (i / Math.max(1, arr.length)) * Math.PI * 2;
+      out.set(n.id, {
+        x: cx + Math.cos(a) * 470,
+        y: cy + Math.sin(a) * 285,
+        angle: a,
+      });
+    });
+  return out;
+}
+
+function EvidenceGraph({
+  slug,
+  detail,
+  onPick,
+}: {
+  slug: string;
+  detail: Obj;
+  onPick: (slug: string) => void;
+}) {
+  const [payload, setPayload] = useState<Obj | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [hover, setHover] = useState<string | null>(null);
+  const [active, setActive] = useState<string | null>(null);
+  const [hiddenKinds, setHiddenKinds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    setActive(null);
+    getJson(`/api/topics/${encodeURIComponent(slug)}/graph`)
+      .then((p) => live && setPayload(p))
+      .catch(() => live && setPayload(null))
+      .finally(() => live && setLoading(false));
+    return () => {
+      live = false;
+    };
+  }, [slug]);
+
+  const ego = useMemo(
+    () => buildEgo(slug, detail, payload),
+    [slug, detail, payload],
+  );
+  const visibleNodes = useMemo(
+    () => ego.nodes.filter((n) => n.hop === 0 || !hiddenKinds.has(n.kind)),
+    [ego, hiddenKinds],
+  );
+  const visibleIds = useMemo(
+    () => new Set(visibleNodes.map((n) => n.id)),
+    [visibleNodes],
+  );
+  const visibleEdges = useMemo(
+    () =>
+      ego.edges.filter(
+        (e) => visibleIds.has(e.source) && visibleIds.has(e.target),
+      ),
+    [ego, visibleIds],
+  );
+  const pos = useMemo(
+    () => egoLayout(visibleNodes, visibleEdges, ego.centerId),
+    [visibleNodes, visibleEdges, ego.centerId],
+  );
+
+  const kindCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    ego.nodes
+      .filter((n) => n.hop > 0)
+      .forEach((n) => (m[n.kind] = (m[n.kind] ?? 0) + 1));
+    return m;
+  }, [ego]);
+
+  const focus = hover ?? active;
+  const focusSet = useMemo(() => {
+    if (!focus) return null;
+    const s = new Set([focus]);
+    for (const e of visibleEdges) {
+      if (e.source === focus) s.add(e.target);
+      if (e.target === focus) s.add(e.source);
+    }
+    return s;
+  }, [focus, visibleEdges]);
+
+  const activeNode = ego.nodes.find((n) => n.id === active) ?? null;
+  const activeEdges = activeNode
+    ? visibleEdges.filter(
+        (e) => e.source === activeNode.id || e.target === activeNode.id,
+      )
+    : [];
+  const nameOf = (id: string) =>
+    ego.nodes.find((n) => n.id === id)?.label ?? id;
+  const hoverNode = hover ? ego.nodes.find((n) => n.id === hover) : null;
+  const hp = hover ? pos.get(hover) : null;
+  const maxHop = Math.max(0, ...ego.nodes.map((n) => n.hop));
+
+  const toggleKind = (k: string) =>
+    setHiddenKinds((s) => {
+      const n = new Set(s);
+      if (n.has(k)) n.delete(k);
+      else n.add(k);
+      return n;
+    });
+
+  return (
+    <div
+      className="rounded-2xl"
+      style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(4) }}
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-3">
+        <div>
+          <h3
+            className="text-[16px] font-black"
+            style={{ fontFamily: DISPLAY_FONT }}
+          >
+            Evidence graph
+          </h3>
+          <p className="text-[12px] font-semibold text-neutral-700">
+            {visibleNodes.length - 1} connected nodes, up to {maxHop} step
+            {maxHop === 1 ? "" : "s"} from {asString(detail.topic?.name)}. Tap
+            any node.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {Object.entries(kindCounts).map(([k, n]) => {
+            const off = hiddenKinds.has(k);
+            return (
+              <button
+                key={k}
+                type="button"
+                onClick={() => toggleKind(k)}
+                className="press inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+                style={{
+                  backgroundColor: off ? CARD : WHITE,
+                  opacity: off ? 0.55 : 1,
+                  ...border,
+                }}
+              >
+                <span
+                  className="h-2.5 w-2.5 rounded-full"
+                  style={{
+                    backgroundColor: kindMeta(k).color,
+                    border: `1.5px solid ${INK}`,
+                  }}
+                />
+                {kindMeta(k).label} {n}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="relative mt-1 h-[520px] overflow-hidden sm:h-[600px]">
+        {loading && (
+          <div className="absolute left-4 top-2 z-10 flex items-center gap-2 text-[12px] font-bold">
+            <RefreshCw size={13} className="animate-spin" /> reading the graph…
+          </div>
+        )}
+        <svg
+          viewBox={`0 0 ${EGO_W} ${EGO_H}`}
+          className="absolute inset-0 h-full w-full"
+          role="group"
+          aria-label="Evidence graph for this topic"
+        >
+          <defs>
+            <pattern
+              id="egrid"
+              width="32"
+              height="32"
+              patternUnits="userSpaceOnUse"
+            >
+              <circle cx="1" cy="1" r="1" fill={INK} opacity=".12" />
+            </pattern>
+            <marker
+              id="earrow"
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth="6"
+              markerHeight="6"
+              orient="auto-start-reverse"
+            >
+              <path d="M0,0 L10,5 L0,10 z" fill={INK} />
+            </marker>
+          </defs>
+          <rect width={EGO_W} height={EGO_H} fill="url(#egrid)" />
+          {[1, 2, 3]
+            .filter((h) => h <= maxHop)
+            .map((h) => (
+              <ellipse
+                key={h}
+                cx={EGO_W / 2}
+                cy={EGO_H / 2}
+                rx={[0, 250, 430, 470][h]}
+                ry={[0, 165, 262, 285][h]}
+                fill="none"
+                stroke={INK}
+                strokeOpacity=".12"
+                strokeDasharray="4 6"
+              />
+            ))}
+
+          {visibleEdges.map((e, i) => {
+            const a = pos.get(e.source);
+            const b = pos.get(e.target);
+            const na = visibleNodes.find((n) => n.id === e.source);
+            const nb = visibleNodes.find((n) => n.id === e.target);
+            if (!a || !b || !na || !nb) return null;
+            const ra = na.hop === 0 ? 38 : na.hop === 1 ? 24 : 17;
+            const rb = nb.hop === 0 ? 38 : nb.hop === 1 ? 24 : 17;
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const d = Math.max(Math.hypot(dx, dy), 1);
+            const x1 = a.x + (dx / d) * ra;
+            const y1 = a.y + (dy / d) * ra;
+            const x2 = b.x - (dx / d) * (rb + 4);
+            const y2 = b.y - (dy / d) * (rb + 4);
+            const touch = focus && (e.source === focus || e.target === focus);
+            const dim = focusSet && !touch;
+            const directed =
+              e.type === "BUILDS_ON" ||
+              e.type === "USES_APPROACH" ||
+              e.type === "BACKED_BY";
+            return (
+              <g
+                key={e.id}
+                style={{
+                  opacity: dim ? 0.07 : touch ? 1 : 0.5,
+                  transition: "opacity .3s ease",
+                }}
+              >
+                <line
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke={touch ? CORAL : INK}
+                  strokeWidth={touch ? 3 : 1.5}
+                  strokeDasharray={
+                    e.type === "RELATED_TOPIC" ? "5 5" : undefined
+                  }
+                  markerEnd={directed ? "url(#earrow)" : undefined}
+                  pathLength={1}
+                  style={{
+                    transition: "stroke-width .2s ease",
+                    animation: `odraw .8s ${Math.min(i, 30) * 0.03}s ease-out both`,
+                  }}
+                />
+                {touch && (
+                  <text
+                    x={(x1 + x2) / 2}
+                    y={(y1 + y2) / 2 - 6}
+                    textAnchor="middle"
+                    fontSize="11"
+                    fontWeight={800}
+                    fontFamily={BODY_FONT}
+                    style={{
+                      fill: INK,
+                      paintOrder: "stroke",
+                      stroke: WHITE,
+                      strokeWidth: 4,
+                    }}
+                  >
+                    {edgeLabel(e.type)}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+          {visibleNodes.map((n, i) => {
+            const p = pos.get(n.id);
+            if (!p) return null;
+            const r = n.hop === 0 ? 38 : n.hop === 1 ? 24 : 17;
+            const fill =
+              n.kind === "topic"
+                ? (LEVEL_COLOR[n.level ?? ""] ?? (n.hop === 0 ? INK : CARD))
+                : kindMeta(n.kind).color;
+            const dim = focusSet ? !focusSet.has(n.id) : false;
+            const sel = active === n.id;
+            const unassessed =
+              n.kind === "topic" && n.hop > 0 && n.assessed === false;
+            return (
+              <g
+                key={n.id}
+                tabIndex={0}
+                role="button"
+                aria-label={`${kindMeta(n.kind).label}: ${n.label}`}
+                onClick={() => setActive(sel ? null : n.id)}
+                onKeyDown={(ev) => {
+                  if (ev.key === "Enter" || ev.key === " ") {
+                    ev.preventDefault();
+                    setActive(sel ? null : n.id);
+                  }
+                }}
+                onMouseEnter={() => setHover(n.id)}
+                onMouseLeave={() => setHover(null)}
+                onFocus={() => setHover(n.id)}
+                onBlur={() => setHover(null)}
+                style={{
+                  cursor: "pointer",
+                  opacity: dim ? 0.15 : 1,
+                  transition: "opacity .3s ease",
+                }}
+              >
+                <g
+                  style={{
+                    transformOrigin: `${p.x}px ${p.y}px`,
+                    animation: `opop .5s ${Math.min(i, 40) * 0.025}s cubic-bezier(.2,1.4,.4,1) both`,
+                  }}
+                >
+                  {n.hop === 0 && (
+                    <circle
+                      cx={p.x}
+                      cy={p.y}
+                      r={r + 9}
+                      fill="none"
+                      stroke={CORAL}
+                      strokeWidth="3"
+                      style={{ animation: "oring 2.4s ease-out infinite" }}
+                    />
+                  )}
+                  {sel && (
+                    <circle
+                      cx={p.x}
+                      cy={p.y}
+                      r={r + 7}
+                      fill="none"
+                      stroke={YELLOW}
+                      strokeWidth="4"
+                    />
+                  )}
+                  <circle
+                    cx={p.x}
+                    cy={p.y}
+                    r={r}
+                    fill={fill}
+                    strokeDasharray={unassessed ? "4 3" : undefined}
+                    style={{
+                      stroke: INK,
+                      strokeWidth: sel || n.hop === 0 ? 4 : 2.5,
+                      filter: "drop-shadow(2px 3px 0 rgba(16,18,16,.9))",
+                      transition: "stroke-width .2s ease",
+                    }}
+                  />
+                  <text
+                    x={p.x}
+                    y={n.hop === 0 ? p.y + r + 20 : p.y + r + 14}
+                    textAnchor="middle"
+                    fontSize={n.hop === 0 ? 16 : n.hop === 1 ? 12 : 11}
+                    fontWeight={n.hop === 0 ? 900 : 700}
+                    fontFamily={n.hop === 0 ? DISPLAY_FONT : BODY_FONT}
+                    style={{
+                      fill: INK,
+                      paintOrder: "stroke",
+                      stroke: "#FFFDF8",
+                      strokeWidth: 5,
+                      strokeLinejoin: "round",
+                    }}
+                  >
+                    {cut(n.label, n.hop === 0 ? 28 : 20)}
+                  </text>
+                </g>
+              </g>
+            );
+          })}
+        </svg>
+
+        {hoverNode && hp && (
+          <div
+            className="pointer-events-none absolute z-20 max-w-[220px] rounded-xl px-2.5 py-1.5 text-[12px] leading-4"
+            style={{
+              left: `${(hp.x / EGO_W) * 100}%`,
+              top: `${(hp.y / EGO_H) * 100}%`,
+              transform: `translate(${hp.x > EGO_W * 0.65 ? "-110%" : "14px"}, -50%)`,
+              backgroundColor: INK,
+              color: PAPER,
+            }}
+          >
+            <div className="font-black">{hoverNode.label}</div>
+            <div className="opacity-80">
+              {kindMeta(hoverNode.kind).label}
+              {hoverNode.level
+                ? ` · ${LEVEL_LABEL[hoverNode.level] ?? hoverNode.level}`
+                : ""}
+              {hoverNode.hop > 0
+                ? ` · ${hoverNode.hop} step${hoverNode.hop === 1 ? "" : "s"} away`
+                : ""}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div
+        className="px-4 pb-4 pt-2"
+        style={{ borderTop: `1px solid ${LINE}` }}
+      >
+        {activeNode ? (
+          <div
+            className="flex flex-wrap items-start justify-between gap-3"
+            style={{ animation: "oslide .25s ease-out both" }}
+          >
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Chip
+                  text={kindMeta(activeNode.kind).label}
+                  background={kindMeta(activeNode.kind).color}
+                  color={
+                    activeNode.kind === "topic" && activeNode.hop === 0
+                      ? WHITE
+                      : INK
+                  }
+                />
+                <span
+                  className="text-[15px] font-black"
+                  style={{ fontFamily: DISPLAY_FONT }}
+                >
+                  {activeNode.label}
+                </span>
+              </div>
+              {activeNode.note && (
+                <p className="mt-1 max-w-2xl text-[13px] leading-5 text-neutral-900">
+                  {cut(activeNode.note, 240)}
+                </p>
+              )}
+              <ul className="mt-1.5 space-y-0.5">
+                {activeEdges.slice(0, 6).map((e) => (
+                  <li key={e.id} className="text-[12px] leading-4">
+                    <b>{nameOf(e.source)}</b>{" "}
+                    <span
+                      className="rounded-full px-1.5 text-[10px] font-black"
+                      style={{
+                        backgroundColor: LAVENDER,
+                        border: `1.5px solid ${INK}`,
+                      }}
+                    >
+                      {edgeLabel(e.type)}
+                    </span>{" "}
+                    <b>{nameOf(e.target)}</b>
+                    {e.note ? (
+                      <span className="text-neutral-700">
+                        {" "}
+                        · {cut(e.note, 90)}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {activeNode.kind === "topic" &&
+                activeNode.slug &&
+                activeNode.hop > 0 &&
+                activeNode.assessed !== false && (
+                  <Btn
+                    onClick={() => onPick(activeNode.slug as string)}
+                    bg={YELLOW}
+                  >
+                    Open topic <ChevronRight size={12} strokeWidth={3} />
+                  </Btn>
+                )}
+              {activeNode.permalink && (
+                <a
+                  href={activeNode.permalink}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="press inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-black"
+                  style={{ backgroundColor: GREEN, color: WHITE, ...border }}
+                >
+                  View the code
+                </a>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[12px] font-semibold">
+            <span className="flex items-center gap-1.5">
+              <span className="h-0.5 w-5" style={{ backgroundColor: INK }} />{" "}
+              arrow = depends on / uses / backed by
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span
+                className="h-0.5 w-5"
+                style={{ borderTop: `2px dashed ${INK}` }}
+              />{" "}
+              goes with
+            </span>
+            <span className="text-neutral-700">
+              Rings show distance from the topic. Filter by kind with the chips
+              above.
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ========================================================================== */
+/* CHAT (local fallback only)                                                 */
+/* ========================================================================== */
 
 type ChatMsg = {
   id: number;
@@ -418,297 +1261,85 @@ type ChatMsg = {
   tools?: Obj[];
   mode?: string;
   meta?: Obj;
-  /** answer is still streaming in */
   pending?: boolean;
-  /** live tool chips while pending */
   steps?: LiveStep[];
 };
+type ChatCtx = { nodes: Obj[]; sel: string | null; detail: Obj | null };
 
-type ChatCtx = {
-  nodes: Obj[];
-  overview: Obj | null;
-  relations: Obj | null;
-  sel: string | null;
-  detail: Obj | null;
-};
-
-function rankNodes(nodes: Obj[]) {
-  return nodes
+function localAnswer(q: string, c: ChatCtx): { text: string; slugs: string[] } {
+  const s = q.toLowerCase();
+  const assessed = c.nodes
     .filter((n) => n.assessed)
     .sort(
       (a, b) =>
         (LEVEL_RANK[asString(b.level)] ?? 0) -
-          (LEVEL_RANK[asString(a.level)] ?? 0) ||
-        num(b.score, num(b.size)) - num(a.score, num(a.size)),
+          (LEVEL_RANK[asString(a.level)] ?? 0) || num(b.score) - num(a.score),
     );
-}
-
-function localAnswer(q: string, c: ChatCtx): { text: string; slugs: string[] } {
-  const s = q.toLowerCase();
-  const assessed = rankNodes(c.nodes);
-  const hl = (c.overview?.highlights ?? {}) as Obj;
-  const stats = (c.overview?.stats ?? {}) as Obj;
-  const summary = c.overview?.summary as Obj | null;
-  const names = (list: Obj[]) =>
-    list.map((x) => asString(x.name ?? x.label)).join(", ");
-  const slugsOf = (list: Obj[]) =>
-    list.map((x) => asString(x.slug)).filter(Boolean);
-
-  // which topic is the question about: named in the text, else the selected one
   const named = assessed.find((n) => {
     const l = asString(n.label).toLowerCase();
     return l.length > 2 && s.includes(l);
   });
-  const focusSlug = named ? asString(named.slug) : c.sel;
-  const d = focusSlug && c.sel === focusSlug ? c.detail : null;
-  const focusNode = assessed.find((n) => asString(n.slug) === focusSlug);
-  const focusName = asString(focusNode?.label ?? d?.topic?.name ?? focusSlug);
-  const focusSlugs = focusSlug ? [focusSlug] : [];
-
-  const needDetail = (): { text: string; slugs: string[] } => ({
-    text: focusSlug
-      ? `Open ${focusName} in the Topic tab first so I can read its evidence from the graph.`
-      : "Select a topic in the constellation and I can show the evidence behind it.",
-    slugs: focusSlugs,
-  });
-
-  // evidence / why
-  if (
-    /evidence|support|why|prove|proof|demonstrat|justif|rated|rate\b/.test(s)
-  ) {
-    if (!d) return needDetail();
-    const proof = asArray<Obj>(d.proof);
-    const seen = proof.filter((p) => p.class === "observed");
-    const inferred = proof.filter((p) => p.class === "inferred");
-    const linked = proof.filter((p) => p.class === "association");
-    const impl = asArray<Obj>(d.implementations);
-    const lvl =
-      LEVEL_LABEL[asString(d.topic?.level)] ?? asString(d.topic?.level);
-    const conf = asString(d.confidence?.effective ?? d.topic?.confidence);
-    let text = `${focusName} is assessed at ${lvl}${conf ? ` with ${conf} confidence` : ""}. ${asString(d.verdict)}`;
-    if (seen.length)
-      text += ` Seen in your code: ${seen
-        .slice(0, 3)
-        .map((p) => {
-          const first = asArray<Obj>(p.citations)[0];
-          const n = num(p.demonstrations);
-          return `${asString(p.capability)} (${n} example${n === 1 ? "" : "s"}${first ? `, e.g. ${cut(citeLabel(first), 70)}` : ""})`;
-        })
-        .join("; ")}.`;
-    else if (proof.length)
-      text += " No linked skill is seen directly in your code.";
-    if (inferred.length)
-      text += ` Only inferred, not seen: ${inferred
-        .slice(0, 3)
-        .map((p) => asString(p.capability))
-        .join(", ")}.`;
-    if (linked.length)
-      text += ` Linked in the topic map only: ${linked
-        .slice(0, 3)
-        .map((p) => asString(p.capability))
-        .join(", ")}.`;
-    if (!proof.length && impl.length)
-      text += ` Implementations cited: ${impl
-        .slice(0, 3)
-        .map((i) => cut(asString(i.what), 80))
-        .join("; ")}.`;
-    else if (!proof.length) text += " No specific implementation is cited for it.";
-    const lim = limitationsOf(d);
-    if (lim.length) text += ` Not established: ${lim[0]}`;
-    return { text, slugs: focusSlugs };
-  }
-
-  // capabilities
-  if (/capabilit/.test(s)) {
-    if (!d) return needDetail();
-    const proof = asArray<Obj>(d.proof);
-    if (proof.length) {
-      const by = (k: string) =>
-        proof
-          .filter((p) => p.class === k)
-          .slice(0, 4)
-          .map((p) => asString(p.capability))
-          .join(", ");
-      const parts: string[] = [];
-      if (by("observed")) parts.push(`seen in your code: ${by("observed")}`);
-      if (by("inferred")) parts.push(`inferred, not seen: ${by("inferred")}`);
-      if (by("association")) parts.push(`linked only: ${by("association")}`);
+  const focus = named ? asString(named.slug) : c.sel;
+  const d = focus && c.sel === focus ? c.detail : null;
+  const focusName = asString(
+    assessed.find((n) => asString(n.slug) === focus)?.label ??
+      d?.topic?.name ??
+      focus,
+  );
+  const slugs = focus ? [focus] : [];
+  if (/evidence|support|why|proof|code|unproven|unknown|infer/.test(s)) {
+    if (!d)
       return {
-        text: `${focusName} maps to skills that are ${parts.join("; ")}. Only the first group is proof; a mapping alone is taxonomy.`,
-        slugs: focusSlugs,
+        text: focus
+          ? `Open ${focusName} first so I can read its evidence.`
+          : "Select a topic and I can show the evidence behind it.",
+        slugs,
       };
-    }
-    const paths = asArray<Obj>(d.capabilityPaths);
+    const k = claimsOf(d);
+    let text = `${focusName} is rated ${LEVEL_LABEL[asString(d.topic?.level)] ?? ""} with ${asString(d.trace?.assessment?.confidence)} confidence. ${asString(d.verdict)}`;
+    text += k.observed.length
+      ? ` Seen in code: ${k.observed
+          .slice(0, 2)
+          .map((x) => cut(asString(x.text), 100))
+          .join("; ")}.`
+      : " Nothing is seen in cited code yet.";
+    return { text, slugs };
+  }
+  if (/prereq|foundation|depends|builds on/.test(s) && d) {
+    const f = asArray<Obj>(d.graph?.foundations);
     return {
-      text: paths.length
-        ? `${focusName} maps to ${paths
+      text: f.length
+        ? `${focusName} builds on ${f
             .slice(0, 5)
-            .map(
-              (p) =>
-                `${asString(p.capability)} (${num(p.demonstrations)} demonstration${num(p.demonstrations) === 1 ? "" : "s"})`,
-            )
-            .join(
-              ", ",
-            )}. A mapping is taxonomy; only demonstrations show actual work.`
-        : `The graph has no capability mapped to ${focusName}.`,
-      slugs: focusSlugs,
+            .map((x) => asString(x.name))
+            .join(", ")}.`
+        : `No confirmed foundation is recorded for ${focusName}.`,
+      slugs: [...slugs, ...f.map((x) => asString(x.slug)).filter(Boolean)],
     };
   }
-
-  // unproven / limits
-  if (
-    /unproven|unknown|limit|not shown|missing|weak|gap|shallow|worst/.test(s)
-  ) {
-    if (d) {
-      const lim = limitationsOf(d);
-      return {
-        text: lim.length
-          ? `For ${focusName}, not established: ${lim.slice(0, 3).join(" ")}`
-          : `The assessment of ${focusName} lists no explicit limitations.`,
-        slugs: focusSlugs,
-      };
-    }
-    const gaps = asArray<Obj>(c.relations?.foundationGaps).slice(0, 3);
-    const shallow = asArray<Obj>(hl.broadButShallow).slice(0, 4);
-    const parts: string[] = [];
-    if (gaps.length) parts.push(gaps.map((g) => asString(g.message)).join(" "));
-    if (shallow.length) parts.push(`Broad but shallow: ${names(shallow)}.`);
+  if (named)
     return {
-      text:
-        parts.join(" ") ||
-        "The graph shows no foundation gaps or broad-but-shallow topics right now.",
-      slugs: [...gaps.map((g) => asString(g.topic?.slug)), ...slugsOf(shallow)],
+      text: `${asString(named.label)} sits at ${LEVEL_LABEL[asString(named.level)] ?? ""} level. Open it for the full story.`,
+      slugs: [asString(named.slug)],
     };
-  }
-
-  // prerequisites / related
-  if (
-    /prereq|foundation|depends|builds on|unlock|core|base|fundamental/.test(s)
-  ) {
-    if (d) {
-      const f = asArray<Obj>(d.graph?.foundations);
-      const u = asArray<Obj>(d.graph?.unlocks);
-      const paths = asArray<Obj>(d.prerequisitePaths);
-      const parts: string[] = [];
-      if (paths.length) {
-        parts.push(
-          `Genuine foundation paths: ${paths
-            .slice(0, 3)
-            .map(
-              (p) =>
-                `${asString(p.sentence)} (${(PREREQ_STYLE[asString(p.status)]?.label ?? "").toLowerCase()})`,
-            )
-            .join("; ")}.`,
-        );
-      } else {
-        parts.push(
-          f.length
-            ? `${focusName} builds on ${f
-                .slice(0, 5)
-                .map(
-                  (x) =>
-                    `${asString(x.name)} (${LEVEL_LABEL[asString(x.developerLevel)] ?? "none"})`,
-                )
-                .join(", ")}.`
-            : `The graph records no BUILDS_ON foundation for ${focusName}.`,
-        );
-      }
-      if (u.length) parts.push(`Built on top of it: ${names(u.slice(0, 5))}.`);
-      return { text: parts.join(" "), slugs: [...focusSlugs, ...slugsOf(f)] };
-    }
-    const b = asArray<Obj>(hl.topFoundations).slice(0, 4);
-    return {
-      text: b.length
-        ? `Highest PageRank over the topic graph: ${names(b)}. Many topics build on them, but rank alone does not prove skill.`
-        : "No foundation ranking was computed yet.",
-      slugs: slugsOf(b),
-    };
-  }
-  if (/related|similar|connected|neighbo/.test(s)) {
-    if (!d) return needDetail();
-    const r = asArray<Obj>(d.graph?.related);
-    return {
-      text: r.length
-        ? `Related to ${focusName} (association, not prerequisite): ${names(r.slice(0, 6))}.`
-        : `No RELATED_TOPIC edge is recorded for ${focusName}.`,
-      slugs: [...focusSlugs, ...slugsOf(r)],
-    };
-  }
-
-  // a topic named without a specific intent: describe it
-  if (named) {
-    const slug = asString(named.slug);
-    const nd = c.sel === slug ? c.detail : null;
-    const lvl = LEVEL_LABEL[asString(named.level)] ?? asString(named.level);
-    let text = `${asString(named.label)} sits at ${lvl} level${
-      named.score != null ? ` (score ${num(named.score)})` : ""
-    }.`;
-    if (nd?.verdict) text += ` ${asString(nd.verdict)}`;
-    else text += " Open it in the Topic tab to see the evidence behind it.";
-    return { text, slugs: [slug] };
-  }
-
-  if (/strong|best|deep|good at|expert|top skill/.test(s)) {
+  if (/strong|best|deep|good at/.test(s)) {
     const top = assessed.slice(0, 5);
     return {
       text: top.length
-        ? `Deepest assessed topics: ${names(top)}. Click one to see what supports the level.`
-        : "No topics are assessed yet. Run the analysis first.",
-      slugs: slugsOf(top),
-    };
-  }
-  if (/built|build|own|project|implement/.test(s)) {
-    const b = asArray<Obj>(hl.builds).slice(0, 6);
-    return {
-      text: b.length
-        ? `Topics marked as genuine implementations: ${names(b)}.`
-        : "No topic is marked as a genuine implementation yet.",
-      slugs: slugsOf(b),
-    };
-  }
-  if (/bridge|between|cross/.test(s)) {
-    const b = asArray<Obj>(hl.topBridges).slice(0, 4);
-    return {
-      text: b.length
-        ? `Highest betweenness: ${names(b)}. They sit on shortest paths between otherwise separate parts of the topic graph.`
-        : "No bridge topics were computed yet.",
-      slugs: slugsOf(b),
-    };
-  }
-  if (/recent|lately|active|latest/.test(s)) {
-    const b = asArray<Obj>(hl.recentlyActive).slice(0, 5);
-    return {
-      text: b.length
-        ? `Most recently touched: ${names(b)}.`
-        : "No recent activity was found.",
-      slugs: slugsOf(b),
-    };
-  }
-  if (/how many|count|total|number/.test(s)) {
-    return {
-      text: `${num(stats.topics)} topics assessed across ${num(stats.domains)} domains. ${num(stats.deepTopics)} are Deep and ${num(stats.ownImplementations)} are genuine implementations. Average score ${num(stats.averageScore)}.`,
-      slugs: [],
-    };
-  }
-  if (/who|about me|summary|overview|profile|me\b/.test(s)) {
-    return {
-      text:
-        [summary?.headline, summary?.pattern]
-          .filter(Boolean)
-          .map((value) => asString(value))
-          .join(" ") || "Run the analysis and I can summarise the profile.",
-      slugs: [],
+        ? `Deepest topics: ${top.map((x) => asString(x.label)).join(", ")}.`
+        : "No topics assessed yet.",
+      slugs: top.map((x) => asString(x.slug)),
     };
   }
   return {
-    text: "I can explain the evidence behind a topic's depth, its linked capabilities, what it builds on, which topics are related, which topics bridge areas, and what remains unproven. Select a topic or name one.",
+    text: "Ask what supports a topic, what is proven versus assumed, or what it builds on.",
     slugs: [],
   };
 }
 
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
 /* MAIN                                                                       */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
 
 type Filters = {
   domain: string;
@@ -726,11 +1357,11 @@ const DEFAULT_FILTERS: Filters = {
   order: "desc",
   page: 0,
 };
-
 type Lens =
   | "highlights"
-  | "foundations"
+  | "depth"
   | "groups"
+  | "foundations"
   | "topics"
   | "paths"
   | "hood";
@@ -738,17 +1369,17 @@ type SideTab = "ask" | "topic";
 
 const LENSES: Array<{ id: Lens; label: string }> = [
   { id: "highlights", label: "Highlights" },
-  { id: "foundations", label: "Foundations" },
+  { id: "depth", label: "Depth map" },
   { id: "groups", label: "Groups" },
+  { id: "foundations", label: "Foundations" },
   { id: "topics", label: "All topics" },
   { id: "paths", label: "Paths" },
-  { id: "hood", label: "Under the hood" },
+  { id: "hood", label: "Graph algorithms" },
 ];
 
 const WELCOME =
-  "Select a topic to see why Pathway rated it that way: the capabilities, implementations and graph relationships behind it. Ask me what supports a level, what a topic builds on, or what remains unproven. Topics I mention glow in the graph.";
-
-const EVIDENCE_ID = "graph-evidence";
+  "Select a topic to see why Pathway rated it that way, or ask me anything about your graph. Topics I mention glow on the map.";
+const EVIDENCE_ID = "topic-evidence";
 const scrollToEvidence = () =>
   window.setTimeout(
     () =>
@@ -759,14 +1390,13 @@ const scrollToEvidence = () =>
   );
 
 export default function OverviewPage() {
-  const navigate = useNavigate();
-
   const [model, setModel] = useState<Obj | null>(null);
   const [overview, setOverview] = useState<Obj | null>(null);
   const [groups, setGroups] = useState<Obj | null>(null);
   const [relations, setRelations] = useState<Obj | null>(null);
   const [graph, setGraph] = useState<Obj | null>(null);
   const [algos, setAlgos] = useState<Obj | null>(null);
+  const [integrity, setIntegrity] = useState<Obj | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -774,11 +1404,11 @@ export default function OverviewPage() {
 
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
   const [qDraft, setQDraft] = useState("");
-
   const [job, setJob] = useState<Obj | null>(null);
   const [jobErr, setJobErr] = useState<string | null>(null);
 
   const [sel, setSel] = useState<string | null>(null);
+  const [selEdge, setSelEdge] = useState<Obj | null>(null);
   const [detail, setDetail] = useState<Obj | null>(null);
   const [detailErr, setDetailErr] = useState<string | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -786,8 +1416,8 @@ export default function OverviewPage() {
 
   const [sideTab, setSideTab] = useState<SideTab>("ask");
   const [lens, setLens] = useState<Lens>("highlights");
-
   const [colorBy, setColorBy] = useState("level");
+  const [layoutMode, setLayoutMode] = useState<"areas" | "layers">("areas");
   const [showNeighbors, setShowNeighbors] = useState(true);
   const [pathFrom, setPathFrom] = useState("");
   const [pathTo, setPathTo] = useState("");
@@ -795,13 +1425,6 @@ export default function OverviewPage() {
   const [pathErr, setPathErr] = useState<string | null>(null);
   const [groupDim, setGroupDim] = useState("domain");
 
-  // set a goal
-  const [goalWish, setGoalWish] = useState("");
-  const [goalBusy, setGoalBusy] = useState(false);
-  const [goalErr, setGoalErr] = useState<string | null>(null);
-  const [goalHelp, setGoalHelp] = useState<Obj | null>(null);
-
-  // chat
   const [messages, setMessages] = useState<ChatMsg[]>([
     { id: 1, role: "ai", text: WELCOME },
   ]);
@@ -853,18 +1476,20 @@ export default function OverviewPage() {
           return null;
         }
       };
-      const [m, g, r, gr, a] = await Promise.all([
+      const [m, g, r, gr, a, ig] = await Promise.all([
         safe("model", getJson("/api/topics/model")),
         safe("groups", getJson(`/api/topics/groups${f}`)),
         safe("relations", getJson(`/api/topics/relations${f}`)),
         safe("graph", getJson(`/api/topics/graph${gq}`)),
         safe("algorithms", getJson(`/api/topics/algorithms${f}`)),
+        safe("integrity", getJson(`/api/topics/integrity${f}`)),
       ]);
       if (m) setModel(m);
       if (g) setGroups(g);
       if (r) setRelations(r);
       if (gr) setGraph(gr);
       if (a) setAlgos(a);
+      if (ig) setIntegrity(ig);
       setPartial(missing);
     },
     [showNeighbors],
@@ -912,9 +1537,7 @@ export default function OverviewPage() {
       firstQs.current = false;
       return;
     }
-    const t = window.setTimeout(() => {
-      loadOverview().catch(() => {});
-    }, 200);
+    const t = window.setTimeout(() => loadOverview().catch(() => {}), 200);
     return () => window.clearTimeout(t);
   }, [qs, loadOverview]);
 
@@ -982,6 +1605,7 @@ export default function OverviewPage() {
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key === "Escape") {
         setSel(null);
+        setSelEdge(null);
         setSideTab("ask");
       }
     };
@@ -991,42 +1615,27 @@ export default function OverviewPage() {
 
   useEffect(() => {
     const el = chatRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, sideTab]);
 
   /* ---------------- derived ---------------- */
 
   const nodes = useMemo(() => asArray<Obj>(graph?.nodes), [graph]);
   const edges = useMemo(() => asArray<Obj>(graph?.edges), [graph]);
-  const positions = useMemo(() => layout(nodes, edges), [nodes, edges]);
-  const pathSet = useMemo(
+  const layered = useMemo(() => layoutLayers(nodes), [nodes]);
+  const areaPos = useMemo(() => layoutAreas(nodes, edges), [nodes, edges]);
+  const positions = layoutMode === "layers" ? layered.pos : areaPos;
+  const nodeBySlug = useMemo(
+    () => new Map(nodes.map((n) => [asString(n.slug), n] as [string, Obj])),
+    [nodes],
+  );
+  const pathIds = useMemo(
     () =>
       new Set<string>(
         asArray<Obj>(pathRes?.steps).map((s) => asString(s.slug)),
       ),
     [pathRes],
   );
-  const slugToId = useMemo(() => {
-    const m = new Map<string, string>();
-    nodes.forEach((n) => m.set(asString(n.slug), asString(n.id)));
-    return m;
-  }, [nodes]);
-  const glowIds = useMemo(() => {
-    const s = new Set<string>();
-    highlight.forEach((slug) => {
-      const id = slugToId.get(slug);
-      if (id) s.add(id);
-    });
-    return s;
-  }, [highlight, slugToId]);
-  const pathIds = useMemo(() => {
-    const s = new Set<string>();
-    pathSet.forEach((slug) => {
-      const id = slugToId.get(slug);
-      if (id) s.add(id);
-    });
-    return s;
-  }, [pathSet, slugToId]);
 
   const levelMix = useMemo(() => {
     const m: Record<string, number> = {};
@@ -1055,6 +1664,14 @@ export default function OverviewPage() {
     [items, sel],
   );
   const analyzed = status.analyzed === true;
+
+  const selEdges = useMemo(() => {
+    if (!sel) return { out: [] as Obj[], inc: [] as Obj[] };
+    return {
+      out: edges.filter((e) => e.source === sel),
+      inc: edges.filter((e) => e.target === sel),
+    };
+  }, [edges, sel]);
 
   /* ---------------- actions ---------------- */
 
@@ -1087,47 +1704,15 @@ export default function OverviewPage() {
     );
   };
 
-  /**
-   * POST /api/goal { wish }
-   *  - status "goal"                → open the read-only /goal page with the result
-   *  - status "needs_clarification" → stay here, show the message + topic suggestions
-   */
-  const submitGoal = async () => {
-    const wish = goalWish.trim();
-    if (wish.length < 3 || goalBusy) return;
-    setGoalBusy(true);
-    setGoalErr(null);
-    setGoalHelp(null);
-    try {
-      const r = await call("/api/goal", "POST", { wish });
-      if (!r.ok) {
-        setGoalErr(asString(r.data.error, "Could not generate a goal."));
-        return;
-      }
-      if (r.data.status === "goal") {
-        navigate("/goal", { state: { result: r.data } });
-        return;
-      }
-      if (r.data.status === "needs_clarification") {
-        setGoalHelp(r.data);
-        return;
-      }
-      setGoalErr("Unexpected response from the goal service.");
-    } catch {
-      setGoalErr("Could not reach the goal service. Try again.");
-    } finally {
-      setGoalBusy(false);
-    }
-  };
-
   const pick = (slug: string) => {
     if (!slug) return;
     setSel(slug);
+    setSelEdge(null);
     setSideTab("topic");
     if (
       typeof window !== "undefined" &&
       !window.matchMedia("(min-width: 1280px)").matches
-    ) {
+    )
       window.setTimeout(
         () =>
           asideRef.current?.scrollIntoView({
@@ -1136,11 +1721,11 @@ export default function OverviewPage() {
           }),
         60,
       );
-    }
   };
 
   const closeTopic = () => {
     setSel(null);
+    setSelEdge(null);
     setSideTab("ask");
   };
 
@@ -1167,8 +1752,6 @@ export default function OverviewPage() {
         role: m.role === "ai" ? "assistant" : "user",
         content: m.text,
       }));
-
-    // the assistant message exists from the first moment and fills in live
     const userId = msgId.current++;
     const aiId = msgId.current++;
     setMessages((m) => [
@@ -1177,10 +1760,8 @@ export default function OverviewPage() {
       { id: aiId, role: "ai", text: "", pending: true, steps: [] },
     ]);
     setThinking(true);
-
     const patch = (fn: (m: ChatMsg) => ChatMsg) =>
       setMessages((ms) => ms.map((x) => (x.id === aiId ? fn(x) : x)));
-
     const onEvent = (e: TraceEvent) => {
       if (e.type === "plan") {
         patch((m) => ({
@@ -1209,7 +1790,6 @@ export default function OverviewPage() {
         patch((m) => ({ ...m, text: m.text + e.text }));
       }
     };
-
     type Reply = Omit<ChatMsg, "id" | "role"> & { slugs: string[] };
     let reply: Reply | null = null;
     try {
@@ -1220,10 +1800,9 @@ export default function OverviewPage() {
       if (r.ok) {
         const answer = asString(r.data.answer);
         const blocks = asArray<Obj>(r.data.blocks).filter(
-          (block): block is Obj & { type: string } =>
-            typeof block.type === "string",
+          (b): b is Obj & { type: string } => typeof b.type === "string",
         );
-        if (answer || blocks.length) {
+        if (answer || blocks.length)
           reply = {
             text: answer,
             question: text,
@@ -1235,7 +1814,6 @@ export default function OverviewPage() {
             slugs: asArray<string>(r.data.topics).filter(Boolean),
             local: false,
           };
-        }
       } else if (r.status === 429) {
         reply = {
           text: asString(r.data.error, "Slow down a little."),
@@ -1244,28 +1822,20 @@ export default function OverviewPage() {
         };
       }
     } catch {
-      /* fall through to the local answer */
+      /* local answer below */
     }
-    if (!reply) {
-      const a = localAnswer(text, { nodes, overview, relations, sel, detail });
-      reply = { ...a, local: true };
-    }
+    if (!reply)
+      reply = { ...localAnswer(text, { nodes, sel, detail }), local: true };
     const final = reply;
     const slugs = [...new Set(final.slugs.filter(Boolean))];
     setHighlight(new Set(slugs));
-    patch((m) => ({
-      ...m,
-      ...final,
-      slugs,
-      pending: false,
-      steps: undefined,
-    }));
+    patch((m) => ({ ...m, ...final, slugs, pending: false, steps: undefined }));
     setThinking(false);
   };
 
   const askAbout = (name: string) => {
     setSideTab("ask");
-    setDraft(`What evidence supports my ${name} depth?`);
+    setDraft(`Why does Pathway think I understand ${name} at this level?`);
   };
 
   /* ---------------- screens ---------------- */
@@ -1273,10 +1843,10 @@ export default function OverviewPage() {
   if (loading && !overview)
     return (
       <Screen>
-        <InlineLoading label="Reading your topic graph…" />
+        <InlineLoading label="Reading your knowledge graph…" />
       </Screen>
     );
-  if (error && !overview) {
+  if (error && !overview)
     return (
       <Screen>
         <div
@@ -1290,50 +1860,48 @@ export default function OverviewPage() {
             Couldn't load your topics
           </h1>
           <p className="mt-2 text-[13px] leading-5 text-neutral-800">{error}</p>
-          <button
-            type="button"
-            onClick={() => {
-              setError(null);
-              setLoading(true);
-              refreshAll().finally(() => setLoading(false));
-            }}
-            className="mt-5 rounded-full px-5 py-2.5 text-[13px] font-black"
-            style={{ backgroundColor: YELLOW, ...border }}
-          >
-            Try again
-          </button>
+          <div className="mt-5 flex justify-center">
+            <Btn
+              bg={YELLOW}
+              onClick={() => {
+                setError(null);
+                setLoading(true);
+                refreshAll().finally(() => setLoading(false));
+              }}
+            >
+              Try again
+            </Btn>
+          </div>
         </div>
       </Screen>
     );
-  }
   if (!overview) return null;
 
+  const topName = asString(
+    asArray<Obj>(overview.highlights?.strongest)[0]?.name,
+  );
+  const builtName = asString(
+    asArray<Obj>(overview.highlights?.builds)[0]?.name,
+  );
   const prompts = [
-    "What am I strongest at?",
-    "Which topics bridge areas?",
-    "What have I built myself?",
-    "What remains unproven?",
-    ...(sel && (selCard || detail)
-      ? [
-          `What evidence supports ${asString(detail?.topic?.name ?? selCard?.name ?? sel)}?`,
-        ]
-      : []),
+    topName
+      ? `Why does Pathway think I understand ${topName} deeply?`
+      : "What am I strongest at?",
+    builtName
+      ? `Show me the code behind my ${builtName}`
+      : "What have I built myself?",
+    "Which topics are inferred rather than seen in code?",
   ];
 
   const highlightRows = (
     [
       ["strongest", "Strongest", GREEN, "Deepest assessed topics"],
+      ["builds", "Built yourself", PURPLE, "Own implementation behind them"],
       ["topFoundations", "Foundations", SKY, "Highest PageRank in the graph"],
-      ["topBridges", "Bridges", CORAL, "Highest betweenness"],
-      ["builds", "Built yourself", PURPLE, "Genuine implementations"],
+      ["topBridges", "Bridges", CORAL, "Highest betweenness in the graph"],
       ["recentlyActive", "Recently active", YELLOW, "Touched lately"],
       ["broadButShallow", "Broad but shallow", "#9ca3af", "Wide, not deep"],
-      [
-        "lowConfidence",
-        "Low confidence",
-        "#d1d5db",
-        "Thin evidence behind them",
-      ],
+      ["lowConfidence", "Thin evidence", "#d1d5db", "Little code behind them"],
     ] as const
   )
     .map(([key, label, color, hint]) => ({
@@ -1344,6 +1912,14 @@ export default function OverviewPage() {
       list: asArray<Obj>(overview.highlights?.[key]),
     }))
     .filter((r) => r.list.length);
+
+  const integrityFailed = asArray<Obj>(integrity?.checks).filter(
+    (c) => !c.passed,
+  ).length;
+  const evidenceTotal = Object.values(
+    (stats.evidence?.byKind ?? {}) as Record<string, number>,
+  ).reduce((n, v) => n + num(v), 0);
+  const gstats = (graph?.stats ?? {}) as Obj;
 
   return (
     <div
@@ -1357,7 +1933,11 @@ export default function OverviewPage() {
     >
       <style>{`
         * { box-sizing: border-box; }
-        button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid ${SKY}; outline-offset: 2px; }
+        html { scroll-behavior: smooth; }
+        .press { transition: transform .16s cubic-bezier(.2,.8,.2,1), box-shadow .16s ease, background-color .2s ease, opacity .2s ease; }
+        .press:hover:not(:disabled) { transform: translateY(-2px); }
+        .press:active:not(:disabled) { transform: translateY(1px) scale(.97); }
+        button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid ${SKY}; outline-offset: 2px; }
         svg g:focus-visible { outline: 3px solid ${SKY}; outline-offset: 2px; }
         details > summary { list-style: none; }
         details > summary::-webkit-details-marker { display: none; }
@@ -1366,11 +1946,9 @@ export default function OverviewPage() {
         @keyframes oring { 0% { r: 0; opacity: .9; } 100% { r: 46; opacity: 0; } }
         @keyframes osweep { to { transform: rotate(360deg); } }
         @keyframes opop { from { opacity: 0; transform: scale(.2); } to { opacity: 1; transform: scale(1); } }
-        @keyframes odot { 0%,80%,100% { transform: translateY(0); opacity: .35; } 40% { transform: translateY(-4px); opacity: 1; } }
         @keyframes oslide { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes ofloat { 0%,100% { transform: translate(0,0); } 50% { transform: translate(0,-3px); } }
-        @keyframes ofade { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes opulse { 0% { transform: scale(1); opacity: .8; } 100% { transform: scale(2.1); opacity: 0; } }
+        @keyframes odraw { from { stroke-dasharray: 1; stroke-dashoffset: 1; } to { stroke-dasharray: 1; stroke-dashoffset: 0; } }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
       `}</style>
 
@@ -1408,28 +1986,26 @@ export default function OverviewPage() {
               </span>
               <Link
                 to="/graph"
-                className="rounded-full px-3 py-1.5 text-[13px] font-bold"
+                className="press rounded-full px-3 py-1.5 text-[13px] font-bold"
               >
                 Skill graph
               </Link>
               <Link
                 to="/builds"
-                className="rounded-full px-3 py-1.5 text-[13px] font-bold"
+                className="press rounded-full px-3 py-1.5 text-[13px] font-bold"
               >
                 Builds
               </Link>
             </nav>
           </div>
-          <button
-            type="button"
+          <Btn
             onClick={() => void refreshAll(true)}
             disabled={refreshing}
-            className="flex items-center gap-2 rounded-full px-3 py-1.5 text-[13px] font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-50"
-            style={{ backgroundColor: YELLOW, ...border }}
+            bg={YELLOW}
           >
-            <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{" "}
             Refresh
-          </button>
+          </Btn>
         </div>
       </header>
 
@@ -1443,52 +2019,82 @@ export default function OverviewPage() {
             retry.
           </div>
         )}
+        {status.outdated && (
+          <div
+            className="mb-3 rounded-xl p-2.5 text-[13px] font-bold"
+            style={{ backgroundColor: YELLOW, ...border }}
+          >
+            These assessments come from an older analysis version. Re-run the
+            analysis to refresh them.
+          </div>
+        )}
 
-        {/* SLIM STRIP */}
+        {/* 1. HEADLINE */}
         <section className="mb-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="min-w-0 lg:max-w-[62%]">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0 lg:max-w-[60%]">
               <p className="text-[12px] font-black uppercase tracking-[.14em] text-neutral-700">
                 Your engineering knowledge graph
               </p>
               <h1
-                className="mt-0.5 text-[19px] font-black leading-[1.2] tracking-tight sm:text-[22px]"
+                className="mt-0.5 text-[20px] font-black leading-[1.2] tracking-tight sm:text-[24px]"
                 style={{ fontFamily: DISPLAY_FONT, ...clamp(2) }}
                 title={asString(summary?.headline)}
               >
                 {summary?.headline
                   ? asString(summary.headline)
                   : analyzed
-                    ? "Here's what you know, and the evidence behind it."
-                    : "No topics yet. Run the analysis to map your skills."}
+                    ? "What you know, how deeply, and the evidence behind it."
+                    : "No topics yet. Run the analysis to map what you know."}
               </h1>
+              {summary?.pattern && (
+                <p className="mt-1 text-[13px] leading-5 text-neutral-800">
+                  {asString(summary.pattern)}
+                </p>
+              )}
             </div>
-
             <div className="flex flex-wrap items-center gap-2">
               {running ? (
                 <RunMini job={job} step={stepOf(job)} model={model} />
               ) : (
                 <>
-                  <StatPill value={num(stats.topics)} label="topics" />
-                  <StatPill value={num(stats.domains)} label="domains" />
-                  <StatPill value={num(stats.deepTopics)} label="deep" />
-                  <StatPill
-                    value={num(stats.relations?.buildsOn)}
-                    label="builds-on"
-                  />
-                  <Btn
-                    onClick={() => void startAnalysis()}
-                    bg={YELLOW}
-                    disabled={running}
-                  >
-                    <Play size={12} /> {analyzed ? "Re-run" : "Run analysis"}
+                  {status.lastAnalyzedAt && (
+                    <span className="text-[12px] font-semibold text-neutral-700">
+                      analyzed {timeAgo(asString(status.lastAnalyzedAt))}
+                    </span>
+                  )}
+                  <Btn onClick={() => void startAnalysis()} bg={YELLOW}>
+                    <Play size={12} />{" "}
+                    {analyzed ? "Re-run analysis" : "Run analysis"}
                   </Btn>
                 </>
               )}
             </div>
           </div>
 
-          {/* depth mix: thin bar */}
+          <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <Tile
+              value={num(stats.topics)}
+              label="Topics analyzed"
+              hint="Concepts found in your code"
+            />
+            <Tile
+              value={num(stats.deepTopics)}
+              label="Deep understanding"
+              hint="Built, hardened and evolved by you"
+            />
+            <Tile
+              value={num(stats.ownImplementations)}
+              label="Built yourself"
+              hint="Your own implementation is cited"
+            />
+            <Tile
+              value={evidenceTotal}
+              label="Evidence items"
+              hint="Code and commits cited in the graph"
+            />
+          </div>
+
           {mixTotal > 0 && (
             <div className="mt-3 flex items-center gap-3">
               <div
@@ -1513,22 +2119,11 @@ export default function OverviewPage() {
                     key={l}
                     className="flex items-center gap-1.5 text-[12px] font-bold text-neutral-900"
                   >
-                    <span
-                      className="h-2.5 w-2.5 rounded-full"
-                      style={{
-                        backgroundColor: LEVEL_COLOR[l],
-                        border: `1.5px solid ${INK}`,
-                      }}
-                    />
+                    <Dot color={LEVEL_COLOR[l]} />
                     {levelMix[l]} {LEVEL_LABEL[l].toLowerCase()}
                   </span>
                 ))}
               </div>
-              {status.lastAnalyzedAt && (
-                <span className="hidden shrink-0 text-[12px] font-semibold text-neutral-700 lg:block">
-                  analyzed {timeAgo(asString(status.lastAnalyzedAt))}
-                </span>
-              )}
             </div>
           )}
           {jobErr && (
@@ -1536,38 +2131,12 @@ export default function OverviewPage() {
               {jobErr}
             </p>
           )}
-
-          {/* SET A GOAL: opens the read-only /goal page */}
-          <GoalModule
-            wish={goalWish}
-            onWish={(v) => {
-              setGoalWish(v);
-              if (goalErr) setGoalErr(null);
-            }}
-            busy={goalBusy}
-            err={goalErr}
-            help={goalHelp}
-            disabledReason={
-              running
-                ? "Analysis is running. Goals unlock when it finishes."
-                : !analyzed
-                  ? "Run the analysis first so a goal can be built on your graph."
-                  : null
-            }
-            onSubmit={() => void submitGoal()}
-            onSuggest={(name) => {
-              setGoalWish(`I want to improve my ${name} skills`);
-              setGoalHelp(null);
-            }}
-            onDismissHelp={() => setGoalHelp(null)}
-          />
         </section>
 
-        {/* WORKSPACE: constellation + chat/topic, fits one screen */}
-        <div className="grid gap-4 xl:h-[calc(100vh-255px)] xl:min-h-[540px] xl:grid-cols-[minmax(0,1fr)_420px] xl:grid-rows-[minmax(0,1fr)]">
-          {/* constellation */}
+        {/* 2. KNOWLEDGE GRAPH + SIDE PANEL */}
+        <div className="grid gap-4 xl:h-[calc(100vh-300px)] xl:min-h-[640px] xl:grid-cols-[minmax(0,1fr)_420px] xl:grid-rows-[minmax(0,1fr)]">
           <section
-            className="flex h-[480px] min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl xl:h-full"
+            className="flex h-[620px] min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl xl:h-full"
             style={{
               backgroundColor: "#F8F6F1",
               backgroundImage:
@@ -1575,28 +2144,52 @@ export default function OverviewPage() {
               ...border,
             }}
           >
-            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5">
-              <div className="flex items-baseline gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-2.5">
+              <div className="flex flex-wrap items-baseline gap-x-3">
                 <h2
                   className="text-[16px] font-black"
-                  style={{ fontFamily: DISPLAY_FONT, color: INK }}
+                  style={{ fontFamily: DISPLAY_FONT }}
                 >
-                  Constellation
+                  Knowledge graph
                 </h2>
                 <span className="text-[12px] font-semibold text-neutral-800">
-                  bigger = deeper · click a star to see why
+                  size = depth · ring = score · tap a topic or a line
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                <div
+                  className="flex rounded-full p-0.5"
+                  style={{ backgroundColor: WHITE, ...border }}
+                >
+                  {(
+                    [
+                      ["areas", "By area"],
+                      ["layers", "By depth"],
+                    ] as const
+                  ).map(([k, label]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setLayoutMode(k)}
+                      className="press rounded-full px-2.5 py-0.5 text-[12px] font-black"
+                      style={{
+                        backgroundColor:
+                          layoutMode === k ? YELLOW : "transparent",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 <select
                   value={colorBy}
                   onChange={(e) => setColorBy(e.target.value)}
                   aria-label="Colour by"
-                  className="rounded-full bg-white px-2.5 py-1 text-[12px] font-bold outline-none"
+                  className="press rounded-full bg-white px-2.5 py-1 text-[12px] font-bold outline-none"
                   style={border}
                 >
                   <option value="level">Colour: depth</option>
-                  <option value="domain">Colour: domain</option>
+                  <option value="domain">Colour: area</option>
                   <option value="cluster">Colour: community</option>
                 </select>
                 <Btn
@@ -1613,67 +2206,59 @@ export default function OverviewPage() {
               </div>
             </div>
 
+            {nodes.length > 0 && (
+              <div className="flex flex-wrap gap-x-4 gap-y-0.5 px-4 pb-1 pt-1.5 text-[12px] font-bold text-neutral-800">
+                <span>{num(gstats.assessedNodes)} assessed</span>
+                <span>{num(gstats.externalNodes)} unassessed neighbours</span>
+                <span>{num(gstats.buildsOn)} “builds on” links</span>
+                <span>{num(gstats.related)} “goes with” links</span>
+                <span>
+                  {
+                    asArray<Obj>(dims.find((d) => d.id === "community")?.groups)
+                      .length
+                  }{" "}
+                  communities
+                </span>
+              </div>
+            )}
+
             {nodes.length ? (
               <>
-                <div className="relative min-h-0 flex-1 overflow-hidden">
+                <div className="relative min-h-[240px] flex-1 overflow-hidden">
                   <TopicGraph
                     nodes={nodes}
                     edges={edges}
                     pos={positions}
+                    bands={layoutMode === "layers" ? layered.bands : null}
                     colorBy={colorBy}
                     selected={sel}
-                    glow={glowIds}
+                    selectedEdge={asString(selEdge?.id)}
+                    glow={highlight}
                     pathIds={pathIds}
                     running={running}
                     onSelect={(n) =>
                       n.assessed ? pick(asString(n.slug)) : undefined
                     }
+                    onEdge={(e) => setSelEdge(e)}
                   />
                 </div>
-                <div
-                  className="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 text-[12px] font-semibold"
-                  style={{ borderTop: `1px solid ${LINE}`, color: INK }}
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span
-                      className="h-3 w-3 rounded-full"
-                      style={{ border: `3px solid ${SKY}` }}
-                    />
-                    high PageRank
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span
-                      className="h-3 w-3 rounded-full"
-                      style={{ border: `3px dashed ${CORAL}` }}
-                    />
-                    high betweenness
-                  </span>
-                  <span className="flex items-center gap-1.5">
-                    <span
-                      className="h-3 w-3 rounded-full"
-                      style={{ border: `3px solid ${YELLOW}` }}
-                    />
-                    mentioned in chat
-                  </span>
-                  {graph?.stats && (
-                    <span className="ml-auto text-neutral-800">
-                      {num(graph.stats.nodes)} nodes ·{" "}
-                      {num(graph.stats.buildsOn)} builds-on ·{" "}
-                      {num(graph.stats.related)} related
-                    </span>
-                  )}
-                </div>
+                <RelationInspector
+                  sel={sel}
+                  selName={asString(nodeBySlug.get(sel ?? "")?.label)}
+                  edge={selEdge}
+                  out={selEdges.out}
+                  inc={selEdges.inc}
+                  nodeBySlug={nodeBySlug}
+                  onEdge={setSelEdge}
+                />
               </>
             ) : (
-              <div className="p-5 pt-0">
-                <p className="rounded-xl border-2 border-dashed border-neutral-400 p-5 text-[13px] text-neutral-800">
-                  No topic graph yet. Run the analysis to light it up.
-                </p>
+              <div className="p-5 pt-2">
+                <Empty text="No topic graph yet. Run the analysis to build it." />
               </div>
             )}
           </section>
 
-          {/* chat + topic */}
           <aside ref={asideRef} className="min-h-0 min-w-0 xl:h-full">
             <section
               className="flex h-[620px] min-h-0 flex-col overflow-hidden rounded-2xl xl:h-full"
@@ -1686,7 +2271,6 @@ export default function OverviewPage() {
                   backgroundColor: CARD,
                 }}
               >
-                {/* segmented toggle: Ask / Topic */}
                 <div
                   role="tablist"
                   aria-label="Side panel"
@@ -1695,7 +2279,11 @@ export default function OverviewPage() {
                 >
                   {(
                     [
-                      ["ask", "Ask", <MessageCircle key="a" size={13} />],
+                      [
+                        "ask",
+                        "Ask your graph",
+                        <MessageCircle key="a" size={13} />,
+                      ],
                       ["topic", "Topic", <Layers key="t" size={13} />],
                     ] as const
                   ).map(([k, label, icon]) => {
@@ -1708,7 +2296,7 @@ export default function OverviewPage() {
                         aria-selected={active}
                         disabled={k === "topic" && !sel}
                         onClick={() => setSideTab(k)}
-                        className="relative inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-black transition-colors disabled:opacity-40"
+                        className="press inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-black disabled:opacity-40"
                         style={{
                           backgroundColor: active ? YELLOW : "transparent",
                           border: `2px solid ${active ? INK : "transparent"}`,
@@ -1720,11 +2308,7 @@ export default function OverviewPage() {
                   })}
                 </div>
                 <span className="ml-auto hidden items-center gap-1.5 text-[12px] font-bold text-neutral-800 sm:flex">
-                  <span
-                    className="h-2 w-2 rounded-full"
-                    style={{ backgroundColor: GREEN }}
-                  />
-                  grounded in your graph
+                  <Dot color={GREEN} /> grounded in your graph
                 </span>
               </div>
 
@@ -1777,7 +2361,6 @@ export default function OverviewPage() {
                       </div>
                     ))}
                   </div>
-
                   <div
                     className="space-y-2 p-3"
                     style={{
@@ -1792,7 +2375,7 @@ export default function OverviewPage() {
                             key={p}
                             type="button"
                             onClick={() => void send(p)}
-                            className="rounded-full px-2.5 py-1 text-[12px] font-bold transition-transform hover:-translate-y-0.5"
+                            className="press rounded-full px-2.5 py-1 text-left text-[12px] font-bold"
                             style={{ backgroundColor: LAVENDER, ...border }}
                           >
                             {p}
@@ -1811,7 +2394,7 @@ export default function OverviewPage() {
                         value={draft}
                         onChange={(e) => setDraft(e.target.value)}
                         placeholder="Ask what supports a topic's depth…"
-                        aria-label="Ask about your topics"
+                        aria-label="Ask about your knowledge graph"
                         className="min-w-0 flex-1 rounded-full bg-white px-4 py-2 text-[13px] font-semibold outline-none"
                         style={border}
                       />
@@ -1819,7 +2402,7 @@ export default function OverviewPage() {
                         type="submit"
                         disabled={!draft.trim() || thinking}
                         aria-label="Send"
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-transform hover:-translate-y-0.5 disabled:opacity-40"
+                        className="press flex h-9 w-9 shrink-0 items-center justify-center rounded-full disabled:opacity-40"
                         style={{ backgroundColor: YELLOW, ...border }}
                       >
                         <Send size={14} />
@@ -1853,10 +2436,12 @@ export default function OverviewPage() {
           </aside>
         </div>
 
-        {sel && (
-          <TopicGraphEvidence
+        {/* 3. TOPIC EVIDENCE: graph first, details after */}
+        {sel && detail && (
+          <TopicEvidence
             key={sel}
             slug={sel}
+            detail={detail}
             onPick={pick}
             onAsk={(q) => {
               window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1896,7 +2481,7 @@ export default function OverviewPage() {
                 type="button"
                 onClick={() => setStage(null)}
                 aria-label="Close answer"
-                className="shrink-0 rounded-full p-1.5"
+                className="press shrink-0 rounded-full p-1.5"
                 style={{ backgroundColor: WHITE, ...border }}
               >
                 <X size={14} />
@@ -1914,7 +2499,7 @@ export default function OverviewPage() {
           </section>
         )}
 
-        {/* LENSES: flat, no card wall */}
+        {/* 4. EXPLORE */}
         <section className="mt-8">
           <div
             className="flex flex-wrap gap-x-6 gap-y-1"
@@ -1925,13 +2510,21 @@ export default function OverviewPage() {
                 key={l.id}
                 type="button"
                 onClick={() => setLens(l.id)}
-                className="-mb-[2px] px-1 pb-2 pt-1 text-[14px] font-black"
+                className="press -mb-[2px] px-1 pb-2 pt-1 text-[14px] font-black"
                 style={{
                   borderBottom: `4px solid ${lens === l.id ? CORAL : "transparent"}`,
                   color: lens === l.id ? INK : "#33362f",
                 }}
               >
                 {l.label}
+                {l.id === "hood" && integrityFailed > 0 && (
+                  <span
+                    className="ml-1.5 rounded-full px-1.5 text-[11px]"
+                    style={{ backgroundColor: CORAL, color: WHITE }}
+                  >
+                    {integrityFailed}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -1941,7 +2534,6 @@ export default function OverviewPage() {
             className="pt-4"
             style={{ animation: "oslide .25s ease-out both" }}
           >
-            {/* HIGHLIGHTS */}
             {lens === "highlights" &&
               (highlightRows.length ? (
                 <div>
@@ -1975,86 +2567,42 @@ export default function OverviewPage() {
                 <Empty text="Highlights appear once topics are assessed." />
               ))}
 
-            {/* FOUNDATIONS */}
-            {lens === "foundations" &&
-              (relations ? (
-                <div className="space-y-5">
-                  <p className="text-[13px] leading-5 text-neutral-800">
-                    BUILDS_ON is a foundation dependency recorded in the topic
-                    taxonomy. A foundation shown here as "not yet shown in code"
-                    means the graph has no assessment for it, not that the
-                    developer lacks the skill.
+            {lens === "depth" &&
+              (domainGroups.length ? (
+                <div
+                  className="rounded-2xl p-4"
+                  style={{ backgroundColor: WHITE, ...border }}
+                >
+                  <p className="mb-3 text-[13px] leading-5 text-neutral-800">
+                    Rows are engineering areas, columns are depth. Each topic
+                    lands where its evidence puts it.
                   </p>
-                  <div>
-                    <div className="mb-2 text-[13px] font-black">
-                      Foundations not yet shown in code
-                    </div>
-                    <div className="grid gap-x-6 gap-y-2.5 md:grid-cols-2">
-                      {asArray<Obj>(relations.foundationGaps).length === 0 && (
-                        <span className="text-[13px] text-neutral-800">
-                          Every foundation of a proficient or deep topic has
-                          assessed evidence.
-                        </span>
-                      )}
-                      {asArray<Obj>(relations.foundationGaps).map((g, i) => (
-                        <button
-                          key={i}
-                          type="button"
-                          onClick={() => pick(asString(g.topic?.slug))}
-                          className="block w-full pl-3 text-left hover:opacity-80"
-                          style={{
-                            borderLeft: `4px solid ${g.severity === "weak" ? CORAL : YELLOW}`,
-                          }}
+                  <div className="overflow-x-auto">
+                    <div
+                      className="grid min-w-[640px] gap-2"
+                      style={{
+                        gridTemplateColumns: "140px repeat(4, minmax(0, 1fr))",
+                      }}
+                    >
+                      <div />
+                      {["surface", "working", "proficient", "deep"].map((l) => (
+                        <div
+                          key={l}
+                          className="flex items-center gap-1.5 px-1 pb-1 text-[13px] font-black"
                         >
-                          <div className="text-[12px] font-black uppercase text-neutral-700">
-                            {g.severity === "weak"
-                              ? "assessed, shallow"
-                              : "not assessed"}
-                          </div>
-                          <p className="text-[13px] leading-5">
-                            {asString(g.message)}
-                          </p>
-                        </button>
+                          <Dot color={LEVEL_COLOR[l]} /> {LEVEL_LABEL[l]}
+                        </div>
+                      ))}
+                      {domainGroups.map((g) => (
+                        <DepthRow key={asString(g.key)} g={g} onPick={pick} />
                       ))}
                     </div>
                   </div>
-                  <Fold title="Hierarchy: what builds on what">
-                    {asArray<Obj>(relations.hierarchy).length === 0 ? (
-                      <p className="text-[13px] text-neutral-800">
-                        No BUILDS_ON edge touches an assessed topic yet.
-                      </p>
-                    ) : (
-                      <div className="grid gap-x-6 gap-y-2 md:grid-cols-2">
-                        {asArray<Obj>(relations.hierarchy)
-                          .slice(0, 12)
-                          .map((h) => (
-                            <div key={asString(h.topic?.slug)}>
-                              <button
-                                type="button"
-                                className="text-[13px] font-black hover:underline"
-                                onClick={() => pick(asString(h.topic?.slug))}
-                              >
-                                {asString(h.topic?.name)}
-                              </button>
-                              {asArray<Obj>(h.buildsOn).length > 0 && (
-                                <p className="text-[12px] leading-4 text-neutral-800">
-                                  builds on{" "}
-                                  {asArray<Obj>(h.buildsOn)
-                                    .map((x) => asString(x.name))
-                                    .join(", ")}
-                                </p>
-                              )}
-                            </div>
-                          ))}
-                      </div>
-                    )}
-                  </Fold>
                 </div>
               ) : (
-                <Empty text="Relations could not be loaded." />
+                <Empty text="The depth map appears once topics are assessed." />
               ))}
 
-            {/* GROUPS */}
             {lens === "groups" &&
               (activeDim ? (
                 <div>
@@ -2064,7 +2612,7 @@ export default function OverviewPage() {
                         key={asString(x.id)}
                         type="button"
                         onClick={() => setGroupDim(asString(x.id))}
-                        className="rounded-full px-3 py-1 text-[13px] font-black"
+                        className="press rounded-full px-3 py-1 text-[13px] font-black"
                         style={{
                           backgroundColor: activeDim?.id === x.id ? INK : WHITE,
                           color: activeDim?.id === x.id ? PAPER : INK,
@@ -2089,6 +2637,9 @@ export default function OverviewPage() {
                         </div>
                         <div className="text-[12px] text-neutral-700">
                           {num(g.count)} topics · avg {num(g.averageScore)}
+                          {g.internalLinks != null
+                            ? ` · ${num(g.internalLinks)} links inside`
+                            : ""}
                         </div>
                       </div>
                       <div className="flex flex-wrap gap-1.5">
@@ -2109,7 +2660,73 @@ export default function OverviewPage() {
                 <Empty text="Groupings could not be loaded." />
               ))}
 
-            {/* ALL TOPICS */}
+            {lens === "foundations" &&
+              (relations ? (
+                <div className="grid gap-5 lg:grid-cols-2">
+                  <div>
+                    <div className="mb-2 text-[13px] font-black">
+                      Strong topics on weak or unverified foundations
+                    </div>
+                    <div className="space-y-2.5">
+                      {asArray<Obj>(relations.foundationGaps).length === 0 && (
+                        <span className="text-[13px] text-neutral-800">
+                          Every foundation of a proficient or deep topic has
+                          assessed evidence.
+                        </span>
+                      )}
+                      {asArray<Obj>(relations.foundationGaps).map((g, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => pick(asString(g.topic?.slug))}
+                          className="press block w-full pl-3 text-left"
+                          style={{
+                            borderLeft: `4px solid ${g.severity === "weak" ? CORAL : YELLOW}`,
+                          }}
+                        >
+                          <div className="text-[12px] font-black uppercase text-neutral-700">
+                            {g.severity === "weak"
+                              ? "assessed, shallow"
+                              : "not assessed"}
+                          </div>
+                          <p className="text-[13px] leading-5">
+                            {asString(g.message)}
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mb-2 text-[13px] font-black">
+                      Topics that build on what you know
+                    </div>
+                    <div className="space-y-2.5">
+                      {asArray<Obj>(relations.frontier).length === 0 && (
+                        <span className="text-[13px] text-neutral-800">
+                          No unassessed topic builds on your assessed ones yet.
+                        </span>
+                      )}
+                      {asArray<Obj>(relations.frontier).map((f) => (
+                        <div
+                          key={asString(f.slug)}
+                          className="pl-3"
+                          style={{ borderLeft: `4px solid ${SKY}` }}
+                        >
+                          <div className="text-[13px] font-black">
+                            {asString(f.name)}
+                          </div>
+                          <p className="text-[12px] leading-4 text-neutral-800">
+                            {asString(f.message)}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <Empty text="Relations could not be loaded." />
+              ))}
+
             {lens === "topics" && (
               <div>
                 <div className="mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
@@ -2164,21 +2781,14 @@ export default function OverviewPage() {
                         key={asString(c.slug)}
                         type="button"
                         onClick={() => pick(asString(c.slug))}
-                        className="flex w-full items-center gap-3 py-2.5 text-left hover:bg-black/[.04]"
+                        className="press flex w-full items-center gap-3 py-2.5 text-left hover:bg-black/[.04]"
                         style={{
                           borderBottom: `1px solid ${LINE}`,
                           backgroundColor:
                             sel === c.slug ? `${YELLOW}55` : undefined,
                         }}
                       >
-                        <span
-                          className="h-3 w-3 shrink-0 rounded-full"
-                          style={{
-                            backgroundColor:
-                              LEVEL_COLOR[asString(c.level)] ?? CARD,
-                            border: `1.5px solid ${INK}`,
-                          }}
-                        />
+                        <Dot color={LEVEL_COLOR[asString(c.level)] ?? CARD} />
                         <span
                           className="w-56 shrink-0 truncate text-[13px] font-black"
                           style={{ fontFamily: DISPLAY_FONT }}
@@ -2190,7 +2800,7 @@ export default function OverviewPage() {
                         </span>
                         <span className="ml-auto shrink-0 text-[12px] font-bold text-neutral-700">
                           {LEVEL_LABEL[asString(c.level)] ?? c.level} ·{" "}
-                          {num(c.score)}
+                          {num(c.score)} · {asString(c.confidence)} conf.
                         </span>
                       </button>
                     ))}
@@ -2226,14 +2836,12 @@ export default function OverviewPage() {
               </div>
             )}
 
-            {/* PATHS */}
             {lens === "paths" && (
               <div>
                 <p className="mb-3 text-[13px] text-neutral-800">
-                  Pick two topics to see the shortest path through real graph
-                  relationships. Each hop says whether it is a foundation
-                  dependency (builds on) or an association (related). It glows
-                  on the constellation. A path shows connection, not skill.
+                  Pick two topics to see the shortest route through the graph.
+                  Each hop says whether it is a foundation or just an
+                  association.
                 </p>
                 <div className="flex flex-wrap items-center gap-2">
                   <RouteIcon size={15} />
@@ -2269,34 +2877,40 @@ export default function OverviewPage() {
                   )}
                 </div>
                 {pathRes && (
-                  <div className="mt-3 text-[13px] leading-5">
-                    {asArray<Obj>(pathRes.segments).length > 0 ? (
-                      <ol className="space-y-1">
-                        {asArray<Obj>(pathRes.segments).map((sg, i) => (
-                          <li key={i} className="font-bold">
-                            {asString(sg.fromName)}{" "}
+                  <div
+                    className="mt-4 flex flex-wrap items-center gap-2"
+                    style={{ animation: "oslide .25s ease-out both" }}
+                  >
+                    {asArray<Obj>(pathRes.steps).map((s, i) => {
+                      const seg = asArray<Obj>(pathRes.segments)[i - 1];
+                      return (
+                        <span
+                          key={i}
+                          className="inline-flex items-center gap-2"
+                        >
+                          {seg && (
                             <span
                               className="rounded-full px-2 py-0.5 text-[11px] font-black"
                               style={{
                                 backgroundColor:
-                                  sg.type === "BUILDS_ON" ? SKY : LAVENDER,
+                                  seg.type === "BUILDS_ON" ? SKY : LAVENDER,
                                 ...border,
                               }}
                             >
-                              {sg.type === "BUILDS_ON"
+                              {seg.type === "BUILDS_ON"
                                 ? "builds on"
-                                : "related to"}
-                            </span>{" "}
-                            {asString(sg.toName)}
-                          </li>
-                        ))}
-                      </ol>
-                    ) : (
-                      <p className="font-bold">{asString(pathRes.sentence)}</p>
-                    )}
-                    <span className="font-semibold text-neutral-700">
-                      ({num(pathRes.hops)} hops)
-                    </span>
+                                : "goes with"}
+                            </span>
+                          )}
+                          <TopicChip
+                            t={s}
+                            onClick={() =>
+                              s.assessed ? pick(asString(s.slug)) : undefined
+                            }
+                          />
+                        </span>
+                      );
+                    })}
                   </div>
                 )}
                 {pathErr && (
@@ -2310,75 +2924,76 @@ export default function OverviewPage() {
               </div>
             )}
 
-            {/* UNDER THE HOOD */}
             {lens === "hood" && (
               <div className="space-y-4">
                 <p className="text-[13px] leading-5 text-neutral-800">
-                  FalkorDB runs the graph algorithms over the topic taxonomy, a
-                  model judges depth from cited evidence, and rules keep it
-                  honest. Centrality describes graph structure; it does not
-                  prove expertise.
+                  FalkorDB runs graph algorithms over the shared topic map. They
+                  describe how topics are structured. Your skill level always
+                  comes from your code, never from these scores.
                 </p>
-                <div>
-                  {asArray<Obj>(algos?.algorithms).map((a) => (
-                    <AlgoRow key={asString(a.id)} a={a} onPick={pick} />
-                  ))}
+                <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                  {asArray<Obj>(algos?.algorithms)
+                    .filter((a) => a.engine !== "in-process")
+                    .map((a) => (
+                      <AlgoCard key={asString(a.id)} a={a} onPick={pick} />
+                    ))}
                 </div>
                 {!algos && (
                   <Empty text="Algorithm details could not be loaded." />
                 )}
-                <Fold title="How scores are decided">
-                  <div className="grid gap-6 lg:grid-cols-2">
-                    <Block title="Baseline components (capped at 100)">
-                      <div className="space-y-1.5">
-                        {asArray<Obj>(model?.scoring?.baselineComponents).map(
-                          (c) => (
-                            <div
-                              key={asString(c.id)}
-                              className="flex items-center gap-2 text-[13px]"
-                            >
-                              <span className="w-44 shrink-0 font-black">
-                                {humanize(asString(c.id))}
-                              </span>
-                              <div
-                                className="h-2.5 flex-1 overflow-hidden rounded-full"
-                                style={{
-                                  backgroundColor: CARD,
-                                  border: `1.5px solid ${INK}`,
-                                }}
-                              >
-                                <div
-                                  className="h-full"
-                                  style={{
-                                    width: `${(num(c.max) / 20) * 100}%`,
-                                    backgroundColor: SKY,
-                                  }}
-                                />
-                              </div>
-                              <span className="w-8 text-right font-bold">
-                                {num(c.max)}
-                              </span>
-                            </div>
-                          ),
-                        )}
-                      </div>
-                    </Block>
-                    <Block title="Guard-rails">
-                      <ul className="space-y-1.5">
-                        {asArray<string>(model?.scoring?.guardRails).map(
-                          (g, i) => (
-                            <li
-                              key={i}
-                              className="pl-3 text-[13px] leading-5 text-neutral-900"
-                              style={{ borderLeft: `3px solid ${LINE}` }}
-                            >
-                              {g}
-                            </li>
-                          ),
-                        )}
-                      </ul>
-                    </Block>
+
+                {integrity && (
+                  <div
+                    className="rounded-2xl p-3"
+                    style={{ backgroundColor: WHITE, ...border }}
+                  >
+                    <div className="flex items-center gap-2 text-[14px] font-black">
+                      <ShieldCheck
+                        size={16}
+                        color={integrity.passed ? GREEN : CORAL}
+                      />
+                      Graph health
+                      <Chip
+                        text={
+                          integrity.passed
+                            ? "all checks pass"
+                            : `${integrityFailed} need attention`
+                        }
+                        background={integrity.passed ? GREEN : CORAL}
+                        color={WHITE}
+                      />
+                    </div>
+                    <ul className="mt-2 grid gap-1.5 md:grid-cols-2">
+                      {asArray<Obj>(integrity.checks).map((c) => (
+                        <li
+                          key={asString(c.id)}
+                          className="flex items-start gap-2 text-[12px] leading-4"
+                        >
+                          <span className="mt-0.5">
+                            <Dot color={c.passed ? GREEN : CORAL} small />
+                          </span>
+                          <span>
+                            <b>{humanize(asString(c.id))}:</b>{" "}
+                            {asString(c.detail)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
+                )}
+
+                <Fold title="How ratings are protected from inflation">
+                  <ul className="grid gap-2 md:grid-cols-2">
+                    {asArray<string>(model?.scoring?.guardRails).map((g, i) => (
+                      <li
+                        key={i}
+                        className="pl-3 text-[13px] leading-5 text-neutral-900"
+                        style={{ borderLeft: `3px solid ${LINE}` }}
+                      >
+                        {g}
+                      </li>
+                    ))}
+                  </ul>
                 </Fold>
               </div>
             )}
@@ -2394,7 +3009,7 @@ export default function OverviewPage() {
             block: "start",
           })
         }
-        className="fixed bottom-5 right-5 z-30 flex items-center gap-2 rounded-full px-4 py-3 text-[13px] font-black xl:hidden"
+        className="press fixed bottom-5 right-5 z-30 flex items-center gap-2 rounded-full px-4 py-3 text-[13px] font-black xl:hidden"
         style={{ backgroundColor: YELLOW, ...border, boxShadow: shadow(3) }}
       >
         <MessageCircle size={16} /> Ask
@@ -2403,146 +3018,314 @@ export default function OverviewPage() {
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* GOAL MODULE (compact "Set a goal" row; result opens on the /goal page)     */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* DEPTH MAP ROW                                                              */
+/* ========================================================================== */
 
-function GoalModule({
-  wish,
-  onWish,
-  busy,
-  err,
-  help,
-  disabledReason,
-  onSubmit,
-  onSuggest,
-  onDismissHelp,
-}: {
-  wish: string;
-  onWish: (v: string) => void;
-  busy: boolean;
-  err: string | null;
-  help: Obj | null;
-  disabledReason: string | null;
-  onSubmit: () => void;
-  onSuggest: (name: string) => void;
-  onDismissHelp: () => void;
-}) {
-  const locked = !!disabledReason;
-  const ready = wish.trim().length >= 3 && !busy && !locked;
-  const suggestions = asArray<Obj>(help?.suggestions).slice(0, 8);
-
+function DepthRow({ g, onPick }: { g: Obj; onPick: (slug: string) => void }) {
+  const topics = asArray<Obj>(g.topics);
   return (
-    <div className="mt-3">
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (ready) onSubmit();
-        }}
-        className="flex flex-col gap-2 rounded-2xl px-3 py-2 sm:flex-row sm:items-center"
-        style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
-      >
+    <>
+      <div className="flex flex-col justify-center px-1">
         <span
-          className="inline-flex shrink-0 items-center gap-1.5 text-[13px] font-black"
+          className="text-[13px] font-black"
           style={{ fontFamily: DISPLAY_FONT }}
         >
-          <span
-            className="flex h-7 w-7 items-center justify-center rounded-full"
-            style={{ backgroundColor: YELLOW, ...border }}
-          >
-            <Target size={14} aria-hidden />
-          </span>
-          Set a goal
+          {asString(g.label)}
         </span>
-        <input
-          value={wish}
-          onChange={(e) => onWish(e.target.value)}
-          maxLength={500}
-          disabled={busy || locked}
-          placeholder={
-            locked
-              ? disabledReason
-              : "e.g. I want to improve my frontend engineering skills"
-          }
-          aria-label="Describe the goal you want"
-          className="min-w-0 flex-1 rounded-full px-4 py-1.5 text-[13px] font-semibold outline-none disabled:opacity-60"
-          style={{ backgroundColor: PAPER, ...border }}
-        />
-        <button
-          type="submit"
-          disabled={!ready}
-          className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-[13px] font-black transition-transform hover:-translate-y-0.5 disabled:opacity-50 disabled:hover:translate-y-0"
-          style={{ backgroundColor: YELLOW, ...border }}
-        >
-          {busy ? (
-            <>
-              <RefreshCw size={13} className="animate-spin" /> Reading your
-              graph…
-            </>
-          ) : (
-            <>
-              Build my goal <ChevronRight size={14} strokeWidth={3} />
-            </>
-          )}
-        </button>
-      </form>
+        <span className="text-[11px] text-neutral-700">
+          {num(g.count)} topics
+        </span>
+      </div>
+      {["surface", "working", "proficient", "deep"].map((l) => {
+        const cell = topics.filter((t) => asString(t.level) === l);
+        return (
+          <div
+            key={l}
+            className="flex min-h-[54px] flex-wrap content-center gap-1 rounded-xl p-1.5"
+            style={{
+              backgroundColor: cell.length ? `${LEVEL_COLOR[l]}2A` : "#F7F4EC",
+              border: `1.5px ${cell.length ? "solid" : "dashed"} ${cell.length ? LEVEL_COLOR[l] : LINE}`,
+            }}
+          >
+            {cell.map((t) => (
+              <button
+                key={asString(t.slug)}
+                type="button"
+                onClick={() => onPick(asString(t.slug))}
+                className="press rounded-full px-2 py-0.5 text-[11px] font-bold"
+                style={{ backgroundColor: WHITE, ...border }}
+              >
+                {cut(asString(t.name), 20)}
+              </button>
+            ))}
+          </div>
+        );
+      })}
+    </>
+  );
+}
 
-      {err && (
-        <p className="mt-2 text-[13px] font-bold" style={{ color: CORAL }}>
-          {err}
+/* ========================================================================== */
+/* ALGORITHM CARD (what FalkorDB computed, in plain words)                    */
+/* ========================================================================== */
+
+function AlgoCard({ a, onPick }: { a: Obj; onPick: (slug: string) => void }) {
+  const st = a.status as Obj | null;
+  const f = (a.findings ?? {}) as Obj;
+  const engineBg =
+    a.engine === "falkordb"
+      ? SKY
+      : a.engine === "cypher"
+        ? LAVENDER
+        : a.engine === "index"
+          ? YELLOW
+          : CARD;
+  const chips: Obj[] =
+    a.id === "pagerank"
+      ? asArray<Obj>(f.topFoundations)
+      : a.id === "betweenness"
+        ? asArray<Obj>(f.topBridges)
+        : [];
+  return (
+    <div
+      className="rounded-2xl p-3.5"
+      style={{
+        backgroundColor: WHITE,
+        ...border,
+        borderTop: `6px solid ${engineBg}`,
+      }}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className="text-[14px] font-black"
+          style={{ fontFamily: DISPLAY_FONT }}
+        >
+          {asString(a.name)}
+        </span>
+        <Chip text={asString(a.engine)} background={engineBg} />
+      </div>
+      <p className="mt-1 text-[13px] font-bold leading-5">{asString(a.role)}</p>
+      <p className="mt-0.5 text-[12px] leading-4 text-neutral-700">
+        {a.affectsAssessment
+          ? "Also feeds the confidence of each rating."
+          : "Describes structure only."}
+      </p>
+      {st && (
+        <div className="mt-2 flex items-center gap-2 text-[12px] font-bold text-neutral-800">
+          <span
+            className="relative inline-block h-2 flex-1 overflow-hidden rounded-full"
+            style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
+          >
+            <span
+              className="absolute inset-y-0 left-0"
+              style={{
+                width: `${num(st.coverage) * 100}%`,
+                backgroundColor: st.computed ? GREEN : CORAL,
+                transition: "width .6s ease",
+              }}
+            />
+          </span>
+          {Math.round(num(st.coverage) * 100)}% of topics
+        </div>
+      )}
+      {chips.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {chips.map((x) => (
+            <TopicChip
+              key={asString(x.topic?.slug)}
+              t={x.topic}
+              onClick={() => onPick(asString(x.topic?.slug))}
+            />
+          ))}
+        </div>
+      )}
+      {a.id === "label_propagation" && (
+        <p className="mt-2 text-[12px] font-bold">
+          {num(f.communities)} communities
+          {f.largest ? ` · largest: ${asString(f.largest.label)}` : ""}
         </p>
       )}
+      {a.id === "wcc" && (
+        <p className="mt-2 text-[12px] font-bold">
+          {num(f.components)} components · main body {num(f.mainSize)} topics
+        </p>
+      )}
+    </div>
+  );
+}
 
-      {help && (
+/* ========================================================================== */
+/* RELATIONSHIP INSPECTOR                                                     */
+/* ========================================================================== */
+
+const REL_LABEL = (type: string) =>
+  type === "BUILDS_ON" ? "builds on" : "goes with";
+
+function RelationInspector({
+  sel,
+  selName,
+  edge,
+  out,
+  inc,
+  nodeBySlug,
+  onEdge,
+}: {
+  sel: string | null;
+  selName: string;
+  edge: Obj | null;
+  out: Obj[];
+  inc: Obj[];
+  nodeBySlug: Map<string, Obj>;
+  onEdge: (e: Obj | null) => void;
+}) {
+  const nameOf = (slug: string) =>
+    asString(nodeBySlug.get(slug)?.label) || humanize(slug);
+  const pill = (type: string, text: string) => (
+    <span
+      className="mr-1 rounded-full px-1.5 py-px text-[10px] font-black"
+      style={{
+        backgroundColor: type === "BUILDS_ON" ? SKY : LAVENDER,
+        border: `1.5px solid ${INK}`,
+      }}
+    >
+      {text}
+    </span>
+  );
+  const row = (e: Obj, other: string, label: string) => (
+    <li key={asString(e.id)} className="text-[12px] leading-4">
+      <button
+        type="button"
+        onClick={() => onEdge(e)}
+        className="press text-left"
+      >
+        {pill(asString(e.type), label)}
+        <b>{nameOf(other)}</b>
+      </button>
+      {asString(e.reason) && (
+        <span className="text-neutral-700">
+          {" "}
+          — {cut(asString(e.reason), 80)}
+        </span>
+      )}
+    </li>
+  );
+  return (
+    <div
+      className="max-h-[170px] shrink-0 overflow-y-auto px-4 py-2.5 text-[12px]"
+      style={{ borderTop: `1px solid ${LINE}`, color: INK }}
+    >
+      {edge ? (
         <div
-          className="mt-2 rounded-2xl p-3"
-          style={{
-            backgroundColor: LAVENDER,
-            ...border,
-            animation: "oslide .25s ease-out both",
-          }}
+          className="flex items-start justify-between gap-3"
+          style={{ animation: "oslide .25s ease-out both" }}
         >
-          <div className="flex items-start justify-between gap-3">
-            <p className="text-[13px] font-bold leading-5">
-              {asString(help.message, "Name a more specific topic or area.")}
-            </p>
-            <button
-              type="button"
-              onClick={onDismissHelp}
-              aria-label="Dismiss"
-              className="shrink-0 rounded-full p-1"
-              style={{ backgroundColor: WHITE, ...border }}
-            >
-              <X size={12} />
-            </button>
-          </div>
-          {suggestions.length > 0 && (
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              <span className="text-[12px] font-black text-neutral-800">
-                Topics in your graph:
-              </span>
-              {suggestions.map((s) => (
-                <button
-                  key={asString(s.slug)}
-                  type="button"
-                  onClick={() => onSuggest(asString(s.name ?? s.slug))}
-                  className="rounded-full px-2.5 py-0.5 text-[12px] font-bold transition-transform hover:-translate-y-0.5"
-                  style={{ backgroundColor: WHITE, ...border }}
-                >
-                  {asString(s.name ?? s.slug)}
-                </button>
-              ))}
+          <div>
+            <div className="text-[13px] font-black">
+              {nameOf(asString(edge.source))}{" "}
+              {pill(asString(edge.type), REL_LABEL(asString(edge.type)))}{" "}
+              {nameOf(asString(edge.target))}
             </div>
-          )}
+            <p className="mt-1 text-[13px] leading-5 text-neutral-900">
+              {asString(edge.reason) ||
+                "The graph records this link without a stated reason."}
+            </p>
+            <p className="text-[11px] leading-4 text-neutral-700">
+              {edge.type === "BUILDS_ON"
+                ? edge.trusted === false
+                  ? "No stated reason, so it is ignored for prerequisites."
+                  : "The first topic stands on the second."
+                : "Often used together. Not a prerequisite and not proof of skill."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => onEdge(null)}
+            aria-label="Close connection"
+            className="press shrink-0 rounded-full p-1"
+            style={{ backgroundColor: WHITE, ...border }}
+          >
+            <X size={12} />
+          </button>
+        </div>
+      ) : sel ? (
+        out.length + inc.length === 0 ? (
+          <p className="font-semibold text-neutral-800">
+            {selName || humanize(sel)} has no recorded link to other topics.
+          </p>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <div className="mb-1 font-black text-neutral-700">
+                Outgoing from {selName || humanize(sel)}
+              </div>
+              <ul className="space-y-1">
+                {out.length === 0 && <li className="text-neutral-700">None</li>}
+                {out
+                  .slice(0, 5)
+                  .map((e) =>
+                    row(e, asString(e.target), REL_LABEL(asString(e.type))),
+                  )}
+              </ul>
+            </div>
+            <div>
+              <div className="mb-1 font-black text-neutral-700">
+                Incoming to {selName || humanize(sel)}
+              </div>
+              <ul className="space-y-1">
+                {inc.length === 0 && <li className="text-neutral-700">None</li>}
+                {inc
+                  .slice(0, 5)
+                  .map((e) =>
+                    row(
+                      e,
+                      asString(e.source),
+                      `${REL_LABEL(asString(e.type))} it`,
+                    ),
+                  )}
+              </ul>
+            </div>
+          </div>
+        )
+      ) : (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-semibold">
+          <span className="flex items-center gap-1.5">
+            <span className="h-0.5 w-5" style={{ backgroundColor: INK }} />{" "}
+            builds on (arrow to the foundation)
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="h-0.5 w-5"
+              style={{ borderTop: `2px dashed ${INK}` }}
+            />{" "}
+            goes with
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="h-3 w-3 rounded-full"
+              style={{ border: `3px solid ${SKY}` }}
+            />{" "}
+            foundation
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span
+              className="h-3 w-3 rounded-full"
+              style={{ border: `3px dashed ${CORAL}` }}
+            />{" "}
+            bridge
+          </span>
+          <span className="ml-auto text-neutral-800">
+            Click a topic to light up its links, or a line to see why it exists.
+          </span>
         </div>
       )}
     </div>
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* RUN MINI (inline radar while analysing)                                    */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* RUN PROGRESS                                                               */
+/* ========================================================================== */
 
 function RunMini({
   job,
@@ -2606,15 +3389,17 @@ function RunMini({
           const h = hash(asString(e.detail?.topic));
           const a = (h % 360) * (Math.PI / 180);
           const r = 8 + (h % 26);
+          const cx = 40 + Math.cos(a) * r;
+          const cy = 40 + Math.sin(a) * r;
           return (
             <circle
               key={i}
-              cx={40 + Math.cos(a) * r}
-              cy={40 + Math.sin(a) * r}
+              cx={cx}
+              cy={cy}
               r="2.6"
               fill={i % 2 ? CORAL : SKY}
               style={{
-                transformOrigin: `${40 + Math.cos(a) * r}px ${40 + Math.sin(a) * r}px`,
+                transformOrigin: `${cx}px ${cy}px`,
                 animation: "opop .5s cubic-bezier(.2,1.4,.4,1) both",
               }}
             />
@@ -2650,7 +3435,7 @@ function RunMini({
               <div
                 key={asString(s.id)}
                 title={asString(s.title)}
-                className="h-1.5 flex-1 rounded-full"
+                className="h-1.5 flex-1 rounded-full transition-colors duration-500"
                 style={{
                   backgroundColor:
                     step > i ? GREEN : step === i ? YELLOW : "#3a3d3a",
@@ -2667,109 +3452,9 @@ function RunMini({
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* ALGORITHM ROW                                                              */
-/* -------------------------------------------------------------------------- */
-
-function AlgoRow({ a, onPick }: { a: Obj; onPick: (slug: string) => void }) {
-  const st = a.status as Obj | null;
-  const f = (a.findings ?? {}) as Obj;
-  const engineBg =
-    a.engine === "falkordb"
-      ? SKY
-      : a.engine === "cypher"
-        ? LAVENDER
-        : a.engine === "index"
-          ? YELLOW
-          : CARD;
-  return (
-    <div className="py-3" style={{ borderBottom: `1px solid ${LINE}` }}>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span
-          className="text-[14px] font-black"
-          style={{ fontFamily: DISPLAY_FONT }}
-        >
-          {asString(a.name)}
-        </span>
-        <Chip text={asString(a.engine)} background={engineBg} />
-        {st && (
-          <span className="flex items-center gap-2 text-[12px] font-bold text-neutral-800">
-            <span
-              className="relative inline-block h-2 w-24 overflow-hidden rounded-full"
-              style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
-            >
-              <span
-                className="absolute inset-y-0 left-0"
-                style={{
-                  width: `${num(st.coverage) * 100}%`,
-                  backgroundColor: st.computed ? GREEN : CORAL,
-                }}
-              />
-            </span>
-            {Math.round(num(st.coverage) * 100)}% coverage
-          </span>
-        )}
-      </div>
-      <p className="mt-1 text-[13px] leading-5 text-neutral-800">
-        {asString(a.why)}
-      </p>
-      {a.id === "pagerank" && asArray<Obj>(f.topFoundations).length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {asArray<Obj>(f.topFoundations).map((x) => (
-            <TopicChip
-              key={asString(x.topic?.slug)}
-              t={x.topic}
-              onClick={() => onPick(asString(x.topic?.slug))}
-            />
-          ))}
-        </div>
-      )}
-      {a.id === "betweenness" && asArray<Obj>(f.topBridges).length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {asArray<Obj>(f.topBridges).map((x) => (
-            <TopicChip
-              key={asString(x.topic?.slug)}
-              t={x.topic}
-              onClick={() => onPick(asString(x.topic?.slug))}
-            />
-          ))}
-        </div>
-      )}
-      {a.id === "label_propagation" && (
-        <p className="mt-1 text-[13px] font-bold">
-          {num(f.communities)} communities
-          {f.largest
-            ? ` · largest: ${asString(f.largest.label)} (${num(f.largest.count)})`
-            : ""}
-        </p>
-      )}
-      {a.id === "wcc" && (
-        <p className="mt-1 text-[13px] font-bold">
-          {num(f.components)} components · main body {num(f.mainSize)} topics
-        </p>
-      )}
-      <Fold title="Call and how to read it" small>
-        <code
-          className="block break-all rounded-lg p-2 text-[12px] leading-4"
-          style={{
-            backgroundColor: WHITE,
-            ...border,
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          }}
-        >
-          {asString(a.call)}
-        </code>
-        <p className="mt-1.5 text-[13px] leading-5 text-neutral-900">
-          {asString(a.howToRead)}
-        </p>
-      </Fold>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* GRAPH VIEW (dark constellation, fills its container)                       */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* KNOWLEDGE GRAPH VIEW                                                       */
+/* ========================================================================== */
 
 const radiusOf = (n: Obj) => Math.min(24, Math.max(9, num(n.size, 16) * 0.5));
 
@@ -2780,11 +3465,7 @@ function nodeFill(n: Obj, colorBy: string): string {
   const v =
     colorBy === "domain"
       ? (n.domain ?? n.domainLabel)
-      : (n.cluster ??
-        n.clusterId ??
-        n.community ??
-        n.communityId ??
-        n.communityLabel);
+      : (n.cluster ?? n.clusterId);
   if (v == null || v === "") return byLevel;
   return PALETTE[hash(asString(v)) % PALETTE.length];
 }
@@ -2793,245 +3474,439 @@ function TopicGraph({
   nodes,
   edges,
   pos,
+  bands,
   colorBy,
   selected,
+  selectedEdge,
   glow,
   pathIds,
   running,
   onSelect,
+  onEdge,
 }: {
   nodes: Obj[];
   edges: Obj[];
-  pos: Map<string, { x: number; y: number }>;
+  pos: Map<string, Pt>;
+  bands: Array<{ rank: number; y: number }> | null;
   colorBy: string;
   selected: string | null;
+  selectedEdge: string;
   glow: Set<string>;
   pathIds: Set<string>;
   running: boolean;
   onSelect: (n: Obj) => void;
+  onEdge: (e: Obj) => void;
 }) {
   const [hover, setHover] = useState<string | null>(null);
   const byId = useMemo(
     () => new Map(nodes.map((n) => [asString(n.id), n] as [string, Obj])),
     [nodes],
   );
-  const hoverSet = useMemo(() => {
-    if (!hover) return null;
-    const s = new Set<string>([hover]);
+  const focusId = hover ?? selected;
+  const focusSet = useMemo(() => {
+    if (!focusId) return null;
+    const s = new Set<string>([focusId]);
     for (const e of edges) {
-      if (e.source === hover) s.add(asString(e.target));
-      if (e.target === hover) s.add(asString(e.source));
+      if (e.source === focusId) s.add(asString(e.target));
+      if (e.target === focusId) s.add(asString(e.source));
     }
     return s;
-  }, [hover, edges]);
+  }, [focusId, edges]);
+
+  /* soft hulls around each engineering area (areas layout only) */
+  const hulls = useMemo(() => {
+    if (bands) return [];
+    const by = new Map<string, Obj[]>();
+    nodes
+      .filter((n) => n.assessed)
+      .forEach((n) =>
+        by.set(asString(n.domain), [...(by.get(asString(n.domain)) ?? []), n]),
+      );
+    return [...by.entries()]
+      .filter(([, list]) => list.length >= 2)
+      .map(([domain, list]) => {
+        const pts = list
+          .map((n) => pos.get(asString(n.id)))
+          .filter((p): p is Pt => !!p);
+        const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+        const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+        const r =
+          Math.max(...pts.map((p) => Math.hypot(p.x - cx, p.y - cy))) + 52;
+        return { domain, cx, cy, r };
+      });
+  }, [nodes, pos, bands]);
+
+  const hn = hover ? byId.get(hover) : null;
+  const hp = hover ? pos.get(hover) : null;
 
   return (
-    <svg
-      viewBox={`0 0 ${GW} ${GH}`}
-      className="absolute inset-0 block h-full w-full"
-      role="group"
-      aria-label="Constellation of your topics"
-    >
-      <defs>
-        <pattern
-          id="dgrid"
-          width="32"
-          height="32"
-          patternUnits="userSpaceOnUse"
-        >
-          <circle cx="1" cy="1" r="1" fill={INK} opacity=".13" />
-        </pattern>
-        <marker
-          id="tarrow"
-          viewBox="0 0 10 10"
-          refX="9"
-          refY="5"
-          markerWidth="6"
-          markerHeight="6"
-          orient="auto-start-reverse"
-        >
-          <path d="M0,0 L10,5 L0,10 z" fill={INK} />
-        </marker>
-      </defs>
-      <rect width={GW} height={GH} fill="url(#dgrid)" />
-
-      {edges.map((e) => {
-        const a = pos.get(asString(e.source));
-        const b = pos.get(asString(e.target));
-        const na = byId.get(asString(e.source));
-        const nb = byId.get(asString(e.target));
-        if (!a || !b || !na || !nb) return null;
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const d = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-        const ra = radiusOf(na) + 3;
-        const rb = radiusOf(nb) + 6;
-        const onPath =
-          pathIds.has(asString(e.source)) && pathIds.has(asString(e.target));
-        const touch = hover && (e.source === hover || e.target === hover);
-        const op = hoverSet ? (touch ? 0.95 : 0.06) : onPath ? 1 : 0.4;
-        return (
-          <line
-            key={asString(e.id)}
-            x1={a.x + (dx / d) * ra}
-            y1={a.y + (dy / d) * ra}
-            x2={b.x - (dx / d) * rb}
-            y2={b.y - (dy / d) * rb}
-            stroke={onPath ? CORAL : INK}
-            strokeWidth={onPath ? 4 : touch ? 2.5 : 1.5}
-            strokeDasharray={e.directed ? undefined : "4 5"}
-            opacity={op}
-            markerEnd={e.directed ? "url(#tarrow)" : undefined}
-          />
-        );
-      })}
-
-      {nodes.map((n, i) => {
-        const p = pos.get(asString(n.id));
-        if (!p) return null;
-        const r = radiusOf(n);
-        const id = asString(n.id);
-        const sel = selected === n.slug;
-        const dim = hoverSet ? !hoverSet.has(id) : false;
-        const roles = asArray<string>(n.roles);
-        const showLabel = n.assessed || hover === id;
-        const above = nodes.length > 8 && i % 2 === 1;
-        return (
-          <g
-            key={id}
-            tabIndex={0}
-            role="button"
-            aria-label={`Topic: ${asString(n.label)}`}
-            aria-pressed={sel}
-            onClick={() => onSelect(n)}
-            onKeyDown={(ev) => {
-              if (ev.key === "Enter" || ev.key === " ") {
-                ev.preventDefault();
-                onSelect(n);
-              }
-            }}
-            onMouseEnter={() => setHover(id)}
-            onMouseLeave={() => setHover(null)}
-            onFocus={() => setHover(id)}
-            onBlur={() => setHover(null)}
-            style={{
-              cursor: n.assessed ? "pointer" : "default",
-              opacity: dim ? 0.15 : 1,
-              transition: "opacity 260ms ease",
-              animation: `ofloat ${5 + (i % 4)}s ${-(i % 7) * 0.8}s ease-in-out infinite`,
-            }}
+    <>
+      <svg
+        viewBox={`0 0 ${GW} ${GH}`}
+        className="absolute inset-0 block h-full w-full"
+        role="group"
+        aria-label="Graph of your engineering topics"
+      >
+        <defs>
+          <pattern
+            id="dgrid"
+            width="32"
+            height="32"
+            patternUnits="userSpaceOnUse"
           >
-            {glow.has(id) && (
-              <>
-                <circle
-                  cx={p.x}
-                  cy={p.y}
-                  r={r + 11}
-                  fill="none"
-                  stroke={YELLOW}
-                  strokeWidth="3.5"
-                />
+            <circle cx="1" cy="1" r="1" fill={INK} opacity=".13" />
+          </pattern>
+          <marker
+            id="tarrow"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="6"
+            markerHeight="6"
+            orient="auto-start-reverse"
+          >
+            <path d="M0,0 L10,5 L0,10 z" fill={INK} />
+          </marker>
+        </defs>
+        <rect width={GW} height={GH} fill="url(#dgrid)" />
+
+        {bands?.map((b) => (
+          <g key={b.rank}>
+            <line
+              x1={60}
+              x2={GW - 20}
+              y1={b.y}
+              y2={b.y}
+              stroke={INK}
+              strokeOpacity=".1"
+              strokeDasharray="3 6"
+            />
+            <text
+              x={14}
+              y={b.y + 4}
+              fontSize="12"
+              fontWeight={900}
+              fontFamily={DISPLAY_FONT}
+              style={{
+                fill:
+                  b.rank < 0
+                    ? "#6b7280"
+                    : (LEVEL_COLOR[LEVEL_ORDER[4 - b.rank]] ?? INK),
+              }}
+            >
+              {b.rank < 0
+                ? "Not assessed"
+                : LEVEL_LABEL[LEVEL_ORDER[4 - b.rank]]}
+            </text>
+          </g>
+        ))}
+        {hulls.map((h, i) => (
+          <g key={h.domain} style={{ pointerEvents: "none" }}>
+            <circle
+              cx={h.cx}
+              cy={h.cy}
+              r={h.r}
+              fill={PALETTE[hash(h.domain) % PALETTE.length]}
+              fillOpacity=".1"
+              stroke={INK}
+              strokeOpacity=".25"
+              strokeDasharray="5 6"
+              style={{
+                animation: `opop .6s ${i * 0.06}s ease-out both`,
+                transformOrigin: `${h.cx}px ${h.cy}px`,
+              }}
+            />
+            <text
+              x={h.cx}
+              y={h.cy - h.r - 6}
+              textAnchor="middle"
+              fontSize="12"
+              fontWeight={900}
+              fontFamily={DISPLAY_FONT}
+              style={{ fill: INK, opacity: 0.55 }}
+            >
+              {humanize(h.domain)}
+            </text>
+          </g>
+        ))}
+
+        {edges.map((e) => {
+          const a = pos.get(asString(e.source));
+          const b = pos.get(asString(e.target));
+          const na = byId.get(asString(e.source));
+          const nb = byId.get(asString(e.target));
+          if (!a || !b || !na || !nb) return null;
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const d = Math.max(Math.hypot(dx, dy), 1);
+          const x1 = a.x + (dx / d) * (radiusOf(na) + 3);
+          const y1 = a.y + (dy / d) * (radiusOf(na) + 3);
+          const x2 = b.x - (dx / d) * (radiusOf(nb) + 6);
+          const y2 = b.y - (dy / d) * (radiusOf(nb) + 6);
+          const onPath =
+            pathIds.has(asString(e.source)) && pathIds.has(asString(e.target));
+          const touch =
+            focusId && (e.source === focusId || e.target === focusId);
+          const isSel = selectedEdge !== "" && selectedEdge === asString(e.id);
+          const untrusted = e.type === "BUILDS_ON" && e.trusted === false;
+          const op = focusSet
+            ? touch
+              ? 0.95
+              : 0.06
+            : onPath
+              ? 1
+              : untrusted
+                ? 0.2
+                : 0.4;
+          return (
+            <g key={asString(e.id)}>
+              <line
+                x1={x1}
+                y1={y1}
+                x2={x2}
+                y2={y2}
+                stroke={onPath || isSel ? CORAL : INK}
+                strokeWidth={onPath || isSel ? 4 : touch ? 2.5 : 1.5}
+                strokeDasharray={e.directed && !untrusted ? undefined : "4 5"}
+                opacity={isSel ? 1 : op}
+                markerEnd={e.directed ? "url(#tarrow)" : undefined}
+                style={{
+                  transition: "opacity .3s ease, stroke-width .2s ease",
+                }}
+              />
+              {touch && (
+                <text
+                  x={(x1 + x2) / 2}
+                  y={(y1 + y2) / 2 - 5}
+                  textAnchor="middle"
+                  fontSize="10"
+                  fontWeight={800}
+                  fontFamily={BODY_FONT}
+                  style={{
+                    fill: INK,
+                    paintOrder: "stroke",
+                    stroke: "#F8F6F1",
+                    strokeWidth: 4,
+                    pointerEvents: "none",
+                  }}
+                >
+                  {REL_LABEL(asString(e.type))}
+                </text>
+              )}
+              <line
+                x1={x1}
+                y1={y1}
+                x2={x2}
+                y2={y2}
+                stroke="transparent"
+                strokeWidth={14}
+                style={{ cursor: "pointer" }}
+                onClick={() => onEdge(e)}
+              >
+                <title>{`${asString(na.label)} ${REL_LABEL(asString(e.type))} ${asString(nb.label)}`}</title>
+              </line>
+            </g>
+          );
+        })}
+
+        {nodes.map((n, i) => {
+          const p = pos.get(asString(n.id));
+          if (!p) return null;
+          const r = radiusOf(n);
+          const id = asString(n.id);
+          const sel = selected === n.slug;
+          const dim = focusSet ? !focusSet.has(id) : false;
+          const roles = asArray<string>(n.roles);
+          const showLabel = n.assessed || hover === id;
+          const above = nodes.length > 8 && i % 2 === 1;
+          const arc = 2 * Math.PI * (r + 4);
+          const score = n.assessed
+            ? Math.max(0, Math.min(100, num(n.score)))
+            : 0;
+          return (
+            <g
+              key={id}
+              tabIndex={0}
+              role="button"
+              aria-label={`Topic: ${asString(n.label)}`}
+              aria-pressed={sel}
+              onClick={() => onSelect(n)}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter" || ev.key === " ") {
+                  ev.preventDefault();
+                  onSelect(n);
+                }
+              }}
+              onMouseEnter={() => setHover(id)}
+              onMouseLeave={() => setHover(null)}
+              onFocus={() => setHover(id)}
+              onBlur={() => setHover(null)}
+              style={{
+                cursor: n.assessed ? "pointer" : "default",
+                opacity: dim ? 0.15 : 1,
+                transition: "opacity .3s ease",
+                animation: `ofloat ${5 + (i % 4)}s ${-(i % 7) * 0.8}s ease-in-out infinite`,
+              }}
+            >
+              {glow.has(id) && (
+                <>
+                  <circle
+                    cx={p.x}
+                    cy={p.y}
+                    r={r + 13}
+                    fill="none"
+                    stroke={YELLOW}
+                    strokeWidth="3.5"
+                  />
+                  <circle
+                    cx={p.x}
+                    cy={p.y}
+                    r={r}
+                    fill="none"
+                    stroke={YELLOW}
+                    strokeWidth="2"
+                    style={{ animation: "oring 1.8s ease-out infinite" }}
+                  />
+                </>
+              )}
+              {running && n.assessed && (
                 <circle
                   cx={p.x}
                   cy={p.y}
                   r={r}
                   fill="none"
-                  stroke={YELLOW}
+                  stroke={SKY}
                   strokeWidth="2"
-                  style={{ animation: "oring 1.8s ease-out infinite" }}
+                  style={{
+                    animation: `oring 2.4s ${(i % 6) * 0.35}s ease-out infinite`,
+                  }}
                 />
-              </>
-            )}
-            {running && n.assessed && (
+              )}
+              {roles.includes("foundation") && (
+                <circle
+                  cx={p.x}
+                  cy={p.y}
+                  r={r + 9}
+                  fill="none"
+                  stroke={SKY}
+                  strokeWidth="3.5"
+                />
+              )}
+              {roles.includes("bridge") && (
+                <circle
+                  cx={p.x}
+                  cy={p.y}
+                  r={r + (roles.includes("foundation") ? 15 : 9)}
+                  fill="none"
+                  stroke={CORAL}
+                  strokeWidth="3"
+                  strokeDasharray="4 3"
+                />
+              )}
+              {pathIds.has(id) && (
+                <circle
+                  cx={p.x}
+                  cy={p.y}
+                  r={r + 20}
+                  fill="none"
+                  stroke={CORAL}
+                  strokeWidth="3"
+                />
+              )}
+              {n.assessed && (
+                <circle
+                  cx={p.x}
+                  cy={p.y}
+                  r={r + 4}
+                  fill="none"
+                  stroke={INK}
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeDasharray={`${(score / 100) * arc} ${arc}`}
+                  transform={`rotate(-90 ${p.x} ${p.y})`}
+                  opacity=".85"
+                  style={{ transition: "stroke-dasharray .6s ease" }}
+                />
+              )}
               <circle
                 cx={p.x}
                 cy={p.y}
                 r={r}
-                fill="none"
-                stroke={SKY}
-                strokeWidth="2"
+                fill={nodeFill(n, colorBy)}
+                strokeWidth={sel ? 4.5 : 2.5}
                 style={{
-                  animation: `oring 2.4s ${(i % 6) * 0.35}s ease-out infinite`,
+                  stroke: INK,
+                  filter: "drop-shadow(2px 3px 0 rgba(16,18,16,.9))",
+                  transition: "stroke-width .25s ease",
                 }}
+                strokeDasharray={n.assessed ? undefined : "4 3"}
               />
-            )}
-            {roles.includes("foundation") && (
-              <circle
-                cx={p.x}
-                cy={p.y}
-                r={r + 6}
-                fill="none"
-                stroke={SKY}
-                strokeWidth="3.5"
-              />
-            )}
-            {roles.includes("bridge") && (
-              <circle
-                cx={p.x}
-                cy={p.y}
-                r={r + (roles.includes("foundation") ? 12 : 6)}
-                fill="none"
-                stroke={CORAL}
-                strokeWidth="3"
-                strokeDasharray="4 3"
-              />
-            )}
-            {pathIds.has(id) && (
-              <circle
-                cx={p.x}
-                cy={p.y}
-                r={r + 17}
-                fill="none"
-                stroke={CORAL}
-                strokeWidth="3"
-              />
-            )}
-            <circle
-              cx={p.x}
-              cy={p.y}
-              r={r}
-              fill={nodeFill(n, colorBy)}
-              stroke={PAPER}
-              strokeWidth={sel ? 4.5 : 2.5}
-              style={{
-                stroke: INK,
-                filter: "drop-shadow(2px 3px 0 rgba(16,18,16,.9))",
-                transition: "stroke-width .25s ease",
-              }}
-              strokeDasharray={n.assessed ? undefined : "4 3"}
-            />
-            {showLabel && (
-              <text
-                x={p.x}
-                y={above ? p.y - r - 10 : p.y + r + 16}
-                textAnchor="middle"
-                fontSize={n.assessed ? 13 : 11}
-                fontWeight={n.assessed ? 800 : 600}
-                fontFamily={BODY_FONT}
-                fill={PAPER}
-                style={{
-                  fill: INK,
-                  paintOrder: "stroke",
-                  stroke: "#F8F6F1",
-                  strokeWidth: 5,
-                  strokeLinejoin: "round",
-                }}
-              >
-                {cut(asString(n.label), 22)}
-              </text>
-            )}
-          </g>
-        );
-      })}
-    </svg>
+              {showLabel && (
+                <text
+                  x={p.x}
+                  y={above ? p.y - r - 12 : p.y + r + 18}
+                  textAnchor="middle"
+                  fontSize={n.assessed ? 13 : 11}
+                  fontWeight={n.assessed ? 800 : 600}
+                  fontFamily={BODY_FONT}
+                  style={{
+                    fill: INK,
+                    paintOrder: "stroke",
+                    stroke: "#F8F6F1",
+                    strokeWidth: 5,
+                    strokeLinejoin: "round",
+                  }}
+                >
+                  {cut(asString(n.label), 22)}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+
+      {hn && hp && (
+        <div
+          className="pointer-events-none absolute z-20 w-[210px] rounded-xl p-2.5 text-[12px] leading-4"
+          style={{
+            left: `${(hp.x / GW) * 100}%`,
+            top: `${(hp.y / GH) * 100}%`,
+            transform: `translate(${hp.x > GW * 0.65 ? "-112%" : "16px"}, -50%)`,
+            backgroundColor: INK,
+            color: PAPER,
+            animation: "oslide .15s ease-out both",
+          }}
+        >
+          <div className="text-[13px] font-black">{asString(hn.label)}</div>
+          {hn.assessed ? (
+            <>
+              <div className="mt-0.5 opacity-80">
+                {LEVEL_LABEL[asString(hn.level)] ?? ""} · score {num(hn.score)}{" "}
+                · {asString(hn.confidence)} confidence
+              </div>
+              <div className="opacity-80">
+                {num(hn.files)} files · {num(hn.commits)} commits
+              </div>
+              {asArray<string>(hn.roles).length > 0 && (
+                <div className="mt-0.5 font-bold" style={{ color: YELLOW }}>
+                  {asArray<string>(hn.roles).map(humanize).join(" + ")}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="mt-0.5 opacity-80">
+              Linked in the topic map, not assessed yet
+            </div>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* TOPIC PANEL: the explanation, in the order a judge asks the questions      */
-/*   verdict -> proof by capability -> what was built -> prerequisite paths   */
-/*   -> confidence -> unproven -> graph relationships -> raw evidence         */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
+/* TOPIC PANEL (side)                                                         */
+/* ========================================================================== */
 
 function TopicPanel({
   slug,
@@ -3061,17 +3936,18 @@ function TopicPanel({
   const t = (detail?.topic ?? card ?? {}) as Obj;
   const sc = (detail?.scoring ?? {}) as Obj;
   const g = (detail?.graph ?? {}) as Obj;
+  const tr = (detail?.trace ?? {}) as Obj;
   const level = asString(t.level);
   const band = asArray<number>(sc.band);
   const name = asString(t.name) || humanize(slug);
-  const proof = asArray<Obj>(detail?.proof);
-  const prereqs = asArray<Obj>(detail?.prerequisitePaths);
-  const impls = asArray<Obj>(detail?.implementations);
-  const safeguards = asArray<string>(detail?.safeguards);
-  const limits = limitationsOf(detail);
+  const k = useMemo(() => claimsOf(detail), [detail]);
+  const flags = asArray<string>(tr.contradictions);
 
   return (
-    <div className="space-y-4">
+    <div
+      className="space-y-4"
+      style={{ animation: "oslide .25s ease-out both" }}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <Chip
@@ -3086,31 +3962,22 @@ function TopicPanel({
             {name}
           </h3>
           <p className="mt-0.5 text-[13px] font-semibold text-neutral-800">
-            {asString(t.domainLabel)} · {asString(t.authenticityLabel)} ·{" "}
-            {asString(t.confidence)} confidence
+            {asString(t.domainLabel)} ·{" "}
+            {AUTH_LABEL[asString(t.authenticity)] ??
+              asString(t.authenticityLabel)}{" "}
+            · {asString(t.confidence)} confidence
           </p>
         </div>
         <button
           type="button"
           onClick={onClose}
           aria-label="Close details"
-          className="shrink-0 rounded-full p-1.5"
+          className="press shrink-0 rounded-full p-1.5"
           style={{ backgroundColor: WHITE, ...border }}
         >
           <X size={14} />
         </button>
       </div>
-
-      {/* jump to the full graph evidence section below the workspace */}
-      <button
-        type="button"
-        onClick={onEvidence}
-        className="flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] font-black transition-transform hover:-translate-y-0.5"
-        style={{ backgroundColor: YELLOW, ...border }}
-      >
-        <span>See the evidence map behind this rating</span>
-        <ChevronRight size={14} strokeWidth={3} />
-      </button>
 
       {loading && <InlineLoading label="Reading topic…" />}
       {err && (
@@ -3124,12 +3991,20 @@ function TopicPanel({
           <p className="text-[13px] leading-5 text-neutral-900">
             {asString(detail.verdict)}
           </p>
-
+          {flags.length > 0 && (
+            <div
+              className="rounded-xl p-2.5 text-[12px] leading-4"
+              style={{ backgroundColor: `${CORAL}22`, ...border }}
+            >
+              <b>Evidence conflicts with the rating:</b> {flags[0]}
+              {flags.length > 1 ? ` (+${flags.length - 1} more below)` : ""}
+            </div>
+          )}
           <div>
             <div className="flex items-center justify-between text-[13px] font-black">
               <span>Score {num(sc.score)}</span>
               {band.length === 2 && (
-                <span className="text-[13px] text-neutral-700">
+                <span className="text-neutral-700">
                   band {band[0]}–{band[1]}
                 </span>
               )}
@@ -3139,159 +4014,61 @@ function TopicPanel({
               style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
             >
               <div
-                className="h-full"
+                className="h-full transition-all duration-700"
                 style={{
                   width: `${num(sc.score)}%`,
                   backgroundColor: LEVEL_COLOR[level] ?? SKY,
                 }}
               />
             </div>
-            <p className="mt-1.5 text-[12px] leading-4 text-neutral-700">
-              Baseline {num(sc.baseline?.score)} ({asString(sc.baseline?.level)}
-              ), adjustment {num(sc.adjustment) >= 0 ? "+" : ""}
-              {num(sc.adjustment)}. Decided by {asString(sc.decidedBy)}. File
-              and commit counts are inputs to the baseline, not proof of depth.
-            </p>
           </div>
-
           <div className="grid grid-cols-4 gap-2">
             <MiniStat label="Files" value={num(t.evidence?.files)} />
             <MiniStat label="Commits" value={num(t.evidence?.commits)} />
             <MiniStat label="Repos" value={num(t.evidence?.repos)} />
-            <MiniStat label="Days" value={num(t.evidence?.activeDays)} />
+            <MiniStat
+              label="Evidence"
+              value={asArray(tr.supportingEvidence).length}
+            />
           </div>
-
-          {/* 1. why Pathway believes this */}
-          <Block title="Why Pathway believes this">
-            <p className="text-[13px] leading-5 text-neutral-900">
-              {asString(detail.rationale) || "No rationale was stored."}
-            </p>
-          </Block>
-
-          {/* 2. proof, skill by skill: observed vs inferred vs linked only */}
-          <Block title="Proof by skill">
-            <ProofLedger items={proof} />
-          </Block>
-
-          {/* 3. concrete implementations */}
-          <Block
-            title={`What was built${impls.length ? ` (${impls.length})` : ""}`}
+          <div className="grid grid-cols-3 gap-2 text-center">
+            {(
+              [
+                ["Observed", k.observed.length, GREEN, WHITE],
+                ["Inferred", k.inferred.length, YELLOW, INK],
+                ["Unknown", k.unknown.length, CORAL, WHITE],
+              ] as const
+            ).map(([label, n, bg, fg]) => (
+              <div
+                key={label}
+                className="rounded-xl py-2"
+                style={{ backgroundColor: bg, color: fg, ...border }}
+              >
+                <div
+                  className="text-[18px] font-black leading-none"
+                  style={{ fontFamily: DISPLAY_FONT }}
+                >
+                  {n}
+                </div>
+                <div className="mt-0.5 text-[11px] font-black uppercase">
+                  {label}
+                </div>
+              </div>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={onEvidence}
+            className="press flex w-full items-center justify-between rounded-xl px-3 py-2 text-[13px] font-black"
+            style={{ backgroundColor: YELLOW, ...border }}
           >
-            {impls.length ? (
-              <ul className="space-y-2">
-                {impls.slice(0, 5).map((im, i) => {
-                  const what = asString(im.what);
-                  const code = looksLikeCode(what);
-                  return (
-                    <li key={i} className="text-[13px] leading-5">
-                      {code ? (
-                        <pre
-                          className="overflow-x-auto rounded-lg p-2 text-[11px] leading-4"
-                          style={{
-                            backgroundColor: PAPER,
-                            border: `1.5px solid ${INK}`,
-                            fontFamily:
-                              "ui-monospace, SFMono-Regular, Menlo, monospace",
-                          }}
-                        >
-                          {cut(what, 400)}
-                        </pre>
-                      ) : (
-                        <span className="font-bold">{what}</span>
-                      )}
-                      {(im.path || im.repository) && (
-                        <div className="break-all text-[12px] text-neutral-700">
-                          {im.permalink ? (
-                            <a
-                              href={asString(im.permalink)}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="underline"
-                            >
-                              {cut(asString(im.path || im.repository), 80)}
-                            </a>
-                          ) : (
-                            cut(asString(im.path || im.repository), 80)
-                          )}
-                          {im.ref ? ` · ${asString(im.ref)}` : ""}
-                        </div>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : (
-              <p className="text-[13px] leading-5 text-neutral-800">
-                The assessment cites no specific implementation.
-              </p>
-            )}
-          </Block>
-
-          {/* 4. genuine prerequisite paths (BUILDS_ON only) */}
-          <Block title="Prerequisite paths">
-            <PrereqPaths paths={prereqs} onPick={onPick} />
-          </Block>
-
-          {/* 5. why this confidence level */}
+            <span>See the evidence graph below</span>
+            <ChevronRight size={14} strokeWidth={3} />
+          </button>
           <Block title="Why this confidence">
             <ConfidenceBox c={detail.confidence} />
           </Block>
-
-          {safeguards.length > 0 && (
-            <Block title="Hardening observed">
-              <Bullets items={safeguards} ok />
-            </Block>
-          )}
-          {asArray<string>(detail.strengths).length > 0 && (
-            <Block title="Strengths">
-              <Bullets items={asArray<string>(detail.strengths)} ok />
-            </Block>
-          )}
-
-          {/* 6. what is NOT established */}
-          <Block title="What remains unproven">
-            {limits.length ? (
-              <Bullets items={limits} />
-            ) : (
-              <p className="text-[13px] leading-5 text-neutral-800">
-                The assessment lists no explicit limitations.
-              </p>
-            )}
-          </Block>
-
-          {asArray<Obj>(detail.approaches).length > 0 && (
-            <Fold title={`Approaches (${asArray(detail.approaches).length})`}>
-              <div className="space-y-2.5">
-                {asArray<Obj>(detail.approaches).map((a, i) => (
-                  <div
-                    key={i}
-                    className="pl-3"
-                    style={{
-                      borderLeft: `3px solid ${LEVEL_COLOR[asString(a.depth)] ?? LINE}`,
-                    }}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-1.5">
-                      <span className="text-[13px] font-black">
-                        {asString(a.name ?? a.slug)}
-                      </span>
-                      <span className="text-[12px] font-bold text-neutral-700">
-                        {a.isPrimary ? "primary · " : ""}
-                        {LEVEL_LABEL[asString(a.depth)] ?? asString(a.depth)}
-                      </span>
-                    </div>
-                    {a.howImplemented && (
-                      <p className="text-[13px] leading-5 text-neutral-900">
-                        {asString(a.howImplemented)}
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </Fold>
-          )}
-
-          {/* 7. graph relationships, kept separate by meaning */}
-          <Fold title="Where it sits in the graph" open>
+          <Fold title="How it connects" open>
             <div className="space-y-2 text-[13px]">
               <div className="flex flex-wrap gap-1.5">
                 <Chip
@@ -3304,7 +4081,7 @@ function TopicPanel({
                 />
               </div>
               <RefList
-                title="Builds on (foundation dependency)"
+                title="Builds on"
                 list={asArray<Obj>(g.foundations)}
                 onPick={onPick}
               />
@@ -3314,13 +4091,13 @@ function TopicPanel({
                 onPick={onPick}
               />
               <RefList
-                title="Related (association only, not a prerequisite)"
+                title="Goes with"
                 list={asArray<Obj>(g.related)}
                 onPick={onPick}
               />
               {g.community && (
                 <RefList
-                  title="Community peers (association only)"
+                  title="Same community"
                   list={asArray<Obj>(g.community.peers)}
                   onPick={onPick}
                 />
@@ -3329,70 +4106,11 @@ function TopicPanel({
                 !asArray(g.unlocks).length &&
                 !asArray(g.related).length && (
                   <p className="text-[13px] leading-5 text-neutral-800">
-                    The graph records no BUILDS_ON or RELATED_TOPIC edge for
-                    this topic.
+                    The graph records no connection for this topic.
                   </p>
                 )}
-              <p className="text-[12px] leading-4 text-neutral-700">
-                A relationship shows how topics connect. It does not prove the
-                developer has the skill.
-              </p>
             </div>
           </Fold>
-
-          {num(detail.evidence?.total) > 0 && (
-            <Fold title={`Evidence cited (${num(detail.evidence.total)})`}>
-              <div className="space-y-2">
-                {Object.entries(
-                  (detail.evidence.byKind ?? {}) as Record<string, Obj[]>,
-                ).map(([kind, list]) =>
-                  list.length ? (
-                    <div key={kind}>
-                      <div className="text-[12px] font-black text-neutral-700">
-                        {humanize(kind)} · {list.length}
-                      </div>
-                      <ul className="mt-1 space-y-0.5">
-                        {list.slice(0, 5).map((e, i) => {
-                          const text = cut(
-                            asString(
-                              e.path ??
-                                e.title ??
-                                e.subject ??
-                                e.technique ??
-                                e.label ??
-                                e.ref ??
-                                e.key,
-                            ),
-                            90,
-                          );
-                          return (
-                            <li
-                              key={i}
-                              className="break-all text-[12px] leading-4 text-neutral-900"
-                            >
-                              {e.permalink ? (
-                                <a
-                                  href={asString(e.permalink)}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="underline"
-                                >
-                                  {text}
-                                </a>
-                              ) : (
-                                text
-                              )}
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </div>
-                  ) : null,
-                )}
-              </div>
-            </Fold>
-          )}
-
           <div className="flex flex-wrap gap-2">
             <Btn onClick={() => onAsk(name)} bg={LAVENDER}>
               <MessageCircle size={13} /> Ask about this
@@ -3433,7 +4151,7 @@ function RefList({
               type="button"
               title={asString(r.reason)}
               onClick={() => (assessed ? onPick(slug) : undefined)}
-              className="rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+              className="press rounded-full px-2.5 py-0.5 text-[12px] font-bold"
               style={{
                 backgroundColor: assessed ? WHITE : CARD,
                 border: `2px ${assessed ? "solid" : "dashed"} ${INK}`,
@@ -3449,44 +4167,26 @@ function RefList({
   );
 }
 
-function Bullets({ items, ok = false }: { items: string[]; ok?: boolean }) {
-  return (
-    <ul className="space-y-1.5">
-      {items.slice(0, 6).map((s, i) => (
-        <li key={i} className="flex items-start gap-2 text-[13px] leading-5">
-          {ok ? (
-            <CheckCircle2 size={15} color={GREEN} className="mt-0.5 shrink-0" />
-          ) : (
-            <Flame size={15} color={CORAL} className="mt-0.5 shrink-0" />
-          )}
-          <span>{s}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
+/* ========================================================================== */
+/* TOPIC EVIDENCE: graph first, then the details behind it                    */
+/* ========================================================================== */
 
-/* -------------------------------------------------------------------------- */
-/* PROOF PIECES: citations, proof ledger, prerequisite paths, confidence      */
-/* -------------------------------------------------------------------------- */
-
-function CitationRow({ c }: { c: Obj }) {
-  const where = [asString(c.repository), asString(c.path)]
-    .filter(Boolean)
-    .join(" · ");
+function EvidenceRow({ e }: { e: EvItem }) {
+  const where = [e.repository, e.path].filter(Boolean).join(" · ");
+  const label =
+    e.title ||
+    cut(e.commit, 90) ||
+    (e.snippet ? cut(e.snippet, 70) : "") ||
+    e.path ||
+    "Cited work";
   const kindLabel =
-    c.kind === "practice_mission"
-      ? "Practice mission"
-      : c.kind === "commit"
+    e.kind === "implementation" || e.kind === "demonstration"
+      ? "Implementation"
+      : e.kind === "commit"
         ? "Change"
-        : c.kind === "real_work"
-          ? "Real work"
-          : c.kind === "implementation"
-            ? "Implementation"
-            : "Code";
-  const snippet = asString(c.snippet);
-  const title = asString(c.title);
-  const commit = asString(c.commit);
+        : e.kind === "experience"
+          ? "Experience"
+          : "Code";
   return (
     <li
       className="rounded-lg p-2"
@@ -3499,33 +4199,33 @@ function CitationRow({ c }: { c: Obj }) {
         >
           {kindLabel}
         </span>
-        <span className="font-bold">{cut(citeLabel(c), 90)}</span>
+        <span className="font-bold">{cut(label, 90)}</span>
+        {e.when && (
+          <span className="text-[11px] text-neutral-700">
+            {timeAgo(e.when)}
+          </span>
+        )}
       </div>
-      {snippet !== "" && (
+      {e.snippet && (
         <pre
           className="mt-1 overflow-x-auto rounded-md p-1.5 text-[11px] leading-4"
           style={{
             backgroundColor: WHITE,
             border: `1px solid ${LINE}`,
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            fontFamily: MONO,
           }}
         >
-          {cut(snippet, 400)}
+          {cut(e.snippet, 500)}
         </pre>
-      )}
-      {commit !== "" && title !== "" && (
-        <div className="mt-0.5 text-[11px] leading-4 text-neutral-700">
-          Change: {cut(commit, 90)}
-        </div>
       )}
       {where && (
         <div className="mt-0.5 break-all text-[11px] leading-4 text-neutral-700">
-          {cut(where, 100)}
+          {cut(where, 110)}
         </div>
       )}
-      {c.permalink && (
+      {e.permalink && (
         <a
-          href={asString(c.permalink)}
+          href={e.permalink}
           target="_blank"
           rel="noreferrer"
           className="mt-0.5 block text-[11px] font-bold underline"
@@ -3537,86 +4237,456 @@ function CitationRow({ c }: { c: Obj }) {
   );
 }
 
-/**
- * One entry per linked skill, split by how strongly the graph backs it:
- *   observed    -> a detected example in the developer's own code (cited)
- *   inferred    -> concluded from the topic rating, no example matched
- *   association -> linked in the topic map only
- */
-function ProofLedger({ items }: { items: Obj[] }) {
-  if (!items.length)
-    return (
-      <p className="text-[13px] leading-5 text-neutral-800">
-        No capability is linked to this topic in the graph.
-      </p>
+function TopicEvidence({
+  slug,
+  detail,
+  onPick,
+  onAsk,
+}: {
+  slug: string;
+  detail: Obj;
+  onPick: (slug: string) => void;
+  onAsk: (question: string) => void;
+}) {
+  const [story, setStory] = useState<Obj | null>(null);
+  const [storySrc, setStorySrc] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [storyErr, setStoryErr] = useState<string | null>(null);
+
+  const tr = (detail.trace ?? {}) as Obj;
+  const name = asString(detail.topic?.name) || humanize(slug);
+  const k = useMemo(() => claimsOf(detail), [detail]);
+  const evById = useMemo(
+    () =>
+      new Map(
+        asObjects(tr.supportingEvidence).map(
+          (e) => [asString(e.evidenceId), e] as [string, Obj],
+        ),
+      ),
+    [tr],
+  );
+  const approaches = asObjects(detail.approaches);
+  const all = useMemo(
+    () =>
+      asObjects(detail.evidence?.byKind?.code)
+        .concat(asObjects(detail.evidence?.byKind?.demonstration))
+        .concat(asObjects(detail.evidence?.byKind?.experience)),
+    [detail],
+  );
+  const prereqs = asObjects(detail.prerequisitePaths);
+  const structure = (tr.structure ?? {}) as Obj;
+  const flags = asArray<string>(tr.contradictions);
+  const roles = asArray<string>(structure.taxonomyImportance?.roles);
+
+  const explain = async () => {
+    setBusy(true);
+    setStoryErr(null);
+    const r = await call(
+      `/api/topics/${encodeURIComponent(slug)}/explain`,
+      "POST",
+      {},
     );
-  const count = (k: string) => items.filter((i) => i.class === k).length;
+    if (r.ok && r.data.story) {
+      setStory(r.data.story as Obj);
+      setStorySrc(asString(r.data.source));
+    } else
+      setStoryErr(asString(r.data.error, "Could not write the explanation."));
+    setBusy(false);
+  };
+
+  const columns = [
+    {
+      key: "observed",
+      title: "Observed",
+      hint: "Backed by cited code or recorded evidence",
+      color: GREEN,
+      icon: <CheckCircle2 size={14} color={GREEN} />,
+      claims: k.observed,
+      empty: "Nothing is observed in cited code yet.",
+    },
+    {
+      key: "inferred",
+      title: "Inferred",
+      hint: "A conclusion; no code matched directly",
+      color: YELLOW,
+      icon: <HelpCircle size={14} color="#b8860b" />,
+      claims: k.inferred,
+      empty: "Nothing is only inferred.",
+    },
+    {
+      key: "unknown",
+      title: "Unknown",
+      hint: "Not enough evidence to claim either way",
+      color: CORAL,
+      icon: <Flame size={14} color={CORAL} />,
+      claims: k.unknown,
+      empty: "No open unknowns are recorded.",
+    },
+  ];
+
+  const measure = (
+    title: string,
+    sub: string,
+    color: string,
+    value: string,
+    note: string,
+  ) => (
+    <div
+      className="rounded-xl p-3"
+      style={{
+        backgroundColor: WHITE,
+        border: `2px solid ${INK}`,
+        borderTop: `6px solid ${color}`,
+      }}
+    >
+      <div className="text-[12px] font-black text-neutral-700">{title}</div>
+      <div
+        className="mt-0.5 text-[20px] font-black leading-none"
+        style={{ fontFamily: DISPLAY_FONT }}
+      >
+        {value}
+      </div>
+      <div className="mt-1 text-[12px] leading-4 text-neutral-700">{sub}</div>
+      <div className="mt-0.5 text-[12px] font-bold leading-4">{note}</div>
+    </div>
+  );
+
   return (
-    <div className="space-y-2.5">
-      <p className="text-[12px] leading-4 text-neutral-700">
-        {count("observed")} seen in your code · {count("inferred")} inferred ·{" "}
-        {count("association")} linked only. Only “seen in your code” is proof;
-        the other two are weaker and are labelled so.
-      </p>
-      {items.map((p, i) => {
-        const cls = CLASS_STYLE[asString(p.class)] ?? CLASS_STYLE.association;
-        const cites = asArray<Obj>(p.citations);
-        const d = num(p.demonstrations);
-        return (
-          <div
-            key={`${asString(p.id)}-${i}`}
-            className="pl-3"
-            style={{ borderLeft: `4px solid ${cls.bar}` }}
+    <section
+      id={EVIDENCE_ID}
+      className="mt-6 scroll-mt-20 rounded-2xl p-4"
+      style={{
+        backgroundColor: CARD,
+        ...border,
+        boxShadow: shadow(4),
+        animation: "oslide .25s ease-out both",
+      }}
+    >
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-[12px] font-black uppercase tracking-[.14em] text-neutral-700">
+            Why Pathway believes this
+          </p>
+          <h2
+            className="text-[24px] font-black leading-tight"
+            style={{ fontFamily: DISPLAY_FONT }}
           >
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[13px] font-black">
-                {asString(p.capability)}
-              </span>
-              <Chip text={cls.label} background={cls.bg} color={cls.color} />
-              <span className="text-[11px] font-bold text-neutral-700">
-                {d} detected
-                {p.weight != null ? ` · weight ${fix(p.weight, 2)}` : ""}
+            {name}
+          </h2>
+          <p className="mt-0.5 text-[13px] font-semibold text-neutral-800">
+            {LEVEL_LABEL[asString(detail.topic?.level)] ?? ""} ·{" "}
+            {asString(tr.assessment?.confidence)} confidence ·{" "}
+            {num(detail.topic?.evidence?.files)} files across{" "}
+            {num(detail.topic?.evidence?.repos)} repositor
+            {num(detail.topic?.evidence?.repos) === 1 ? "y" : "ies"}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Btn
+            onClick={() =>
+              onAsk(`Show me the code that demonstrates my ${name}`)
+            }
+            bg={LAVENDER}
+          >
+            <MessageCircle size={13} /> Ask for the code
+          </Btn>
+          <Btn onClick={() => void explain()} bg={YELLOW} disabled={busy}>
+            <Sparkles size={13} />{" "}
+            {busy ? "Writing…" : "Explain in plain English"}
+          </Btn>
+        </div>
+      </div>
+
+      {/* THE GRAPH: topic in the middle, everything the graph connects to it around it */}
+      <EvidenceGraph slug={slug} detail={detail} onPick={onPick} />
+
+      {/* three separate answers */}
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        {measure(
+          "Developer proficiency",
+          "Judged from cited evidence, checked by guard-rails",
+          PURPLE,
+          LEVEL_LABEL[asString(structure.proficiency?.level)] ?? "–",
+          `Score ${num(structure.proficiency?.score)} · ${AUTH_LABEL[asString(structure.proficiency?.authenticity)] ?? ""}`,
+        )}
+        {measure(
+          "Assessment confidence",
+          "How strong and varied the evidence is",
+          GREEN,
+          humanize(asString(structure.confidence?.level) || "–"),
+          asString(structure.confidence?.stored) !==
+            asString(structure.confidence?.level)
+            ? `Stored as ${asString(structure.confidence?.stored)}, lowered to match evidence`
+            : "Matches the evidence",
+        )}
+        {measure(
+          "Taxonomy importance",
+          "Role in the shared topic map. Not your skill.",
+          SKY,
+          roles.length ? roles.map(humanize).join(" + ") : "Specialised",
+          `PageRank ${fix(structure.taxonomyImportance?.foundationRank)} · Betweenness ${fix(structure.taxonomyImportance?.bridgeScore)}`,
+        )}
+      </div>
+
+      {flags.length > 0 && (
+        <div
+          className="mt-3 rounded-xl p-3"
+          style={{ backgroundColor: `${CORAL}22`, ...border }}
+        >
+          <div className="text-[13px] font-black">
+            Where the evidence conflicts or is out of date
+          </div>
+          <ul className="mt-1 space-y-1">
+            {flags.map((f, i) => (
+              <li key={i} className="text-[13px] leading-5">
+                {f}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="mt-3 grid gap-3 lg:grid-cols-3">
+        {columns.map((c) => (
+          <div
+            key={c.key}
+            className="rounded-xl p-3"
+            style={{
+              backgroundColor: WHITE,
+              border: `2px solid ${INK}`,
+              borderTop: `6px solid ${c.color}`,
+            }}
+          >
+            <div className="flex items-center gap-1.5 text-[14px] font-black">
+              {c.icon} {c.title}
+              <span className="ml-auto text-[12px] text-neutral-700">
+                {c.claims.length}
               </span>
             </div>
-            <p className="mt-0.5 text-[13px] leading-5 text-neutral-900">
-              {asString(p.demonstrates)}
-            </p>
-            {asString(p.matters) && (
-              <p className="text-[12px] leading-4 text-neutral-700">
-                Why it matters: {asString(p.matters)}
+            <div className="text-[12px] text-neutral-700">{c.hint}</div>
+            {c.claims.length ? (
+              <ul className="mt-2 space-y-1.5">
+                {c.claims.slice(0, 6).map((x, i) => (
+                  <li key={i} className="text-[13px] leading-5">
+                    {cut(asString(x.text), 200)}
+                    {asArray<string>(x.evidenceIds).map((id) => (
+                      <span
+                        key={id}
+                        title={asString(evById.get(id)?.source)}
+                        className="ml-1 rounded-full px-1.5 text-[10px] font-black"
+                        style={{
+                          backgroundColor: LAVENDER,
+                          border: `1.5px solid ${INK}`,
+                        }}
+                      >
+                        {id}
+                      </span>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-2 text-[13px] leading-5 text-neutral-700">
+                {c.empty}
               </p>
-            )}
-            {asString(p.limit) && (
-              <p className="text-[12px] font-bold leading-4" style={{ color: CORAL }}>
-                Limit: {asString(p.limit)}
-              </p>
-            )}
-            {cites.length > 0 && (
-              <>
-                <ul className="mt-1.5 space-y-1.5">
-                  {cites.map((c, j) => (
-                    <CitationRow key={j} c={c} />
-                  ))}
-                </ul>
-                {p.attributed === false && (
-                  <p className="mt-1 text-[11px] leading-4 text-neutral-700">
-                    Cited for the topic as a whole. The graph does not tie
-                    these to this skill alone.
-                  </p>
-                )}
-              </>
             )}
           </div>
-        );
-      })}
-    </div>
+        ))}
+      </div>
+
+      {approaches.length > 0 && (
+        <div
+          className="mt-4 rounded-xl p-3"
+          style={{ backgroundColor: WHITE, ...border }}
+        >
+          <div className="text-[14px] font-black">
+            Approaches demonstrated ({approaches.length})
+          </div>
+          <p className="text-[12px] text-neutral-700">
+            Each approach is judged on its own evidence.
+          </p>
+          <div className="mt-2 grid gap-3 lg:grid-cols-2">
+            {approaches.map((a, i) => {
+              const ev = approachEvidence(a, all);
+              const hardening = asArray<string>(a.hardening).filter(Boolean);
+              const gaps = asArray<string>(a.gaps).filter(Boolean);
+              const depth = asString(a.depth);
+              return (
+                <div
+                  key={`${asString(a.slug)}-${i}`}
+                  className="rounded-xl p-3"
+                  style={{
+                    backgroundColor: PAPER,
+                    border: `2px solid ${INK}`,
+                    borderLeft: `6px solid ${LEVEL_COLOR[depth] ?? LINE}`,
+                  }}
+                >
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[14px] font-black">
+                      {asString(a.name ?? a.slug)}
+                    </span>
+                    <Chip
+                      text={LEVEL_LABEL[depth] ?? depth}
+                      background={LEVEL_COLOR[depth] ?? CARD}
+                      color={depth && depth !== "none" ? WHITE : INK}
+                    />
+                    {a.isPrimary && <Chip text="primary" background={YELLOW} />}
+                  </div>
+                  {a.howImplemented && (
+                    <p className="mt-1.5 text-[13px] leading-5 text-neutral-900">
+                      {cut(asString(a.howImplemented), 240)}
+                    </p>
+                  )}
+                  {hardening.length > 0 && (
+                    <p className="mt-1 text-[12px] leading-4 text-neutral-800">
+                      <b>Hardening seen:</b> {hardening.slice(0, 3).join("; ")}
+                    </p>
+                  )}
+                  {gaps.length > 0 && (
+                    <p
+                      className="mt-1 text-[12px] font-bold leading-4"
+                      style={{ color: CORAL }}
+                    >
+                      Not shown: {gaps.slice(0, 2).join("; ")}
+                    </p>
+                  )}
+                  {ev.length > 0 && (
+                    <Fold
+                      title={`${ev.length} cited example${ev.length === 1 ? "" : "s"}`}
+                      small
+                    >
+                      <ul className="space-y-1.5">
+                        {ev.slice(0, 3).map((e, j) => (
+                          <EvidenceRow key={j} e={e} />
+                        ))}
+                      </ul>
+                    </Fold>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <div
+          className="rounded-xl p-3"
+          style={{ backgroundColor: WHITE, ...border }}
+        >
+          <div className="mb-1 text-[14px] font-black">Foundation paths</div>
+          <PrereqPaths paths={prereqs} onPick={onPick} />
+        </div>
+        <div
+          className="rounded-xl p-3"
+          style={{ backgroundColor: WHITE, ...border }}
+        >
+          <div className="mb-1 text-[14px] font-black">
+            Why this confidence level
+          </div>
+          <ConfidenceBox c={detail.confidence} />
+        </div>
+      </div>
+
+      {(story || storyErr) && (
+        <div
+          className="mt-4 rounded-xl p-4"
+          style={{
+            backgroundColor: WHITE,
+            ...border,
+            animation: "oslide .25s ease-out both",
+          }}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2 text-[13px] font-black">
+              <Sparkles size={14} /> In plain English
+            </span>
+            {story && (
+              <span className="text-[12px] font-bold text-neutral-700">
+                {storySrc === "llm"
+                  ? "Written by the Pathway agent, numbers checked against your graph"
+                  : "Summary built from your graph"}
+              </span>
+            )}
+          </div>
+          {storyErr && (
+            <p className="mt-2 text-[13px] font-bold" style={{ color: CORAL }}>
+              {storyErr}
+            </p>
+          )}
+          {story && (
+            <>
+              <h3
+                className="mt-2 text-[17px] font-black leading-snug"
+                style={{ fontFamily: DISPLAY_FONT }}
+              >
+                {asString(story.headline)}
+              </h3>
+              <p className="mt-1 text-[14px] leading-6 text-neutral-900">
+                {asString(story.summary)}
+              </p>
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <div
+                  className="rounded-xl p-3"
+                  style={{
+                    backgroundColor: `${GREEN}22`,
+                    border: `2px solid ${INK}`,
+                  }}
+                >
+                  <div className="text-[12px] font-black uppercase">
+                    What it means
+                  </div>
+                  <p className="mt-1 text-[13px] leading-5">
+                    {asString(story.meaning)}
+                  </p>
+                </div>
+                <div
+                  className="rounded-xl p-3"
+                  style={{
+                    backgroundColor: `${CORAL}22`,
+                    border: `2px solid ${INK}`,
+                  }}
+                >
+                  <div className="text-[12px] font-black uppercase">
+                    What is not proven
+                  </div>
+                  <p className="mt-1 text-[13px] leading-5">
+                    {asString(story.caveat)}
+                  </p>
+                </div>
+              </div>
+              {asArray<string>(story.followups).length > 0 && (
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="text-[12px] font-black text-neutral-700">
+                    Ask the agent:
+                  </span>
+                  {asArray<string>(story.followups)
+                    .slice(0, 3)
+                    .map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        onClick={() => onAsk(q)}
+                        className="press rounded-full px-3 py-1 text-[12px] font-bold"
+                        style={{ backgroundColor: LAVENDER, ...border }}
+                      >
+                        {q}
+                      </button>
+                    ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
-/**
- * Genuine prerequisite chains. Only BUILDS_ON dependencies with a stated reason
- * appear here; related topics are associations and are never shown as prerequisites.
- */
+/* ========================================================================== */
+/* FOUNDATIONS + CONFIDENCE                                                   */
+/* ========================================================================== */
+
 function PrereqPaths({
   paths,
   onPick,
@@ -3627,103 +4697,64 @@ function PrereqPaths({
   if (!paths.length)
     return (
       <p className="text-[13px] leading-5 text-neutral-800">
-        No foundation dependency is recorded for this topic. Related topics are
+        No confirmed foundation is recorded for this topic. Related topics are
         associations, not prerequisites.
       </p>
     );
   return (
     <div className="space-y-2.5">
-      {paths.map((p, i) => {
+      {paths.slice(0, 6).map((p, i) => {
         const st = PREREQ_STYLE[asString(p.status)] ?? PREREQ_STYLE.unverified;
         const steps = asArray<Obj>(p.steps);
         const reasons = asArray<string>(p.reasons);
-        const strength = asString(p.strength);
         return (
           <div
             key={i}
             className="rounded-lg p-2.5"
             style={{ backgroundColor: PAPER, border: `1.5px solid ${INK}` }}
           >
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Chip text={st.label} background={st.bg} color={st.color} />
-              {strength && strength !== "unknown" && (
-                <Chip text={strength} background={CARD} />
-              )}
-              <span className="text-[11px] font-bold text-neutral-700">
-                {num(p.hops)} step{num(p.hops) === 1 ? "" : "s"} down
-              </span>
-            </div>
+            <Chip text={st.label} background={st.bg} color={st.color} />
             <div className="mt-2 flex flex-wrap items-center gap-1">
               {steps.map((s, j) => {
                 const assessed = s.assessed !== false && s.level != null;
                 const canOpen = assessed && j > 0 && !!onPick;
                 return (
                   <span key={j} className="inline-flex items-center gap-1">
-                    {j > 0 && (
-                      <span className="text-[11px] font-black text-neutral-700">
-                        builds on
-                      </span>
-                    )}
+                    {j > 0 && <ChevronRight size={12} strokeWidth={3} />}
                     <button
                       type="button"
                       onClick={() =>
                         canOpen ? onPick?.(asString(s.slug)) : undefined
                       }
-                      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+                      className="press inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-bold"
                       style={{
                         backgroundColor: assessed ? WHITE : CARD,
                         border: `2px ${assessed ? "solid" : "dashed"} ${INK}`,
                         cursor: canOpen ? "pointer" : "default",
                       }}
                     >
-                      <span
-                        className="h-2 w-2 rounded-full"
-                        style={{
-                          backgroundColor:
-                            LEVEL_COLOR[asString(s.level)] ?? "#d1d5db",
-                          border: `1px solid ${INK}`,
-                        }}
+                      <Dot
+                        color={LEVEL_COLOR[asString(s.level)] ?? "#d1d5db"}
+                        small
                       />
                       {asString(s.name)}
-                      {!assessed && (
-                        <span className="text-[10px] text-neutral-700">
-                          not assessed
-                        </span>
-                      )}
                     </button>
                   </span>
                 );
               })}
             </div>
-            {reasons.length > 0 && (
-              <ul className="mt-2 space-y-0.5">
-                {reasons.map((r, j) => (
-                  <li
-                    key={j}
-                    className="text-[12px] leading-4 text-neutral-800"
-                  >
-                    <b>
-                      {asString(steps[j]?.name)} → {asString(steps[j + 1]?.name)}
-                      :
-                    </b>{" "}
-                    {r}
-                  </li>
-                ))}
-              </ul>
+            {reasons[0] && (
+              <p className="mt-1.5 text-[12px] leading-4 text-neutral-800">
+                {cut(reasons[0], 170)}
+              </p>
             )}
           </div>
         );
       })}
-      <p className="text-[12px] leading-4 text-neutral-700">
-        Only “builds on” dependencies with a stated reason are shown. A
-        dependency in the map is not proof the foundation was learned; the
-        badge says whether your own code backs it.
-      </p>
     </div>
   );
 }
 
-/** Confidence from the strength AND the variety of the evidence, factor by factor. */
 function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
   if (!c) return null;
   const eff = asString(c.effective);
@@ -3738,8 +4769,8 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
         />
         {asString(c.stated) !== eff && (
           <span className="text-[12px] leading-4 text-neutral-800">
-            Stored as {asString(c.stated)}; the current evidence supports{" "}
-            {asString(c.derived)}, so the lower value is shown.
+            Stored as {asString(c.stated)}; current evidence supports{" "}
+            {asString(c.derived)}.
           </span>
         )}
       </div>
@@ -3747,7 +4778,7 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
         {factors.map((f) => (
           <div key={asString(f.id)}>
             <div className="flex items-center gap-2 text-[12px]">
-              <span className="w-36 shrink-0 font-black">
+              <span className="w-32 shrink-0 font-black">
                 {asString(f.label)}
               </span>
               <div
@@ -3755,7 +4786,7 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
                 style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
               >
                 <div
-                  className="h-full"
+                  className="h-full transition-all duration-700"
                   style={{
                     width: `${(num(f.value) / Math.max(1, num(f.max))) * 100}%`,
                     backgroundColor: SKY,
@@ -3766,24 +4797,19 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
                 {num(f.value)}/{num(f.max)}
               </span>
             </div>
-            <div className="pl-[9.5rem] text-[11px] leading-4 text-neutral-700">
+            <div className="pl-[8.5rem] text-[11px] leading-4 text-neutral-700">
               {asString(f.note)}
             </div>
           </div>
         ))}
       </div>
-      <p className="mt-2 text-[12px] leading-4 text-neutral-700">
-        Confidence rises with more files, changes, projects and time, and with
-        more kinds of evidence. One project or one kind of evidence keeps it
-        from reaching high.
-      </p>
     </div>
   );
 }
 
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
 /* SMALL PIECES                                                               */
-/* -------------------------------------------------------------------------- */
+/* ========================================================================== */
 
 function Row({ children }: { children: ReactNode }) {
   return (
@@ -3796,20 +4822,44 @@ function Row({ children }: { children: ReactNode }) {
   );
 }
 
-function StatPill({ value, label }: { value: number; label: string }) {
+function Dot({ color, small = false }: { color: string; small?: boolean }) {
+  const s = small ? 9 : 12;
   return (
     <span
-      className="inline-flex items-baseline gap-1.5 rounded-full px-3 py-1"
-      style={{ backgroundColor: WHITE, ...border }}
+      className="inline-block shrink-0 rounded-full"
+      style={{
+        width: s,
+        height: s,
+        backgroundColor: color,
+        border: `1.5px solid ${INK}`,
+      }}
+    />
+  );
+}
+
+function Tile({
+  value,
+  label,
+  hint,
+}: {
+  value: number | string;
+  label: string;
+  hint: string;
+}) {
+  return (
+    <div
+      className="rounded-xl p-3"
+      style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
     >
-      <span
-        className="text-[16px] font-black leading-none"
+      <div
+        className="text-[26px] font-black leading-none"
         style={{ fontFamily: DISPLAY_FONT }}
       >
-        {value.toLocaleString()}
-      </span>
-      <span className="text-[12px] font-bold text-neutral-800">{label}</span>
-    </span>
+        {typeof value === "number" ? value.toLocaleString() : value}
+      </div>
+      <div className="mt-1 text-[13px] font-black">{label}</div>
+      <div className="text-[12px] leading-4 text-neutral-700">{hint}</div>
+    </div>
   );
 }
 
@@ -3834,12 +4884,12 @@ function Fold({
       }}
     >
       <summary
-        className={`flex cursor-pointer items-center gap-1.5 font-black ${small ? "mt-1.5 text-[12px] text-neutral-700" : "py-2.5 text-[13px]"}`}
+        className={`press flex cursor-pointer items-center gap-1.5 font-black ${small ? "mt-1.5 text-[12px] text-neutral-700" : "py-2.5 text-[13px]"}`}
       >
         <ChevronRight
           size={small ? 12 : 14}
           strokeWidth={3}
-          className="transition-transform group-open:rotate-90"
+          className="transition-transform duration-200 group-open:rotate-90"
         />
         {title}
       </summary>
@@ -3864,7 +4914,7 @@ function TopicSelect({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={placeholder}
-      className="max-w-[210px] rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
+      className="press max-w-[210px] rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
       style={border}
     >
       <option value="">{placeholder}</option>
@@ -3898,7 +4948,7 @@ function FilterSelect({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={label}
-      className="rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
+      className="press rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
       style={border}
     >
       {allowEmpty && <option value="">{label}: all</option>}
@@ -3912,22 +4962,15 @@ function FilterSelect({
 }
 
 function TopicChip({ t, onClick }: { t: Obj; onClick: () => void }) {
-  const level = asString(t?.level);
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[13px] font-bold transition-transform hover:-translate-y-0.5"
+      className="press inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[13px] font-bold"
       style={{ backgroundColor: WHITE, ...border }}
     >
-      <span
-        className="h-2.5 w-2.5 rounded-full"
-        style={{
-          backgroundColor: LEVEL_COLOR[level] ?? CARD,
-          border: `1.5px solid ${INK}`,
-        }}
-      />
-      {asString(t?.name)}
+      <Dot color={LEVEL_COLOR[asString(t?.level)] ?? CARD} small />
+      {asString(t?.name ?? t?.label)}
     </button>
   );
 }
@@ -3957,7 +5000,7 @@ function Btn({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-black transition-transform hover:-translate-y-0.5 disabled:opacity-50"
+      className="press inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-black disabled:opacity-50"
       style={{ backgroundColor: bg, color: INK, ...border }}
     >
       {children}
@@ -4033,998 +5076,5 @@ function Screen({ children }: { children: ReactNode }) {
     >
       <div className="w-full max-w-md">{children}</div>
     </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* -------------------------------------------------------------------------- */
-/* EVIDENCE MAP: plain-English story first, graph second, raw queries last    */
-/* Data: GET /api/topics/:slug/graph  +  POST /api/topics/:slug/explain       */
-/* -------------------------------------------------------------------------- */
-
-const KIND_COLOR: Record<string, string> = {
-  topic: YELLOW,
-  capability: SKY,
-  demonstration: GREEN,
-  experience: PURPLE,
-  repository: CORAL,
-  topic_neighbor: LAVENDER,
-};
-const KIND_LABEL: Record<string, string> = {
-  topic: "This topic",
-  capability: "Skill it covers",
-  demonstration: "Real work",
-  experience: "Experience",
-  repository: "Project",
-  topic_neighbor: "Related topic",
-};
-const KIND_ORDER = [
-  "capability",
-  "demonstration",
-  "experience",
-  "repository",
-  "topic_neighbor",
-];
-const REL_PLAIN: Record<string, string> = {
-  MAPS_TO: "covers skill",
-  OF_CAPABILITY: "shows skill",
-  DEMONSTRATES_CAPABILITY: "shows skill",
-  IN_REPOSITORY: "lives in",
-  BUILDS_ON: "builds on",
-  RELATED_TOPIC: "used with",
-};
-const EW = 780;
-const EH = 560;
-const RINGS = [105, 180, 250];
-
-const nodeR = (n: Obj | undefined): number => {
-  switch (n?.kind) {
-    case "topic":
-      return 26;
-    case "capability":
-      return 17;
-    case "demonstration":
-      return n?.meta?.mission ? 15 : 12;
-    case "experience":
-      return 13;
-    case "repository":
-      return 14;
-    default:
-      return 13;
-  }
-};
-
-/** Rings by distance from the topic: centre, then outward. */
-function evLayout(nodes: Obj[]) {
-  const out = new Map<string, { x: number; y: number }>();
-  const cx = EW / 2;
-  const cy = EH / 2;
-  for (let hop = 0; hop <= 3; hop++) {
-    const ring = nodes
-      .filter((n) => Math.min(3, num(n.hop)) === hop)
-      .sort(
-        (a, b) =>
-          KIND_ORDER.indexOf(asString(a.kind)) -
-            KIND_ORDER.indexOf(asString(b.kind)) ||
-          asString(a.id).localeCompare(asString(b.id)),
-      );
-    ring.forEach((n, i) => {
-      if (hop === 0) {
-        out.set(asString(n.id), { x: cx, y: cy });
-        return;
-      }
-      const a = (i / ring.length) * Math.PI * 2 - Math.PI / 2 + hop * 0.45;
-      const r = RINGS[hop - 1];
-      out.set(asString(n.id), {
-        x: cx + Math.cos(a) * r * 1.35,
-        y: cy + Math.sin(a) * r,
-      });
-    });
-  }
-  return out;
-}
-
-/** One edge, in a sentence a non-engineer can read. */
-function relSentence(e: Obj, nm: (id: string) => string): string {
-  const a = nm(asString(e.source));
-  const b = nm(asString(e.target));
-  switch (asString(e.type)) {
-    case "MAPS_TO":
-      return `${a} is part of the skill “${b}”.`;
-    case "OF_CAPABILITY":
-    case "DEMONSTRATES_CAPABILITY":
-      return `“${a}” is real work that shows the skill “${b}”.`;
-    case "IN_REPOSITORY":
-      return `“${a}” lives in the project ${b}.`;
-    case "BUILDS_ON":
-      return `${a} builds on ${b}.`;
-    case "RELATED_TOPIC":
-      return `${a} is often used together with ${b}.`;
-    default:
-      return `${a} → ${b}`;
-  }
-}
-
-/** The five graph algorithms, translated into questions a person would ask. */
-const ALGO_PLAIN: Record<
-  string,
-  { title: string; question: string; read: (a: Obj, d: Obj) => string }
-> = {
-  pagerank: {
-    title: "How foundational is it?",
-    question: "Do many other topics depend on this one?",
-    read: (_a, d) =>
-      num(d.reach?.unlocks) > 0
-        ? `${num(d.reach.unlocks)} other topic${num(d.reach.unlocks) === 1 ? " is" : "s are"} built on top of this one.`
-        : "Nothing else is built on top of it. It is a specialised skill, not a foundation.",
-  },
-  betweenness: {
-    title: "Does it connect different areas?",
-    question: "Does this topic link separate parts of your skills?",
-    read: (a) =>
-      num(a.value) > 0
-        ? `Yes. It links separate areas${a.position ? ` (ranks #${num(a.position)} of ${num(a.of)} of your topics)` : ""}, so it is knowledge that transfers.`
-        : "No. It sits inside one area.",
-  },
-  label_propagation: {
-    title: "Which group does it belong to?",
-    question: "Which topics are usually used together with it?",
-    read: (a) =>
-      a.value == null
-        ? "It is not part of a group yet."
-        : `It belongs to a group of ${num(a.of)} related topics.`,
-  },
-  wcc: {
-    title: "Is it connected to the rest?",
-    question: "Is this topic linked to the main web of your skills?",
-    read: (a) =>
-      a.value == null
-        ? "Not computed yet."
-        : `It is linked to ${num(a.of)} topics in total.`,
-  },
-  traversal: {
-    title: "How deep is its learning path?",
-    question: "What does it stand on, and what stands on it?",
-    read: (_a, d) =>
-      `Stands on ${num(d.reach?.prerequisites)} foundation${num(d.reach?.prerequisites) === 1 ? "" : "s"}, has ${num(d.reach?.unlocks)} above it and ${num(d.reach?.related)} related.`,
-  },
-};
-
-function Tile({
-  value,
-  label,
-  hint,
-}: {
-  value: number | string;
-  label: string;
-  hint: string;
-}) {
-  return (
-    <div
-      className="rounded-xl p-3"
-      style={{ backgroundColor: WHITE, ...border }}
-    >
-      <div
-        className="text-[24px] font-black leading-none"
-        style={{ fontFamily: DISPLAY_FONT }}
-      >
-        {value}
-      </div>
-      <div className="mt-1 text-[13px] font-black">{label}</div>
-      <div className="text-[12px] leading-4 text-neutral-700">{hint}</div>
-    </div>
-  );
-}
-
-function TopicGraphEvidence({
-  slug,
-  onPick,
-  onAsk,
-}: {
-  slug: string;
-  onPick: (slug: string) => void;
-  onAsk: (question: string) => void;
-}) {
-  const [data, setData] = useState<Obj | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [lit, setLit] = useState<Set<string>>(new Set());
-  const [picked, setPicked] = useState<Obj | null>(null);
-  const [tech, setTech] = useState(false);
-  const [story, setStory] = useState<Obj | null>(null);
-  const [storySrc, setStorySrc] = useState("");
-  const [aiBusy, setAiBusy] = useState(false);
-
-  useEffect(() => {
-    let live = true;
-    setLoading(true);
-    setErr(null);
-    setPicked(null);
-    setLit(new Set());
-    setStory(null);
-    setStorySrc("");
-    const enc = encodeURIComponent(slug);
-    (async () => {
-      try {
-        const d = await getJson(`/api/topics/${enc}/graph`);
-        if (!live) return;
-        setData(d);
-        // instant, always-available story; the agent upgrades it below
-        setStory((d.plain?.story ?? null) as Obj | null);
-        setStorySrc("graph");
-        setLoading(false);
-        setAiBusy(true);
-        const r = await call(`/api/topics/${enc}/explain`, "POST", {});
-        if (!live) return;
-        if (r.ok && r.data.story) {
-          setStory(r.data.story as Obj);
-          setStorySrc(asString(r.data.source));
-        }
-      } catch (e) {
-        if (live)
-          setErr(
-            e instanceof Error ? e.message : "Failed to load graph evidence.",
-          );
-      } finally {
-        if (live) {
-          setLoading(false);
-          setAiBusy(false);
-        }
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [slug]);
-
-  const nodes = useMemo(() => asArray<Obj>(data?.nodes), [data]);
-  const edges = useMemo(() => asArray<Obj>(data?.edges), [data]);
-  const pos = useMemo(() => evLayout(nodes), [nodes]);
-  const byId = useMemo(
-    () => new Map(nodes.map((n) => [asString(n.id), n] as [string, Obj])),
-    [nodes],
-  );
-
-  // duplicate names ("Retry with exponential backoff" x 9) get numbered
-  const names = useMemo(() => {
-    const count = new Map<string, number>();
-    nodes.forEach((n) => {
-      const l = asString(n.label);
-      count.set(l, (count.get(l) ?? 0) + 1);
-    });
-    const seen = new Map<string, number>();
-    const out = new Map<string, string>();
-    nodes.forEach((n) => {
-      const l = asString(n.label);
-      if ((count.get(l) ?? 0) > 1) {
-        const k = (seen.get(l) ?? 0) + 1;
-        seen.set(l, k);
-        out.set(asString(n.id), `${l} (${k})`);
-      } else out.set(asString(n.id), l);
-    });
-    return out;
-  }, [nodes]);
-  const nm = (id: string) => names.get(id) ?? asString(byId.get(id)?.label);
-
-  // picking a node fades everything that is not directly connected to it
-  const focus = useMemo(() => {
-    if (!picked) return null;
-    const pid = asString(picked.id);
-    const s = new Set<string>([pid]);
-    edges.forEach((e) => {
-      if (e.source === pid) s.add(asString(e.target));
-      if (e.target === pid) s.add(asString(e.source));
-    });
-    return s;
-  }, [picked, edges]);
-
-  if (loading)
-    return (
-      <section
-        id={EVIDENCE_ID}
-        className="mt-6 rounded-2xl p-4"
-        style={{ backgroundColor: CARD, ...border }}
-      >
-        <InlineLoading label="Collecting the evidence behind this rating…" />
-      </section>
-    );
-  if (err || !data)
-    return (
-      <section
-        id={EVIDENCE_ID}
-        className="mt-6 rounded-2xl p-4"
-        style={{ backgroundColor: CARD, ...border }}
-      >
-        <p className="text-[13px] font-bold" style={{ color: CORAL }}>
-          {err ?? "No evidence available."}
-        </p>
-      </section>
-    );
-
-  const facts = (data.plain?.facts ?? {}) as Obj;
-  const builds = asArray<Obj>(data.builds);
-  const algos = asArray<Obj>(data.algorithms);
-  const trace = asArray<Obj>(data.trace);
-  const backedBy = asArray<Obj>(data.backedBy);
-  const score = (data.score ?? {}) as Obj;
-  const steps = asArray<Obj>(story?.steps);
-  const followups = asArray<string>(story?.followups).slice(0, 3);
-  const litOn = lit.size > 0;
-  const proofItems = asArray<Obj>(
-    asArray(story?.proof).length ? story?.proof : data.proof,
-  );
-  const prereqPaths = asArray<Obj>(
-    asArray(story?.prerequisitePaths).length
-      ? story?.prerequisitePaths
-      : data.prerequisitePaths,
-  );
-  const confidenceView = (story?.confidence ?? data.confidence) as
-    | Obj
-    | undefined;
-
-  return (
-    <section
-      id={EVIDENCE_ID}
-      className="mt-6 scroll-mt-20 rounded-2xl p-4"
-      style={{
-        backgroundColor: CARD,
-        ...border,
-        boxShadow: shadow(4),
-        animation: "oslide .25s ease-out both",
-      }}
-    >
-      {/* header */}
-      <div className="mb-3">
-        <p className="text-[12px] font-black uppercase tracking-[.14em] text-neutral-700">
-          Evidence map
-        </p>
-        <h2
-          className="text-[22px] font-black leading-tight"
-          style={{ fontFamily: DISPLAY_FONT }}
-        >
-          {asString(data.topic?.name)}
-        </h2>
-      </div>
-
-      {/* 1. THE AGENT, IN PLAIN ENGLISH */}
-      <div
-        className="rounded-2xl p-4"
-        style={{ backgroundColor: WHITE, ...border }}
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span
-              className="flex h-7 w-7 items-center justify-center rounded-full"
-              style={{ backgroundColor: YELLOW, ...border }}
-            >
-              <Sparkles size={14} />
-            </span>
-            <span className="text-[13px] font-black">In plain English</span>
-          </div>
-          <span className="text-[12px] font-bold text-neutral-700">
-            {aiBusy
-              ? "Pathway agent is writing this in simple words…"
-              : storySrc === "llm"
-                ? "Written by the Pathway agent from your graph"
-                : "Summary built from your graph"}
-          </span>
-        </div>
-
-        {story ? (
-          <>
-            <h3
-              className="mt-3 text-[18px] font-black leading-snug"
-              style={{ fontFamily: DISPLAY_FONT }}
-            >
-              {asString(story.headline)}
-            </h3>
-            <p className="mt-1 text-[14px] leading-6 text-neutral-900">
-              {asString(story.summary)}
-            </p>
-
-            <ol className="mt-3 grid gap-3 md:grid-cols-2">
-              {steps.map((s, i) => (
-                <li
-                  key={i}
-                  className="flex gap-3 rounded-xl p-3"
-                  style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
-                >
-                  <span
-                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[12px] font-black"
-                    style={{ backgroundColor: LAVENDER, ...border }}
-                  >
-                    {i + 1}
-                  </span>
-                  <div>
-                    <div className="text-[13px] font-black">
-                      {asString(s.title)}
-                    </div>
-                    <p className="text-[13px] leading-5 text-neutral-900">
-                      {asString(s.text)}
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-
-            <div className="mt-3 grid gap-3 md:grid-cols-2">
-              <div
-                className="rounded-xl p-3"
-                style={{ backgroundColor: `${GREEN}22`, border: `2px solid ${INK}` }}
-              >
-                <div className="flex items-center gap-1.5 text-[12px] font-black uppercase tracking-wide">
-                  <CheckCircle2 size={14} color={GREEN} /> What it means
-                </div>
-                <p className="mt-1 text-[13px] leading-5">
-                  {asString(story.meaning)}
-                </p>
-              </div>
-              <div
-                className="rounded-xl p-3"
-                style={{ backgroundColor: `${CORAL}22`, border: `2px solid ${INK}` }}
-              >
-                <div className="flex items-center gap-1.5 text-[12px] font-black uppercase tracking-wide">
-                  <Flame size={14} color={CORAL} /> What is not proven
-                </div>
-                <p className="mt-1 text-[13px] leading-5">
-                  {asString(story.caveat)}
-                </p>
-              </div>
-            </div>
-
-            {/* proof, skill by skill: seen vs inferred vs linked only */}
-            {proofItems.length > 0 && (
-              <div
-                className="mt-3 rounded-xl p-3"
-                style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
-              >
-                <div className="mb-1.5 text-[13px] font-black">
-                  Proof, skill by skill
-                </div>
-                <ProofLedger items={proofItems} />
-              </div>
-            )}
-
-            <div className="mt-3 grid gap-3 md:grid-cols-2">
-              <div
-                className="rounded-xl p-3"
-                style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
-              >
-                <div className="mb-1 text-[13px] font-black">
-                  Genuine prerequisite paths
-                </div>
-                {asString(story.prerequisiteSummary) && (
-                  <p className="mb-2 text-[13px] leading-5 text-neutral-900">
-                    {asString(story.prerequisiteSummary)}
-                  </p>
-                )}
-                <PrereqPaths paths={prereqPaths} onPick={onPick} />
-              </div>
-              <div
-                className="rounded-xl p-3"
-                style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
-              >
-                <div className="mb-1 text-[13px] font-black">
-                  Why this confidence level
-                </div>
-                {asString(story.confidenceNote) && (
-                  <p className="mb-2 text-[13px] leading-5 text-neutral-900">
-                    {asString(story.confidenceNote)}
-                  </p>
-                )}
-                <ConfidenceBox c={confidenceView} />
-              </div>
-            </div>
-
-            {followups.length > 0 && (
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <span className="text-[12px] font-black text-neutral-700">
-                  Ask the agent:
-                </span>
-                {followups.map((q) => (
-                  <button
-                    key={q}
-                    type="button"
-                    onClick={() => onAsk(q)}
-                    className="rounded-full px-3 py-1 text-[12px] font-bold transition-transform hover:-translate-y-0.5"
-                    style={{ backgroundColor: LAVENDER, ...border }}
-                  >
-                    {q}
-                  </button>
-                ))}
-              </div>
-            )}
-          </>
-        ) : (
-          <p className="mt-3 text-[13px] text-neutral-800">
-            No summary available for this topic yet.
-          </p>
-        )}
-      </div>
-
-      {/* 2. AT A GLANCE */}
-      <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Tile
-          value={num(facts.skillsCovered?.length)}
-          label="Skills linked"
-          hint="Wider skills this topic is part of"
-        />
-        <Tile
-          value={num(facts.realWorkLinked)}
-          label="Pieces of real work"
-          hint="Code that shows it in action"
-        />
-        <Tile
-          value={num(facts.missionsLinked)}
-          label="Practice missions"
-          hint="Guided exercises you completed"
-        />
-        <Tile
-          value={num(facts.projectsInvolved)}
-          label="Projects"
-          hint="Repositories the work lives in"
-        />
-      </div>
-
-      {/* 3. THE MAP */}
-      <div
-        className="mt-4 overflow-hidden rounded-xl"
-        style={{ backgroundColor: WHITE, ...border }}
-      >
-        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
-          <div>
-            <div className="text-[14px] font-black">How it all connects</div>
-            <div className="text-[12px] text-neutral-700">
-              Click any circle to see how it relates to this topic. Closer to the
-              centre means more directly linked.
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            {picked && (
-              <Btn onClick={() => setPicked(null)}>
-                <X size={12} /> Clear
-              </Btn>
-            )}
-            <Btn onClick={() => setTech((v) => !v)} bg={tech ? YELLOW : CARD}>
-              {tech ? "Hide" : "Show"} technical labels
-            </Btn>
-          </div>
-        </div>
-
-        <svg
-          viewBox={`0 0 ${EW} ${EH}`}
-          className="block h-auto w-full"
-          role="group"
-          aria-label="Evidence map"
-        >
-          <defs>
-            <marker
-              id="evarrow"
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth="6"
-              markerHeight="6"
-              orient="auto-start-reverse"
-            >
-              <path d="M0,0 L10,5 L0,10 z" fill={INK} />
-            </marker>
-          </defs>
-          {RINGS.map((r) => (
-            <ellipse
-              key={r}
-              cx={EW / 2}
-              cy={EH / 2}
-              rx={r * 1.35}
-              ry={r}
-              fill="none"
-              stroke={INK}
-              strokeOpacity=".14"
-              strokeDasharray="4 6"
-            />
-          ))}
-          {["directly linked", "one step away", "two steps away"].map((t, i) => (
-            <text
-              key={t}
-              x={EW / 2 + 6}
-              y={EH / 2 - RINGS[i] - 4}
-              fontSize="11"
-              fontWeight={800}
-              fill={INK}
-              opacity=".5"
-            >
-              {t}
-            </text>
-          ))}
-
-          {edges.map((e) => {
-            const a = pos.get(asString(e.source));
-            const b = pos.get(asString(e.target));
-            if (!a || !b) return null;
-            const sid = asString(e.source);
-            const tid = asString(e.target);
-            const on = lit.has(sid) && lit.has(tid);
-            const touchesPick =
-              !!picked && (sid === picked.id || tid === picked.id);
-            const dx = b.x - a.x;
-            const dy = b.y - a.y;
-            const d = Math.max(Math.hypot(dx, dy), 1);
-            const ra = nodeR(byId.get(sid)) + 2;
-            const rb = nodeR(byId.get(tid)) + 6;
-            const op = litOn ? (on ? 1 : 0.08) : focus ? (touchesPick ? 1 : 0.06) : 0.55;
-            const showText = tech || on || touchesPick;
-            return (
-              <g key={asString(e.id)} opacity={op}>
-                <line
-                  x1={a.x + (dx / d) * ra}
-                  y1={a.y + (dy / d) * ra}
-                  x2={b.x - (dx / d) * rb}
-                  y2={b.y - (dy / d) * rb}
-                  stroke={on || touchesPick ? CORAL : INK}
-                  strokeWidth={on || touchesPick ? 3.2 : 1.3}
-                  markerEnd="url(#evarrow)"
-                />
-                {showText && (
-                  <text
-                    x={(a.x + b.x) / 2}
-                    y={(a.y + b.y) / 2 - 3}
-                    textAnchor="middle"
-                    fontSize="9.5"
-                    fontWeight={800}
-                    fill={INK}
-                    style={{
-                      paintOrder: "stroke",
-                      stroke: WHITE,
-                      strokeWidth: 3,
-                    }}
-                  >
-                    {tech
-                      ? asString(e.type)
-                      : (REL_PLAIN[asString(e.type)] ?? asString(e.type))}
-                  </text>
-                )}
-              </g>
-            );
-          })}
-
-          {nodes.map((n) => {
-            const p = pos.get(asString(n.id));
-            if (!p) return null;
-            const id = asString(n.id);
-            const r = nodeR(n);
-            const kind = asString(n.kind);
-            const mission = n.meta?.mission === true;
-            const faded = litOn ? !lit.has(id) : focus ? !focus.has(id) : false;
-            return (
-              <g
-                key={id}
-                tabIndex={0}
-                role="button"
-                aria-label={`${KIND_LABEL[kind] ?? kind}: ${nm(id)}`}
-                onClick={() => setPicked(n)}
-                onKeyDown={(ev) =>
-                  (ev.key === "Enter" || ev.key === " ") && setPicked(n)
-                }
-                style={{
-                  cursor: "pointer",
-                  opacity: faded ? 0.15 : 1,
-                  transition: "opacity .25s",
-                }}
-              >
-                {lit.has(id) && (
-                  <circle
-                    cx={p.x}
-                    cy={p.y}
-                    r={r + 9}
-                    fill="none"
-                    stroke={YELLOW}
-                    strokeWidth="3.5"
-                  />
-                )}
-                <circle
-                  cx={p.x}
-                  cy={p.y}
-                  r={r}
-                  fill={KIND_COLOR[kind] ?? CARD}
-                  stroke={INK}
-                  strokeWidth={picked?.id === id ? 4 : 2.2}
-                  strokeDasharray={mission ? "4 3" : undefined}
-                />
-                <text
-                  x={p.x}
-                  y={p.y + r + 13}
-                  textAnchor="middle"
-                  fontSize="10.5"
-                  fontWeight={800}
-                  fill={INK}
-                  style={{
-                    paintOrder: "stroke",
-                    stroke: WHITE,
-                    strokeWidth: 4,
-                    strokeLinejoin: "round",
-                  }}
-                >
-                  {cut(nm(id), 24)}
-                </text>
-              </g>
-            );
-          })}
-        </svg>
-
-        <div
-          className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 text-[12px] font-semibold"
-          style={{ borderTop: `1px solid ${LINE}` }}
-        >
-          {Object.entries(KIND_LABEL).map(([k, l]) => (
-            <span key={k} className="flex items-center gap-1.5">
-              <span
-                className="h-3 w-3 rounded-full"
-                style={{
-                  backgroundColor: KIND_COLOR[k],
-                  border: `1.5px solid ${INK}`,
-                }}
-              />
-              {l}
-            </span>
-          ))}
-          <span className="flex items-center gap-1.5">
-            <span
-              className="h-3 w-3 rounded-full"
-              style={{ border: `2px dashed ${INK}` }}
-            />
-            practice mission
-          </span>
-        </div>
-
-        <div className="px-3 pb-3 text-[13px]" style={{ borderTop: `1px solid ${LINE}` }}>
-          {picked ? (
-            <>
-              <div className="pt-2 font-black">
-                {KIND_LABEL[asString(picked.kind)] ?? asString(picked.kind)}:{" "}
-                {nm(asString(picked.id))}
-              </div>
-              {edges
-                .filter((e) => e.source === picked.id || e.target === picked.id)
-                .slice(0, 6)
-                .map((e) => (
-                  <p
-                    key={asString(e.id)}
-                    className="text-[13px] leading-5 text-neutral-900"
-                  >
-                    • {relSentence(e, nm)}
-                    {e.note ? ` Why: ${asString(e.note)}` : ""}
-                  </p>
-                ))}
-              {picked.kind === "topic_neighbor" && picked.meta?.slug && (
-                <button
-                  type="button"
-                  onClick={() => onPick(asString(picked.meta.slug))}
-                  className="mt-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-black"
-                  style={{ backgroundColor: YELLOW, ...border }}
-                >
-                  Open this topic
-                </button>
-              )}
-            </>
-          ) : (
-            <p className="pt-2 text-[13px] text-neutral-700">
-              Tip: click a circle to read, in a sentence, how it connects to this
-              topic.
-            </p>
-          )}
-        </div>
-      </div>
-
-      {/* 4. THE WORK BEHIND THE RATING */}
-      <div
-        className="mt-4 rounded-xl p-3"
-        style={{ backgroundColor: WHITE, ...border }}
-      >
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <div className="text-[14px] font-black">The work behind this rating</div>
-          <span className="text-[12px] text-neutral-700">
-            Hover a card to light up its path on the map
-          </span>
-        </div>
-        {builds.length === 0 ? (
-          <p className="text-[13px] leading-5 text-neutral-800">
-            No piece of work is linked to this topic in the graph. That means
-            nothing was connected, not that nothing was built.
-          </p>
-        ) : (
-          <div className="grid gap-2 md:grid-cols-2">
-            {builds.map((b) => (
-              <div
-                key={asString(b.id)}
-                onMouseEnter={() => setLit(new Set(asArray<string>(b.routeIds)))}
-                onMouseLeave={() => setLit(new Set())}
-                className="rounded-lg p-2.5"
-                style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <Chip
-                    text={b.kind === "mission" ? "Practice mission" : "Real work"}
-                    background={b.kind === "mission" ? PURPLE : GREEN}
-                    color={WHITE}
-                  />
-                  <span className="text-[11px] font-bold text-neutral-700">
-                    {timeAgo(asString(b.createdAt))}
-                  </span>
-                </div>
-                <div className="mt-1 text-[13px] font-black leading-4">
-                  {asString(b.title)}
-                </div>
-                {b.commitSubject && (
-                  <div className="text-[12px] leading-4 text-neutral-700">
-                    {cut(asString(b.commitSubject), 90)}
-                  </div>
-                )}
-                <p className="mt-1 text-[12px] leading-4 text-neutral-800">
-                  Shows the skill “{asString(b.capability)}”
-                  {b.repository ? ` in ${asString(b.repository)}` : ""}.
-                </p>
-                {b.permalink && (
-                  <a
-                    href={asString(b.permalink)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="mt-1 block text-[12px] font-bold underline"
-                  >
-                    View the code
-                  </a>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* 5. HOW STRONG, IN QUESTIONS */}
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <div
-          className="rounded-xl p-3"
-          style={{ backgroundColor: WHITE, ...border }}
-        >
-          <div className="mb-2 text-[14px] font-black">Where it sits among your skills</div>
-          <div className="space-y-3">
-            {algos.map((a) => {
-              const meta = ALGO_PLAIN[asString(a.id)];
-              if (!meta) return null;
-              return (
-                <div key={asString(a.id)}>
-                  <div className="text-[13px] font-black">{meta.title}</div>
-                  <div className="text-[12px] text-neutral-700">
-                    {meta.question}
-                  </div>
-                  {a.norm != null && (
-                    <div
-                      className="mt-1 h-2 overflow-hidden rounded-full"
-                      style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
-                    >
-                      <div
-                        className="h-full"
-                        style={{
-                          width: `${num(a.norm) * 100}%`,
-                          backgroundColor: SKY,
-                        }}
-                      />
-                    </div>
-                  )}
-                  <p className="mt-0.5 text-[13px] leading-5 text-neutral-900">
-                    {meta.read(a, data)}
-                  </p>
-                </div>
-              );
-            })}
-          </div>
-          <p className="mt-2 text-[12px] leading-4 text-neutral-700">
-            These describe how topics connect. They do not prove skill on their
-            own.
-          </p>
-        </div>
-
-        <div
-          className="rounded-xl p-3"
-          style={{ backgroundColor: WHITE, ...border }}
-        >
-          <div className="mb-1 flex items-center justify-between text-[14px] font-black">
-            <span>The rating</span>
-            <span className="text-[13px]">{num(score.score)} / 100</span>
-          </div>
-          <div
-            className="h-3 overflow-hidden rounded-full"
-            style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
-          >
-            <div
-              className="h-full"
-              style={{
-                width: `${num(score.score)}%`,
-                backgroundColor: LEVEL_COLOR[asString(score.level)] ?? SKY,
-              }}
-            />
-          </div>
-          <p className="mt-2 text-[13px] leading-5 text-neutral-900">
-            First, Pathway counted the activity in your code and got{" "}
-            <b>{num(score.baseline)}</b>. Then the agent read the actual code
-            and{" "}
-            {num(score.adjustment) === 0
-              ? "agreed with that number"
-              : `moved it ${num(score.adjustment) > 0 ? "up" : "down"} by ${Math.abs(num(score.adjustment))}`}
-            . Confidence is <b>{asString(score.confidence)}</b>
-            {asString(score.confidence) === "low"
-              ? ", because the evidence is thin or narrow."
-              : "."}
-          </p>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {backedBy.length ? (
-              backedBy.map((b) => (
-                <Chip
-                  key={asString(b.kind)}
-                  text={`${num(b.count)} ${humanize(asString(b.kind)).toLowerCase()} cited`}
-                  background={LAVENDER}
-                />
-              ))
-            ) : (
-              <span className="text-[12px] text-neutral-700">
-                No specific code is cited for this rating.
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* 6. ENGINEERS ONLY */}
-      <div className="mt-4">
-        <Fold title="Technical details (for engineers)">
-          <p className="mb-2 text-[12px] leading-4 text-neutral-700">
-            Everything above is computed from these FalkorDB queries and
-            algorithms. You do not need this to understand the rating.
-          </p>
-          <div className="space-y-2">
-            {algos.map((a) => (
-              <div
-                key={asString(a.id)}
-                className="rounded-lg p-2 text-[12px]"
-                style={{ backgroundColor: WHITE, border: `1.5px solid ${INK}` }}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2 font-black">
-                  <span>{asString(a.name)}</span>
-                  <span className="text-neutral-700">
-                    {a.value == null
-                      ? "–"
-                      : fix(a.value, a.id === "traversal" ? 0 : 4)}
-                    {a.position ? ` · #${num(a.position)} of ${num(a.of)}` : ""}
-                  </span>
-                </div>
-                <div className="text-neutral-800">{asString(a.reading)}</div>
-                <code className="block break-all text-[11px] text-neutral-600">
-                  {asString(a.call)}
-                </code>
-              </div>
-            ))}
-            {trace.map((t, i) => (
-              <div
-                key={i}
-                className="rounded-lg p-2 text-[12px]"
-                style={{ backgroundColor: WHITE, border: `1.5px solid ${INK}` }}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2 font-black">
-                  <span>{asString(t.name)}</span>
-                  <span className="text-neutral-700">
-                    {num(t.rows)} rows · {num(t.ms)} ms
-                  </span>
-                </div>
-                <code className="block break-all text-[11px] text-neutral-700">
-                  {asString(t.pattern)}
-                </code>
-                <span className="text-[11px] font-bold text-neutral-600">
-                  {asString(t.algorithm)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </Fold>
-      </div>
-    </section>
   );
 }

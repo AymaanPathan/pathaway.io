@@ -1,6 +1,15 @@
 import express from "express";
 import { getGraphForDeveloper } from "../db/falkordb.js";
 import { type CategorySkillGroup } from "../graph/skill-category-graph.js";
+import {
+  analyzeDeveloperDepth,
+  createDepthLlmFromEnv,
+} from "../agents/depth-analyzer-agent.js";
+import {
+  DEPTH_ANALYSIS_VERSION,
+  ensureDepthSchema,
+} from "../graph/depth-analyzer-graph.js";
+import { onTopicsChanged } from "./topics-route.js";
 
 export type GraphHandle = Awaited<ReturnType<typeof getGraphForDeveloper>>;
 export const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
@@ -200,4 +209,88 @@ export async function resetOverviewIntelligenceGraph(
 
 export function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+const DEPTH_STAGE_MESSAGES: Record<string, string> = {
+  depth_start: "Starting topic analysis...",
+  depth_atlas_ready: "Evidence atlas ready.",
+  depth_discovering: "Discovering the topics and approaches in your code...",
+  depth_topics_proposed: "Topics proposed.",
+  depth_evidence_gathered: "Gathering evidence per topic...",
+  depth_refining: "Looking for more evidence...",
+  depth_topic_assessed: "Judging depth...",
+  depth_complete: "Topic graph ready.",
+};
+export function humanizeDepthStage(
+  stage: string,
+  detail?: Record<string, unknown>,
+): string {
+  if (stage === "depth_topic_assessed" && detail?.topic)
+    return `Judged depth: ${String(detail.topic)}`;
+  return DEPTH_STAGE_MESSAGES[stage] ?? titleCase(stage.replace(/^depth_/, ""));
+}
+
+export type DepthRefresh =
+  | { status: "ready"; topics: number }
+  | { status: "skipped"; topics: number }
+  | { status: "failed"; error: string };
+
+/**
+ * Builds or refreshes the topic/approach graph (DepthAssessment, Approach, Topic).
+ * Goal planning, topic chat and the topics API all read it, so every flow that
+ * rebuilds the evidence it cites must run this afterwards.
+ * force=false skips developers whose assessments are already at the current version.
+ * Never throws: a failed depth step must not fail the surrounding flow.
+ */
+export async function refreshDepthGraph(
+  graph: GraphHandle,
+  developerId: string,
+  send: (stage: string, detail?: Record<string, unknown>) => void,
+  opts: { force: boolean },
+): Promise<DepthRefresh> {
+  try {
+    await ensureDepthSchema(graph);
+    if (!opts.force) {
+      const res = await graph.query(
+        `MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment)
+         RETURN count(a) AS n, min(a.analysis_version) AS version`,
+        { params: { dev: developerId } },
+      );
+      const row = (res.data?.[0] ?? {}) as Record<string, unknown>;
+      const n = num(row.n);
+      if (n > 0 && num(row.version) >= DEPTH_ANALYSIS_VERSION) {
+        send("depth:skipped", {
+          message: `Topic graph is up to date (${n} topics).`,
+          topics: n,
+        });
+        return { status: "skipped", topics: n };
+      }
+    }
+    const llm = createDepthLlmFromEnv();
+    send("depth:start", { message: humanizeDepthStage("depth_start") });
+    const result = await analyzeDeveloperDepth(graph, developerId, {
+      llm,
+      maxTopics: 16,
+      synthesize: true,
+      onProgress: (stage, detail) => {
+        if (stage === "depth_files_scanned") return; // too chatty for a stream
+        send(`depth:${stage}`, {
+          ...(detail ?? {}),
+          message: humanizeDepthStage(stage, detail ?? {}),
+        });
+      },
+    });
+    onTopicsChanged(developerId);
+    send("depth:ready", {
+      message: `Topic graph ready: ${result.topicsAssessed} topics assessed.`,
+      topics: result.topicsAssessed,
+    });
+    return { status: "ready", topics: result.topicsAssessed };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    console.error("[depth-refresh] failed", error);
+    onTopicsChanged(developerId);
+    send("depth:warning", { message: `Topic analysis failed: ${error}` });
+    return { status: "failed", error };
+  }
 }

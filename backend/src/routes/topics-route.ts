@@ -16,6 +16,7 @@ import {
   ensureDepthSchema,
   findTopicsByText,
   readDeveloperTopicProfile,
+  readTaxonomyEdges,
   readTopicDepthDetail,
   readTopicGraphEvidence,
   readTopicPathDetailed,
@@ -34,8 +35,10 @@ type Query = Record<string, unknown>;
 
 const LOG = "[topics-route]";
 const CACHE_MS = 30_000;
-// Proficiency scores are descriptive assessment fields only. Topic ordering
-// defaults must come from FalkorDB graph algorithms/traversals.
+// Three different things are never collapsed into one number:
+//   taxonomy importance (PageRank / betweenness / community: structure of the shared taxonomy),
+//   developer proficiency (level / score / authenticity: judged from evidence),
+//   assessment confidence (strength + diversity of evidence).
 const MAX_JOB_MS = 15 * 60_000;
 const SLUG = /^[a-z0-9_]{1,60}$/;
 
@@ -63,6 +66,8 @@ const avg = (items: number[]): number =>
     ? Math.round(items.reduce((a, b) => a + b, 0) / items.length)
     : 0;
 const asRows = (v: unknown): Row[] => (Array.isArray(v) ? (v as Row[]) : []);
+const asArray = <T = unknown>(v: unknown): T[] =>
+  Array.isArray(v) ? (v as T[]) : [];
 
 const NOT_SYNCED = {
   error: "No topics yet: this developer has not been synced.",
@@ -153,6 +158,12 @@ const AUTHENTICITY_META: Record<
   },
 };
 
+/**
+ * `role` is the single responsibility of each algorithm.
+ * `affectsAssessment` is true only when the result changes a stored or displayed
+ * assessment outcome (confidence factors, limitations, prerequisite status).
+ * Structural algorithms describe the taxonomy; they never raise or lower proficiency.
+ */
 const ALGORITHMS = [
   {
     id: "pagerank",
@@ -162,15 +173,16 @@ const ALGORITHMS = [
     scope: "Shared Topic taxonomy (no developer data)",
     relationships: ["BUILDS_ON"],
     writesProperty: "Topic.foundation_rank",
+    role: "Taxonomy importance: which topics many others stand on.",
+    affectsAssessment: false,
     fallback:
       "None. If it fails the score stays empty; no proxy ranking is used.",
-    why: "BUILDS_ON edges point from an advanced topic to the foundation it needs. Rank therefore flows toward foundations, so a high score means many topics (directly or transitively) stand on this one. It describes graph structure; it does not prove the developer has the skill.",
+    why: "BUILDS_ON edges point from an advanced topic to the foundation it needs. Rank therefore flows toward foundations, so a high score means many topics (directly or transitively) stand on this one. It describes taxonomy structure; it does not prove the developer has the skill.",
     howToRead:
-      "High = a structurally central foundation (for example data modeling). Low = a leaf or specialised topic. When no BUILDS_ON edge exists the rank is computed over RELATED_TOPIC instead and does not mean 'foundation'.",
+      "High = a structurally central foundation (for example data modeling). Low = a leaf or specialised topic. Never read it as proficiency.",
     frontendUse: [
       "Badge topics as 'foundation'",
       "Order topics from foundations upward",
-      "Weight foundation gaps",
     ],
   },
   {
@@ -181,15 +193,12 @@ const ALGORITHMS = [
     scope: "Shared Topic taxonomy (no developer data)",
     relationships: ["BUILDS_ON", "RELATED_TOPIC"],
     writesProperty: "Topic.bridge_score",
+    role: "Structural bridges: topics connecting otherwise separate areas.",
+    affectsAssessment: false,
     fallback: "None. If it fails the score stays empty.",
-    why: "Counts how often a topic sits on the shortest path between two others. Topics that connect otherwise separate areas score high, which marks knowledge that transfers across domains. It is a structural measure, not evidence of expertise.",
-    howToRead:
-      "High = a bridge topic (for example real-time sync linking frontend state and backend events). Zero = sits inside one area.",
-    frontendUse: [
-      "Badge topics as 'bridge'",
-      "Highlight transferable skills",
-      "Size nodes in the graph view",
-    ],
+    why: "Counts how often a topic sits on the shortest path between two others. Topics that connect separate areas score high. It is a structural measure, not evidence of expertise.",
+    howToRead: "High = a bridge topic. Zero = sits inside one area.",
+    frontendUse: ["Badge topics as 'bridge'", "Size nodes in the graph view"],
   },
   {
     id: "label_propagation",
@@ -199,15 +208,13 @@ const ALGORITHMS = [
     scope: "Shared Topic taxonomy (no developer data)",
     relationships: ["RELATED_TOPIC"],
     writesProperty: "Topic.cluster_id",
+    role: "Knowledge areas: groups of tightly related sibling topics.",
+    affectsAssessment: false,
     fallback: "None. If it fails topics stay unclustered.",
-    why: "Finds groups of tightly related sibling topics without choosing the number of groups in advance. Gives data-driven groups that cut across the LLM's domain labels.",
+    why: "Finds groups of tightly related sibling topics without choosing the number of groups in advance. A group is only shown when it has at least 2 assessed topics.",
     howToRead:
-      "Topics sharing a cluster_id belong to the same knowledge community. The cluster id is a number; this API labels each cluster after its strongest assessed topic.",
-    frontendUse: [
-      "Colour or hull nodes by community",
-      "Show 'knowledge areas' cards",
-      "Find cross-domain communities",
-    ],
+      "Topics sharing a cluster_id belong to the same knowledge community. This API labels each cluster after its most foundational assessed topic.",
+    frontendUse: ["Colour nodes by community", "Show 'knowledge areas'"],
   },
   {
     id: "wcc",
@@ -217,14 +224,13 @@ const ALGORITHMS = [
     scope: "Shared Topic taxonomy (no developer data)",
     relationships: ["BUILDS_ON", "RELATED_TOPIC"],
     writesProperty: "Topic.component_id",
+    role: "Taxonomy quality check: separates the main body from isolated topics.",
+    affectsAssessment: false,
     fallback: "None. If it fails components stay empty.",
-    why: "Splits the taxonomy into islands that have no path between them. Separates the main body of knowledge from isolated topics and doubles as a data-quality check on the taxonomy.",
+    why: "Splits the taxonomy into islands with no path between them and doubles as a data-quality check.",
     howToRead:
-      "The largest component is the main knowledge graph. Small components are isolated topics with no known relation to anything else.",
-    frontendUse: [
-      "Flag isolated topics",
-      "Decide which topics can be drawn in one connected layout",
-    ],
+      "The largest component is the main knowledge graph. Small components are isolated topics.",
+    frontendUse: ["Flag isolated topics"],
   },
   {
     id: "shortest_path",
@@ -234,25 +240,29 @@ const ALGORITHMS = [
     scope: "Native Cypher over the Topic taxonomy",
     relationships: ["BUILDS_ON", "RELATED_TOPIC"],
     writesProperty: null,
+    role: "Explains how two topics connect; every hop is typed.",
+    affectsAssessment: false,
     fallback: "Tries the reverse direction when the forward path is empty",
-    why: "Explains how two topics connect through real relationships. Every hop reports whether it is a foundation dependency or an association.",
+    why: "Every hop reports whether it is a foundation dependency or an association.",
     howToRead:
-      "An ordered list of topics from the first to the second, each hop labelled BUILDS_ON or RELATED_TOPIC. A path shows connection, not skill.",
+      "An ordered list of topics, each hop labelled BUILDS_ON or RELATED_TOPIC. A path shows connection, not skill.",
     frontendUse: ["Path highlighter between two selected nodes"],
   },
   {
     id: "foundation_traversal",
-    name: "Variable-length traversal",
+    name: "Prerequisite traversal",
     engine: "cypher",
     call: "(t:Topic)-[:BUILDS_ON*1..3]->(f:Topic)",
     scope: "Native Cypher, joined to this developer's assessments",
     relationships: ["BUILDS_ON"],
     writesProperty: null,
+    role: "Which foundations a topic needs, and whether this developer's code backs them.",
+    affectsAssessment: true,
     fallback: null,
-    why: "Finds the foundations (up to 3 hops) of a topic and what this developer has shown for each, so a deep topic on a weak foundation can be flagged.",
+    why: "Only BUILDS_ON edges with a stated reason count. The result feeds the 'foundations backed' confidence factor, the foundation-gap list and the topic's limitations.",
     howToRead:
-      "Each foundation lists hop distance and the developer's level in it.",
-    frontendUse: ["Foundation tree on the topic detail page"],
+      "Each path lists steps, the reason per hop, and whether the foundations are demonstrated, shallow or not assessed.",
+    frontendUse: ["Foundation paths on the topic detail"],
   },
   {
     id: "fulltext",
@@ -262,6 +272,8 @@ const ALGORITHMS = [
     scope: "Topic.name, Topic.description, Topic.aliases_text",
     relationships: [],
     writesProperty: null,
+    role: "Lookup and canonical-topic reuse (deduplication).",
+    affectsAssessment: false,
     fallback: "Substring match in memory when the index returns nothing",
     why: "Fast fuzzy lookup, and it lets the analyzer reuse an existing topic instead of creating a near-duplicate.",
     howToRead: "Higher score = better text match.",
@@ -275,8 +287,10 @@ const ALGORITHMS = [
     scope: "One developer's authored code (never written to the shared graph)",
     relationships: [],
     writesProperty: null,
+    role: "Discovery input: groups packages and signals used together.",
+    affectsAssessment: true,
     fallback: null,
-    why: "Runs inside the analyzer, not in FalkorDB. Groups packages and code signals that are used together so the LLM can propose topics and approaches grounded in real usage.",
+    why: "Runs inside the analyzer. Groups atoms used together so topics and approaches are grounded in real usage.",
     howToRead: "Internal discovery input. Not exposed as a Topic property.",
     frontendUse: [],
   },
@@ -309,7 +323,7 @@ const PIPELINE = [
     id: "judge",
     engine: "llm",
     title: "Judge depth",
-    does: "The model judges level, authenticity and how each approach was implemented, citing evidence refs and separating observed, inferred and associated claims. It may request one extra evidence round via full-text probes.",
+    does: "The model judges level, authenticity and how each approach was implemented, citing evidence refs and separating observed, inferred and associated claims.",
   },
   {
     step: 5,
@@ -367,10 +381,12 @@ const GUARD_RAILS = [
   "Authenticity caps the level: genuine_implementation up to deep, working_usage up to proficient, incidental up to working, boilerplate and insufficient_evidence up to surface.",
   "Genuine implementation is downgraded to working usage when there are no own definitions, no built mechanism and fewer than 3 files.",
   "When 70% or more of the evidence sits in scaffold-like commits the topic is marked boilerplate.",
-  "Confidence follows the strength and the diversity of the evidence: fewer than 3 files or fewer than 2 commits is always low; evidence from a single repository, from fewer than three kinds (code samples, detector hits, grouped experiences, commits), or with no directly observed work cannot be high. The model may lower confidence, never raise it above this cap. The API shows the lower of the stored value and the value re-derived from the current evidence.",
+  "Confidence follows the strength and the diversity of the evidence: fewer than 3 files or fewer than 2 commits is always low; evidence from a single repository, from fewer than three kinds, or with no directly observed work cannot be high. The model may lower confidence, never raise it above this cap. The API shows the lower of the stored value and the value re-derived from the current evidence.",
   "The score is clamped into the band of its level, and an approach can never be deeper than its topic.",
   "The baseline is reduced when evidence is mostly scaffold (x0.6), when one commit (cap 25) or one file (cap 20) touches the topic.",
-  "A capability is only 'observed' when a detected demonstration in the developer's own code backs it. Without one it is 'inferred' (concluded from the topic rating) or 'association' (linked in the taxonomy only). Related topics are never prerequisites; only BUILDS_ON edges with a stated reason form a prerequisite path.",
+  "A capability is only 'observed' when a detected demonstration in the developer's own code backs it. Without one it is 'inferred' or 'association' (taxonomy link only, reported as unknown). Related topics are never prerequisites; only BUILDS_ON edges with a stated reason form a prerequisite path.",
+  "A BUILDS_ON edge without a stated reason is kept but marked untrusted and is ignored by prerequisite paths, foundation gaps and the frontier.",
+  "The explainer may only write numbers that exist in the supplied facts; otherwise its output is rejected and the deterministic story is used.",
 ];
 
 const ENDPOINTS = [
@@ -395,6 +411,11 @@ const ENDPOINTS = [
     path: "/api/topics/algorithms",
     purpose: "Algorithms used and why",
   },
+  {
+    method: "GET",
+    path: "/api/topics/integrity",
+    purpose: "Deterministic integrity checks over the graph snapshot",
+  },
   { method: "GET", path: "/api/topics/search?q=", purpose: "Search" },
   {
     method: "GET",
@@ -405,17 +426,27 @@ const ENDPOINTS = [
     method: "GET",
     path: "/api/topics/:slug",
     purpose:
-      "Topic detail with proof ledger, prerequisite paths and confidence",
+      "Topic detail with reasoning trace, proof ledger, prerequisite paths and confidence",
+  },
+  {
+    method: "GET",
+    path: "/api/topics/:slug/trace",
+    purpose: "Reproducible reasoning trace for one topic",
   },
   {
     method: "GET",
     path: "/api/topics/:slug/graph",
-    purpose: "Evidence map with plain-language story",
+    purpose: "Evidence map, assessment steps and plain-language story",
+  },
+  {
+    method: "GET",
+    path: "/api/topics/:slug/evolution",
+    purpose: "Assessment history with reasons",
   },
   {
     method: "POST",
     path: "/api/topics/:slug/explain",
-    purpose: "Agent explains the evidence in plain English",
+    purpose: "Agent explains the evidence in plain English (grounding-checked)",
   },
   { method: "POST", path: "/api/topics/analyze", purpose: "Start analysis" },
   { method: "GET", path: "/api/topics/analyze/status", purpose: "Job status" },
@@ -472,22 +503,26 @@ const TOPICS_MODEL = {
       type: "ASSESSED",
       pattern: "(Developer)-[:ASSESSED]->(DepthAssessment)",
       private: true,
+      meaning: "The developer was assessed on a topic",
     },
     {
       type: "OF_TOPIC",
       pattern: "(DepthAssessment)-[:OF_TOPIC]->(Topic)",
       private: true,
+      meaning: "Which canonical topic the assessment is about",
     },
     {
       type: "USES_APPROACH",
       pattern: "(DepthAssessment)-[:USES_APPROACH]->(Approach)",
       private: true,
+      meaning: "The developer demonstrably uses this implementation approach",
     },
     {
       type: "BACKED_BY",
       pattern:
         "(DepthAssessment)-[:BACKED_BY]->(FileChange|Demonstration|Experience|Commit)",
       private: true,
+      meaning: "The assessment is supported by identifiable evidence",
     },
     {
       type: "KNOWS_TOPIC",
@@ -504,13 +539,14 @@ const TOPICS_MODEL = {
       type: "BUILDS_ON",
       pattern: "(Topic)-[:BUILDS_ON]->(Topic)",
       private: false,
-      meaning: "advanced topic -> its foundation",
+      meaning:
+        "advanced topic genuinely depends on its foundation (needs a stated reason)",
     },
     {
       type: "RELATED_TOPIC",
       pattern: "(Topic)-[:RELATED_TOPIC]<->(Topic)",
       private: false,
-      meaning: "sibling topics, stored in both directions",
+      meaning: "associated sibling topics, never a prerequisite",
     },
   ],
   privacy:
@@ -529,7 +565,7 @@ const TOPICS_MODEL = {
   ),
   scoring: {
     summary:
-      "A deterministic baseline is computed from graph counts. The LLM judges level and authenticity from cited evidence. Guard-rails reconcile the two.",
+      "A deterministic baseline is computed from graph counts. The LLM judges level and authenticity from cited evidence. Guard-rails reconcile the two. Taxonomy importance, proficiency and confidence are reported separately.",
     baselineComponents: BASELINE_COMPONENTS,
     baselineNote: "Components are summed, then capped at 100.",
     guardRails: GUARD_RAILS,
@@ -599,6 +635,8 @@ interface EdgeRow {
   type: "BUILDS_ON" | "RELATED_TOPIC";
   reason: string;
   basis: string;
+  /** BUILDS_ON is trusted only when it carries a stated reason */
+  trusted: boolean;
 }
 
 interface Dossier {
@@ -619,6 +657,8 @@ interface Dossier {
   };
   taxonomy: { topics: number; buildsOn: number; related: number };
   analysis: { model: string; updatedAt: string; version: number } | null;
+  /** real evidence totals read from the graph (BACKED_BY edges, stored stats) */
+  evidence: { byKind: Record<string, number>; testFilesAcrossTopics: number };
 }
 
 const cache = new Map<string, { at: number; dossier: Dossier | null }>();
@@ -659,50 +699,88 @@ async function buildDossier(developerId: string): Promise<Dossier | null> {
   );
   if (exists && exists.length === 0) return null;
 
-  const [profile, metaRows, globalRows, buildsRows, relatedRows, analysisRows] =
-    await Promise.all([
-      readDeveloperTopicProfile(graph, developerId),
-      cypher(
-        graph,
-        "topic metrics",
-        `
+  const [
+    profile,
+    metaRows,
+    globalRows,
+    buildsRows,
+    relatedRows,
+    analysisRows,
+    kindRows,
+    statRows,
+  ] = await Promise.all([
+    readDeveloperTopicProfile(graph, developerId),
+    cypher(
+      graph,
+      "topic metrics",
+      `
         MATCH (:Developer {id: $dev})-[:ASSESSED]->(:DepthAssessment)-[:OF_TOPIC]->(t:Topic)
         RETURN t.slug AS slug, t.bridge_score AS bridge_score, t.component_id AS component_id
         `,
-        { dev: developerId },
-      ),
-      cypher(
-        graph,
-        "taxonomy coverage",
-        `
+      { dev: developerId },
+    ),
+    cypher(
+      graph,
+      "taxonomy coverage",
+      `
         MATCH (t:Topic)
         RETURN count(t) AS total, max(t.foundation_rank) AS max_pr, max(t.bridge_score) AS max_bt,
                count(t.foundation_rank) AS c_pr, count(t.bridge_score) AS c_bt,
                count(t.cluster_id) AS c_cl, count(t.component_id) AS c_cc
         `,
-      ),
-      cypher(
-        graph,
-        "builds_on count",
-        `MATCH (:Topic)-[r:BUILDS_ON]->(:Topic) RETURN count(r) AS n`,
-      ),
-      cypher(
-        graph,
-        "related count",
-        `MATCH (:Topic)-[r:RELATED_TOPIC]->(:Topic) RETURN count(r) AS n`,
-      ),
-      cypher(
-        graph,
-        "analysis meta",
-        `
+    ),
+    cypher(
+      graph,
+      "builds_on count",
+      `MATCH (:Topic)-[r:BUILDS_ON]->(:Topic) RETURN count(r) AS n`,
+    ),
+    cypher(
+      graph,
+      "related count",
+      `MATCH (:Topic)-[r:RELATED_TOPIC]->(:Topic) RETURN count(r) AS n`,
+    ),
+    cypher(
+      graph,
+      "analysis meta",
+      `
         MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment)
         RETURN a.model AS model, max(a.updated_at) AS updated, min(a.analysis_version) AS version
         ORDER BY updated DESC
         LIMIT 1
         `,
-        { dev: developerId },
-      ),
-    ]);
+      { dev: developerId },
+    ),
+    cypher(
+      graph,
+      "evidence by kind",
+      `
+        MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment)
+        OPTIONAL MATCH (a)-[:BACKED_BY]->(x)
+        RETURN labels(x)[0] AS kind, count(DISTINCT x) AS n
+        `,
+      { dev: developerId },
+    ),
+    cypher(
+      graph,
+      "assessment stats",
+      `MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment) RETURN a.stats_json AS stats`,
+      { dev: developerId },
+    ),
+  ]);
+
+  const evidenceByKind: Record<string, number> = {};
+  for (const r of kindRows ?? []) {
+    const k = str(r.kind);
+    if (k) evidenceByKind[k] = num(r.n);
+  }
+  let testFiles = 0;
+  for (const r of statRows ?? []) {
+    try {
+      testFiles += num(JSON.parse(str(r.stats)).testFiles);
+    } catch {
+      /* no stats stored */
+    }
+  }
 
   const g = globalRows?.[0] ?? {};
   const maxPr = num(g.max_pr);
@@ -770,12 +848,15 @@ async function buildDossier(developerId: string): Promise<Dossier | null> {
       },
     };
   });
-  const bySlug = new Map(cards.map((c) => [c.slug, c]));
+  // canonical dedupe: one card per slug
+  const bySlug = new Map<string, TopicCard>();
+  for (const c of cards) if (!bySlug.has(c.slug)) bySlug.set(c.slug, c);
+  const uniqueCards = [...bySlug.values()];
 
   // ---- relations touching this developer's topics ----
   const edges: EdgeRow[] = [];
   const neighbors = new Map<string, NodeRef>();
-  if (cards.length) {
+  if (uniqueCards.length) {
     const edgeRows =
       (await cypher(
         graph,
@@ -792,7 +873,7 @@ async function buildDossier(developerId: string): Promise<Dossier | null> {
                type(r) AS type, coalesce(r.reason, "") AS reason, coalesce(r.basis, "") AS basis
         LIMIT 3000
         `,
-        { slugs: cards.map((c) => c.slug) },
+        { slugs: uniqueCards.map((c) => c.slug) },
       )) ?? [];
 
     const seen = new Set<string>();
@@ -807,13 +888,15 @@ async function buildDossier(developerId: string): Promise<Dossier | null> {
           : `B:${a.slug}>${b.slug}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const reason = str(r.reason);
       edges.push({
         id: `${type}:${a.slug}>${b.slug}`,
         source: a.slug,
         target: b.slug,
         type,
-        reason: str(r.reason),
+        reason,
         basis: str(r.basis),
+        trusted: type === "RELATED_TOPIC" ? true : reason.length > 0,
       });
       for (const n of [a, b]) {
         if (!bySlug.has(n.slug) && !neighbors.has(n.slug))
@@ -826,7 +909,7 @@ async function buildDossier(developerId: string): Promise<Dossier | null> {
   return {
     developerId,
     generatedAt: new Date().toISOString(),
-    cards,
+    cards: uniqueCards,
     bySlug,
     neighbors,
     edges,
@@ -851,6 +934,7 @@ async function buildDossier(developerId: string): Promise<Dossier | null> {
           version: num(analysis.version, DEPTH_ANALYSIS_VERSION),
         }
       : null,
+    evidence: { byKind: evidenceByKind, testFilesAcrossTopics: testFiles },
   };
 }
 
@@ -906,18 +990,18 @@ function bestLevel(cards: TopicCard[]): DepthLevel {
   );
 }
 
+const byGraph = (a: TopicCard, b: TopicCard) =>
+  (b.graph.foundationRank ?? -1) - (a.graph.foundationRank ?? -1) ||
+  (b.graph.bridgeScore ?? -1) - (a.graph.bridgeScore ?? -1) ||
+  a.name.localeCompare(b.name);
+
 function makeGroup(
   key: string,
   label: string,
   cards: TopicCard[],
   extra: Row = {},
 ) {
-  const sorted = [...cards].sort(
-    (a, b) =>
-      (b.graph.foundationRank ?? -1) - (a.graph.foundationRank ?? -1) ||
-      (b.graph.bridgeScore ?? -1) - (a.graph.bridgeScore ?? -1) ||
-      a.name.localeCompare(b.name),
-  );
+  const sorted = [...cards].sort(byGraph);
   return {
     key,
     label,
@@ -947,36 +1031,34 @@ function buildGroups(d: Dossier) {
   const { cards } = d;
   const related = d.edges.filter((e) => e.type === "RELATED_TOPIC");
 
-  // domain: labelled by the discovery model
   const domains = [...groupBy(cards, (c) => c.domain).entries()]
     .map(([key, list]) => makeGroup(key, humanize(key), list))
     .sort((a, b) => a.label.localeCompare(b.label));
 
-  // community: label propagation over RELATED_TOPIC
+  // communities are validated: a group needs >= 2 assessed topics AND at least
+  // one RELATED_TOPIC link between its members, otherwise it is merely co-labelled
   const byCluster = groupBy(cards, (c) =>
     c.graph.clusterId == null ? null : String(c.graph.clusterId),
   );
   const clusters = [...byCluster.entries()]
     .filter(([, list]) => list.length >= 2)
     .map(([key, list]) => {
-      const anchor = [...list].sort(
-        (a, b) =>
-          (b.graph.foundationRank ?? -1) - (a.graph.foundationRank ?? -1) ||
-          (b.graph.bridgeScore ?? -1) - (a.graph.bridgeScore ?? -1) ||
-          a.name.localeCompare(b.name),
-      )[0] as TopicCard;
+      const anchor = [...list].sort(byGraph)[0] as TopicCard;
       const slugs = new Set(list.map((c) => c.slug));
       const domainSet = uniq(list.map((c) => c.domainLabel));
+      const internalLinks = related.filter(
+        (e) => slugs.has(e.source) && slugs.has(e.target),
+      ).length;
       return makeGroup(key, `Around ${anchor.name}`, list, {
         clusterId: Number(key),
         anchor: { slug: anchor.slug, name: anchor.name },
         domains: domainSet,
         crossDomain: domainSet.length > 1,
-        internalLinks: related.filter(
-          (e) => slugs.has(e.source) && slugs.has(e.target),
-        ).length,
+        internalLinks,
+        meaningful: internalLinks > 0,
       });
     })
+    .filter((g) => Boolean((g as Row).meaningful))
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   const clusteredSlugs = new Set(
     clusters.flatMap((c) => c.topics.map((t) => t.slug)),
@@ -985,7 +1067,6 @@ function buildGroups(d: Dossier) {
     .filter((c) => !clusteredSlugs.has(c.slug))
     .map(mini);
 
-  // component: weakly connected components over both relation types
   const byComponent = groupBy(cards, (c) =>
     c.graph.componentId == null ? null : String(c.graph.componentId),
   );
@@ -1034,9 +1115,7 @@ function buildGroups(d: Dossier) {
         id,
         AUTHENTICITY_META[id].label,
         cards.filter((c) => c.authenticity === id),
-        {
-          meaning: AUTHENTICITY_META[id].meaning,
-        },
+        { meaning: AUTHENTICITY_META[id].meaning },
       ),
     )
     .filter((g) => g.count > 0);
@@ -1061,7 +1140,7 @@ function buildGroups(d: Dossier) {
         engine: "falkordb",
         algorithm: "algo.labelPropagation over RELATED_TOPIC",
         property: "Topic.cluster_id",
-        why: "Groups tightly related topics without choosing the group count in advance. Often cuts across domains and shows what is worked on together.",
+        why: "Groups tightly related topics. A community is shown only when its members are actually linked to each other, so it is meaningful and not merely co-labelled.",
       },
       groups: clusters,
       ungrouped: unclustered,
@@ -1134,7 +1213,9 @@ function refFor(d: Dossier, slug: string) {
 }
 
 function buildRelations(d: Dossier) {
-  const builds = d.edges.filter((e) => e.type === "BUILDS_ON");
+  const allBuilds = d.edges.filter((e) => e.type === "BUILDS_ON");
+  // only BUILDS_ON edges with a stated reason are treated as real dependencies
+  const builds = allBuilds.filter((e) => e.trusted);
   const related = d.edges.filter((e) => e.type === "RELATED_TOPIC");
 
   const hierarchy = d.cards
@@ -1169,7 +1250,6 @@ function buildRelations(d: Dossier) {
     }))
     .filter((s) => s.related.length);
 
-  // a strong topic standing on a weak or unverified foundation
   const foundationGaps = builds
     .map((e) => {
       const upper = d.bySlug.get(e.source);
@@ -1181,6 +1261,7 @@ function buildRelations(d: Dossier) {
         topic: mini(upper),
         foundation: lower,
         severity: lower.assessed ? "weak" : "unverified",
+        reason: e.reason,
         message: lower.assessed
           ? `${upper.name} is ${upper.level}, but its foundation ${lower.name} is only ${lower.level}.`
           : `${upper.name} is ${upper.level}; its foundation ${lower.name} has no assessment yet.`,
@@ -1198,7 +1279,6 @@ function buildRelations(d: Dossier) {
     })
     .slice(0, 12);
 
-  // topics that build on what the developer already knows, but are not assessed
   const frontierMap = new Map<
     string,
     { node: ReturnType<typeof refFor>; known: TopicCard[] }
@@ -1232,17 +1312,18 @@ function buildRelations(d: Dossier) {
   return {
     counts: {
       buildsOn: builds.length,
+      untrustedBuildsOn: allBuilds.length - builds.length,
       related: related.length,
       assessedTopics: d.cards.length,
       externalTopics: d.neighbors.size,
     },
     explain: {
       BUILDS_ON:
-        "Directed. 'A builds on B' means B is a foundation of A. Drawn from advanced to foundation.",
+        "Directed. 'A builds on B' means B is a foundation of A. Requires a stated reason; edges without one are untrusted and ignored for prerequisites.",
       RELATED_TOPIC:
-        "Undirected siblings. Stored in both directions, returned once. An association, not a prerequisite.",
+        "Undirected siblings. Stored in both directions, returned once. An association, not a prerequisite, never proof of mastery.",
       basis:
-        "Relations are inferred by the discovery model (basis: llm_inferred) and shared across developers.",
+        "Relations are inferred by the discovery model (basis: llm_inferred) or from evidence overlap, and shared across developers.",
     },
     hierarchy,
     siblings,
@@ -1320,6 +1401,7 @@ function buildGraph(d: Dossier, includeNeighbors: boolean) {
       target: e.target,
       type: e.type,
       directed: e.type === "BUILDS_ON",
+      trusted: e.trusted,
       label: e.type === "BUILDS_ON" ? "builds on" : "related to",
       reason: e.reason,
     }));
@@ -1335,6 +1417,9 @@ function buildGraph(d: Dossier, includeNeighbors: boolean) {
       externalNodes: nodes.length - d.cards.length,
       edges: edges.length,
       buildsOn: edges.filter((e) => e.type === "BUILDS_ON").length,
+      untrustedBuildsOn: edges.filter(
+        (e) => e.type === "BUILDS_ON" && !e.trusted,
+      ).length,
       related: edges.filter((e) => e.type === "RELATED_TOPIC").length,
     },
     legend: {
@@ -1405,7 +1490,9 @@ function buildAlgorithms(d: Dossier) {
     coverage: total ? round(covered / total, 3) : 0,
   });
   const dependents = (slug: string) =>
-    d.edges.filter((e) => e.type === "BUILDS_ON" && e.target === slug).length;
+    d.edges.filter(
+      (e) => e.type === "BUILDS_ON" && e.trusted && e.target === slug,
+    ).length;
 
   const topFoundations = d.cards
     .filter((c) => (c.graph.foundationRank ?? 0) > 0)
@@ -1478,7 +1565,7 @@ function buildAlgorithms(d: Dossier) {
     developerId: d.developerId,
     generatedAt: d.generatedAt,
     taxonomy: d.taxonomy,
-    note: "FalkorDB algorithms run only over the shared Topic taxonomy, which carries no developer data. This API overlays the results on the signed-in developer's topics. Only results that were actually computed are shown; centrality describes graph structure and does not prove expertise.",
+    note: "FalkorDB algorithms run only over the shared Topic taxonomy, which carries no developer data. This API overlays the results on the signed-in developer's topics. Taxonomy importance, developer proficiency and assessment confidence are three different things and are never merged into one score.",
     algorithms: ALGORITHMS.map((a) => ({
       ...a,
       status: covered[a.id] == null ? null : status(covered[a.id] as number),
@@ -1490,12 +1577,7 @@ function buildAlgorithms(d: Dossier) {
 // ---- overview list filtering ---------------------------------------------
 
 const SORTS: Record<string, (a: TopicCard, b: TopicCard) => number> = {
-  // Ranking modes are backed by persisted FalkorDB graph-algorithm output.
-  // "name" and "recent" are display-order utilities, not ranks.
-  foundation: (a, b) =>
-    (b.graph.foundationRank ?? -1) - (a.graph.foundationRank ?? -1) ||
-    (b.graph.bridgeScore ?? -1) - (a.graph.bridgeScore ?? -1) ||
-    a.name.localeCompare(b.name),
+  foundation: byGraph,
   bridge: (a, b) =>
     (b.graph.bridgeScore ?? -1) - (a.graph.bridgeScore ?? -1) ||
     (b.graph.foundationRank ?? -1) - (a.graph.foundationRank ?? -1) ||
@@ -1528,8 +1610,6 @@ function selectCards(cards: TopicCard[], query: Query) {
       c.score >= minScore,
   );
 
-  // Default ordering is FalkorDB PageRank (foundation_rank), with
-  // FalkorDB betweenness as the deterministic graph-only tie-breaker.
   const sortKey = str(query.sort, "foundation");
   const sort = SORTS[sortKey] ?? SORTS.foundation;
   list = [...list].sort(sort);
@@ -1543,12 +1623,13 @@ function selectCards(cards: TopicCard[], query: Query) {
 
   const limit = clamp(Math.floor(num(query.limit, 200)), 1, 500);
   const offset = Math.max(0, Math.floor(num(query.offset, 0)));
+  const items = list.slice(offset, offset + limit);
   return {
     total: list.length,
-    returned: list.slice(offset, offset + limit).length,
+    returned: items.length,
     limit,
     offset,
-    items: list.slice(offset, offset + limit),
+    items,
   };
 }
 
@@ -1563,12 +1644,7 @@ function buildOverview(d: Dossier, query: Query, view: string) {
 
   const relations = buildRelations(d);
   const picked = selectCards(cards, query);
-  const sortedByGraph = [...cards].sort(
-    (a, b) =>
-      (b.graph.foundationRank ?? -1) - (a.graph.foundationRank ?? -1) ||
-      (b.graph.bridgeScore ?? -1) - (a.graph.bridgeScore ?? -1) ||
-      a.name.localeCompare(b.name),
-  );
+  const sortedByGraph = [...cards].sort(byGraph);
 
   const stats = {
     topics: cards.length,
@@ -1584,6 +1660,8 @@ function buildOverview(d: Dossier, query: Query, view: string) {
     domains: uniq(cards.map((c) => c.domain)).length,
     fallbackAssessments: cards.filter((c) => c.fallback).length,
     relations: relations.counts,
+    evidence: d.evidence,
+    connections: relations.counts.buildsOn + relations.counts.related,
   };
 
   const highlights = {
@@ -1647,10 +1725,14 @@ function buildOverview(d: Dossier, query: Query, view: string) {
         name: a.name,
         engine: a.engine,
         writesProperty: a.writesProperty,
+        role: a.role,
+        affectsAssessment: a.affectsAssessment,
         why: a.why,
       }),
     ),
     levels: TOPICS_MODEL.levels,
+    coverage: d.coverage,
+    taxonomy: d.taxonomy,
   };
 
   if (view === "summary") return base;
@@ -1664,6 +1746,124 @@ function buildOverview(d: Dossier, query: Query, view: string) {
       items: picked.items,
     },
     relations,
+  };
+}
+
+// ============================================================
+// INTEGRITY: deterministic checks over one graph snapshot
+// ============================================================
+
+interface IntegrityCheck {
+  id: string;
+  passed: boolean;
+  detail: string;
+}
+
+function hasCycle(builds: EdgeRow[]): string[] | null {
+  const adj = new Map<string, string[]>();
+  for (const e of builds)
+    adj.set(e.source, [...(adj.get(e.source) ?? []), e.target]);
+  const state = new Map<string, 1 | 2>();
+  const stack: string[] = [];
+  const visit = (n: string): string[] | null => {
+    state.set(n, 1);
+    stack.push(n);
+    for (const m of adj.get(n) ?? []) {
+      if (state.get(m) === 1) return [...stack.slice(stack.indexOf(m)), m];
+      if (!state.has(m)) {
+        const c = visit(m);
+        if (c) return c;
+      }
+    }
+    stack.pop();
+    state.set(n, 2);
+    return null;
+  };
+  for (const n of adj.keys())
+    if (!state.has(n)) {
+      const c = visit(n);
+      if (c) return c;
+    }
+  return null;
+}
+
+function buildIntegrity(d: Dossier) {
+  const builds = d.edges.filter((e) => e.type === "BUILDS_ON");
+  const untrusted = builds.filter((e) => !e.trusted);
+  const cycle = hasCycle(builds.filter((e) => e.trusted));
+  const buildPairs = new Set(builds.map((e) => `${e.source}>${e.target}`));
+  const conflicting = builds.filter((e) =>
+    buildPairs.has(`${e.target}>${e.source}`),
+  );
+  const relatedAlsoBuilds = d.edges.filter(
+    (e) =>
+      e.type === "RELATED_TOPIC" &&
+      (buildPairs.has(`${e.source}>${e.target}`) ||
+        buildPairs.has(`${e.target}>${e.source}`)),
+  );
+  const slugs = d.cards.map((c) => c.slug);
+  const stale = d.analysis
+    ? d.analysis.version < DEPTH_ANALYSIS_VERSION
+    : false;
+  const outOfBand = d.cards.filter((c) => {
+    const [lo, hi] = DEPTH_BANDS[c.level];
+    return c.score < lo || c.score > hi;
+  });
+  const checks: IntegrityCheck[] = [
+    {
+      id: "builds_on_has_reason",
+      passed: untrusted.length === 0,
+      detail: `${untrusted.length} of ${builds.length} BUILDS_ON edges have no stated reason (ignored as prerequisites).`,
+    },
+    {
+      id: "builds_on_acyclic",
+      passed: !cycle,
+      detail: cycle
+        ? `Cycle: ${cycle.join(" -> ")}`
+        : "No BUILDS_ON cycle among trusted edges.",
+    },
+    {
+      id: "builds_on_not_contradictory",
+      passed: conflicting.length === 0,
+      detail: `${conflicting.length} BUILDS_ON edges have an opposite edge.`,
+    },
+    {
+      id: "related_not_duplicating_dependency",
+      passed: relatedAlsoBuilds.length === 0,
+      detail: `${relatedAlsoBuilds.length} RELATED_TOPIC edges duplicate a BUILDS_ON pair.`,
+    },
+    {
+      id: "canonical_topics_unique",
+      passed: new Set(slugs).size === slugs.length,
+      detail: `${slugs.length} assessed topics, ${new Set(slugs).size} unique slugs.`,
+    },
+    {
+      id: "score_inside_level_band",
+      passed: outOfBand.length === 0,
+      detail: `${outOfBand.length} topics have a score outside their level band.`,
+    },
+    {
+      id: "algorithms_computed",
+      passed:
+        d.coverage.foundationRank > 0 &&
+        d.coverage.bridgeScore >= 0 &&
+        d.coverage.clusterId >= 0,
+      detail: `PageRank covers ${d.coverage.foundationRank}/${d.coverage.topics} topics.`,
+    },
+    {
+      id: "analysis_current",
+      passed: !stale,
+      detail: stale
+        ? `Analysis version ${d.analysis?.version} is older than ${DEPTH_ANALYSIS_VERSION}; re-run the analysis.`
+        : `Analysis version matches ${DEPTH_ANALYSIS_VERSION}.`,
+    },
+  ];
+  return {
+    developerId: d.developerId,
+    generatedAt: d.generatedAt,
+    analysisVersion: d.analysis?.version ?? null,
+    passed: checks.every((c) => c.passed),
+    checks,
   };
 }
 
@@ -1737,7 +1937,7 @@ function trackProgress(job: Job, stage: string, detail?: Row): void {
     job.progress.assessed += 1;
     job.progress.latestTopic = str(detail?.topic) || null;
   }
-  if (stage === "depth_files_scanned") return; // too chatty for the event log
+  if (stage === "depth_files_scanned") return;
   job.events.push({ at: new Date().toISOString(), stage, detail });
   if (job.events.length > 40) job.events.shift();
 }
@@ -1802,8 +2002,8 @@ function launch(
 }
 
 // ============================================================
-// PROOF: what is observed, what is only inferred, what is merely associated;
-// genuine prerequisite paths; confidence from strength AND diversity of evidence
+// PROOF: observed / inferred / association; genuine prerequisite paths;
+// confidence from strength AND diversity of evidence
 // ============================================================
 
 type ProofClass = "observed" | "inferred" | "association";
@@ -1817,7 +2017,6 @@ const CLASS_LABEL: Record<ProofClass, string> = {
 interface Citation {
   kind: "real_work" | "practice_mission" | "implementation" | "code" | "commit";
   title: string;
-  /** code text when the graph kept it (implementation notes can hold a snippet) */
   snippet: string;
   path: string;
   repository: string;
@@ -1834,9 +2033,7 @@ interface ProofItem {
   classLabel: string;
   demonstrations: number;
   weight: number | null;
-  /** every citation behind it is a practice mission, not the developer's own project */
   practiceOnly: boolean;
-  /** true when the graph ties the citations to THIS capability */
   attributed: boolean;
   citations: Citation[];
   demonstrates: string;
@@ -1908,15 +2105,15 @@ function citeEvidence(e: Row): Citation | null {
   };
 }
 
+const citationKey = (c: Citation): string =>
+  c.permalink ||
+  [c.repository, c.path, c.title, c.snippet.slice(0, 40), c.commit].join("|");
+
 function dedupeCitations(list: Citation[]): Citation[] {
   const seen = new Set<string>();
   return list.filter((c) => {
     if (!isCitation(c)) return false;
-    const key =
-      c.permalink ||
-      [c.repository, c.path, c.title, c.snippet.slice(0, 40), c.commit].join(
-        "|",
-      );
+    const key = citationKey(c);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -1945,7 +2142,6 @@ function buildProof(card: TopicCard, detail: Row, builds: Row[]): ProofResult {
     const name = str(p.capability) || capabilityId || "this skill";
     const demos = num(p.demonstrations);
 
-    // citations the graph itself ties to this capability
     const linked = dedupeCitations(
       builds
         .filter(
@@ -2061,7 +2257,6 @@ interface PrereqStep {
 interface PrereqPath {
   steps: PrereqStep[];
   hops: number;
-  /** one stated reason per hop, taken from the BUILDS_ON edge */
   reasons: string[];
   strength: "required" | "helpful" | "unknown";
   status: "demonstrated" | "weak" | "unverified";
@@ -2071,12 +2266,12 @@ interface PrereqPath {
 
 /**
  * Genuine prerequisite chains: only BUILDS_ON edges that carry a stated reason.
- * RELATED_TOPIC never appears here; it is an association, not a prerequisite.
+ * RELATED_TOPIC never appears here.
  */
 function buildPrereqPaths(d: Dossier, slug: string, detail: Row): PrereqPath[] {
   const adj = new Map<string, EdgeRow[]>();
   for (const e of d.edges) {
-    if (e.type !== "BUILDS_ON" || !e.reason) continue;
+    if (e.type !== "BUILDS_ON" || !e.trusted) continue;
     adj.set(e.source, [...(adj.get(e.source) ?? []), e]);
   }
   const learn = asRows(detail.learning?.prerequisites);
@@ -2150,11 +2345,8 @@ interface ConfidenceFactor {
 }
 
 interface ConfidenceView {
-  /** what the assessment stored */
   stated: string;
-  /** what the current evidence supports */
   derived: string;
-  /** the lower of the two, which is what the UI shows */
   effective: string;
   score: number;
   factors: ConfidenceFactor[];
@@ -2320,6 +2512,395 @@ async function proofContext(
   return { proof, paths, confidence };
 }
 
+const citationLabel = (c: Citation): string =>
+  [
+    c.title || (c.snippet ? c.snippet.slice(0, 80) : "") || c.commit,
+    c.path,
+    c.repository,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+// ============================================================
+// LIMITATIONS, CONTRADICTIONS AND THE REASONING TRACE
+// Every line is built from stored fields or the queried graph. Nothing invented.
+// ============================================================
+
+function limitationsFor(
+  card: TopicCard,
+  detail: Row,
+  ctx: ProofContext,
+): string[] {
+  const limitations: string[] = [...asArray<string>(detail.gaps)];
+  if (ctx.confidence.effective === "low")
+    limitations.push(
+      "Confidence is low: little or narrow evidence sits behind this level.",
+    );
+  else if (ctx.confidence.effective !== card.confidence)
+    limitations.push(
+      `Confidence is shown as ${ctx.confidence.effective}: the stored value (${card.confidence}) is higher than the current evidence supports.`,
+    );
+  for (const lim of ctx.confidence.limits.slice(0, 2))
+    limitations.push(`Evidence is thin on: ${lim}.`);
+  if (card.authenticity !== "genuine_implementation")
+    limitations.push(
+      `Authenticity is "${AUTHENTICITY_META[card.authenticity].label.toLowerCase()}", so this is not shown as something the developer built.`,
+    );
+  if (card.fallback)
+    limitations.push(
+      "No model judgement was available; the graph baseline decided.",
+    );
+  if (card.evidence.commits <= 1 && card.evidence.files > 0)
+    limitations.push("Only one commit touches this topic.");
+  if (ctx.proof.counts.inferred > 0)
+    limitations.push(
+      `${plural(ctx.proof.counts.inferred, "linked skill")} ${ctx.proof.counts.inferred === 1 ? "is" : "are"} only inferred from the topic rating; no example was matched.`,
+    );
+  if (ctx.proof.counts.association > 0)
+    limitations.push(
+      `${plural(ctx.proof.counts.association, "linked skill")} ${ctx.proof.counts.association === 1 ? "is" : "are"} linked in the taxonomy only, not seen in your code.`,
+    );
+  for (const p of ctx.paths
+    .filter((x) => x.status !== "demonstrated")
+    .slice(0, 2))
+    limitations.push(
+      p.status === "unverified"
+        ? `Foundation path "${p.sentence}" has a foundation with no assessment (${p.weakest}).`
+        : `Foundation path "${p.sentence}" rests on a shallow foundation (${p.weakest}).`,
+    );
+  for (const p of asRows(detail.learning?.prerequisites)) {
+    if (p.hops === 1 && p.edge?.strength === "required" && !p.met)
+      limitations.push(
+        `Required foundation ${p.name} is not shown at working depth.`,
+      );
+  }
+  return uniq(limitations).slice(0, 10);
+}
+
+/** Conflicts between stored fields, and assessments older than the current analysis version. */
+function contradictionsFor(
+  d: Dossier,
+  card: TopicCard,
+  ctx: ProofContext,
+): {
+  contradictions: string[];
+  stale: boolean;
+  analysisVersion: number | null;
+} {
+  const out: string[] = [];
+  const observedReal = ctx.proof.items.filter(
+    (i) => i.class === "observed" && !i.practiceOnly,
+  ).length;
+  if (card.level === "deep" && card.authenticity !== "genuine_implementation")
+    out.push("Rated deep, but authenticity is not a genuine implementation.");
+  if (card.levelRank >= 3 && ctx.proof.items.length > 0 && observedReal === 0)
+    out.push(
+      `Rated ${card.levelLabel.toLowerCase()}, but none of its linked skills has a detected example in your own code.`,
+    );
+  if (card.levelRank >= 2 && card.authenticity === "boilerplate")
+    out.push("Rated above surface, but the evidence is mostly boilerplate.");
+  if (ctx.confidence.stated !== ctx.confidence.effective)
+    out.push(
+      `Stored confidence (${ctx.confidence.stated}) is higher than the current evidence supports (${ctx.confidence.derived}).`,
+    );
+  if (Math.abs(card.scoreDelta) >= 25)
+    out.push(
+      `Final score differs from the graph baseline by ${card.scoreDelta >= 0 ? "+" : ""}${card.scoreDelta} points.`,
+    );
+  const weakRequired = ctx.paths.find(
+    (p) =>
+      p.hops === 1 && p.strength === "required" && p.status !== "demonstrated",
+  );
+  if (card.levelRank >= 3 && weakRequired)
+    out.push(
+      `Rated ${card.levelLabel.toLowerCase()} while its required foundation ${weakRequired.weakest} is not backed by your code.`,
+    );
+  const version = d.analysis?.version ?? null;
+  const stale = version != null && version < DEPTH_ANALYSIS_VERSION;
+  if (stale)
+    out.push(
+      `Assessed with analysis version ${version}; the current version is ${DEPTH_ANALYSIS_VERSION}. Re-run to refresh.`,
+    );
+  return { contradictions: out, stale, analysisVersion: version };
+}
+
+interface Claim {
+  text: string;
+  evidenceIds: string[];
+  slug?: string;
+}
+
+function buildTrace(
+  d: Dossier,
+  card: TopicCard,
+  detail: Row,
+  ev: Row | null,
+  ctx: ProofContext,
+  limitations: string[],
+) {
+  const nodes = asRows(ev?.nodes);
+  const edges = asRows(ev?.edges);
+  const labelOf = (id: string) =>
+    str(nodes.find((n) => n.id === id)?.label) ||
+    id.replace(/^(topic|approach|assessment):/, "");
+  const topicNode = `topic:${card.slug}`;
+  const assessmentNode = `assessment:${card.slug}`;
+
+  // ---- supporting evidence, with stable ids, tied to what it supports ----
+  const supportingEvidence: Array<{
+    evidenceId: string;
+    kind: string;
+    source: string;
+    supports: string;
+    permalink: string;
+  }> = [];
+  const idByKey = new Map<string, string>();
+  const addEvidence = (c: Citation, supports: string): string => {
+    const key = citationKey(c);
+    const known = idByKey.get(key);
+    if (known) return known;
+    const id = `E${supportingEvidence.length + 1}`;
+    idByKey.set(key, id);
+    supportingEvidence.push({
+      evidenceId: id,
+      kind: c.kind,
+      source: citationLabel(c) || "cited work",
+      supports,
+      permalink: c.permalink,
+    });
+    return id;
+  };
+  const idsFor = new Map<string, string[]>();
+  for (const i of ctx.proof.items) {
+    if (i.class !== "observed") continue;
+    idsFor.set(
+      i.id,
+      i.citations
+        .filter(isCitation)
+        .map((c) => addEvidence(c, `capability: ${i.capability}`)),
+    );
+  }
+  for (const c of ctx.proof.topicCitations)
+    addEvidence(c, `topic: ${card.name}`);
+
+  // ---- claims: observed / inferred / unknown ----
+  const observed: Claim[] = [];
+  const inferred: Claim[] = [];
+  const unknown: Claim[] = [];
+  for (const a of asRows(detail.approaches)) {
+    const refs = asArray(a.evidenceRefs ?? a.evidence ?? a.evidenceItems);
+    const how = str(a.howImplemented);
+    const depth = LEVEL_META[str(a.depth) as DepthLevel]?.label ?? str(a.depth);
+    const name = str(a.name ?? a.slug);
+    if (
+      refs.length > 0 ||
+      (how && str(a.authenticity) === "genuine_implementation")
+    )
+      observed.push({
+        text: `${name} (${depth}): ${how || plural(refs.length, "cited piece") + " of code"}`,
+        evidenceIds: [],
+        slug: str(a.slug),
+      });
+    else
+      inferred.push({
+        text: `${name} (${depth}): judged from the topic rating, no code cited for this approach.`,
+        evidenceIds: [],
+        slug: str(a.slug),
+      });
+  }
+  for (const i of ctx.proof.items) {
+    if (i.class === "observed")
+      observed.push({
+        text: `Detected in your code: ${i.capability}`,
+        evidenceIds: idsFor.get(i.id) ?? [],
+      });
+    else if (i.class === "inferred")
+      inferred.push({
+        text: `${i.capability}: inferred from the topic rating, no example matched.`,
+        evidenceIds: [],
+      });
+    else
+      unknown.push({
+        text: `${i.capability}: linked in the topic map only; nothing in your code was matched.`,
+        evidenceIds: [],
+      });
+  }
+  if (observed.length === 0 && asArray(detail.implementations).length > 0)
+    observed.push({
+      text: `${plural(asArray(detail.implementations).length, "implementation")} cited by the assessment.`,
+      evidenceIds: supportingEvidence.slice(0, 3).map((e) => e.evidenceId),
+    });
+  for (const l of limitations) unknown.push({ text: l, evidenceIds: [] });
+
+  // ---- graph paths: every one comes from the queried graph ----
+  const graphPaths: Array<{
+    kind: string;
+    nodeIds: string[];
+    relationshipTypes: string[];
+    explanation: string;
+  }> = [
+    {
+      kind: "assessment",
+      nodeIds: ["developer", assessmentNode, topicNode],
+      relationshipTypes: ["ASSESSED", "OF_TOPIC"],
+      explanation: `Developer was assessed on ${card.name}.`,
+    },
+  ];
+  for (const a of asRows(detail.approaches))
+    graphPaths.push({
+      kind: "approach",
+      nodeIds: [assessmentNode, `approach:${str(a.slug)}`],
+      relationshipTypes: ["USES_APPROACH"],
+      explanation: `The assessment records the approach "${str(a.name ?? a.slug)}" (${str(a.depth)}).`,
+    });
+  for (const b of asRows(ev?.backedBy))
+    graphPaths.push({
+      kind: "evidence",
+      nodeIds: [assessmentNode, `evidence:${str(b.kind)}`],
+      relationshipTypes: ["BACKED_BY"],
+      explanation: `${num(b.count)} ${str(b.kind)} item(s) back the assessment.`,
+    });
+  for (const e of [...edges]
+    .sort((a, b) => num(a.hop) - num(b.hop))
+    .slice(0, 24))
+    graphPaths.push({
+      kind: "topic_edge",
+      nodeIds: [str(e.source), str(e.target)],
+      relationshipTypes: [str(e.type)],
+      explanation: `${labelOf(str(e.source))} ${str(e.type) === "BUILDS_ON" ? "builds on" : str(e.type) === "RELATED_TOPIC" ? "is related to" : str(e.type)} ${labelOf(str(e.target))} (hop ${num(e.hop)})${str(e.note) ? `: ${str(e.note).slice(0, 140)}` : ""}`,
+    });
+  for (const p of ctx.paths)
+    graphPaths.push({
+      kind: "prerequisite",
+      nodeIds: p.steps.map((s) => `topic:${s.slug}`),
+      relationshipTypes: p.steps.slice(1).map(() => "BUILDS_ON"),
+      explanation: `${p.sentence}. Status: ${p.status}${p.weakest ? `, weakest link ${p.weakest}` : ""}. Reasons: ${p.reasons.join(" | ")}`,
+    });
+
+  // ---- algorithms: one responsibility each; only some change the assessment ----
+  const ranked = (pick: (c: TopicCard) => number | null) => {
+    const list = d.cards
+      .map((c) => ({ slug: c.slug, v: pick(c) }))
+      .filter((x): x is { slug: string; v: number } => x.v != null)
+      .sort((a, b) => b.v - a.v);
+    const i = list.findIndex((x) => x.slug === card.slug);
+    return { position: i < 0 ? null : i + 1, of: list.length };
+  };
+  const demonstrated = ctx.paths.filter(
+    (p) => p.status === "demonstrated",
+  ).length;
+  const algorithmsApplied = [
+    {
+      name: "Prerequisite traversal",
+      purpose:
+        "Find the foundations this topic needs and check them against your code.",
+      affectsAssessment: true,
+      result: {
+        paths: ctx.paths.length,
+        demonstrated,
+        weak: ctx.paths.filter((p) => p.status === "weak").length,
+        unverified: ctx.paths.filter((p) => p.status === "unverified").length,
+        usedFor:
+          "confidence factor 'Foundations backed', limitations, foundation gaps",
+      },
+    },
+    {
+      name: "PageRank",
+      purpose: "Taxonomy importance: how many topics stand on this one.",
+      affectsAssessment: false,
+      result: {
+        value: card.graph.foundationRank,
+        normalized: card.graph.foundationRankNorm,
+        ...ranked((c) => c.graph.foundationRank),
+        note: "Structural. Not proficiency.",
+      },
+    },
+    {
+      name: "Betweenness centrality",
+      purpose: "Structural bridge between otherwise separate areas.",
+      affectsAssessment: false,
+      result: {
+        value: card.graph.bridgeScore,
+        normalized: card.graph.bridgeScoreNorm,
+        ...ranked((c) => c.graph.bridgeScore),
+        note: "Structural. Not expertise.",
+      },
+    },
+    {
+      name: "Label propagation",
+      purpose: "Knowledge area this topic belongs to.",
+      affectsAssessment: false,
+      result: {
+        clusterId: card.graph.clusterId,
+        peers:
+          card.graph.clusterId == null
+            ? 0
+            : d.cards.filter(
+                (c) =>
+                  c.slug !== card.slug &&
+                  c.graph.clusterId === card.graph.clusterId,
+              ).length,
+      },
+    },
+    {
+      name: "Weakly connected components",
+      purpose: "Taxonomy quality: is the topic part of the main body?",
+      affectsAssessment: false,
+      result: { componentId: card.graph.componentId },
+    },
+  ];
+
+  const flags = contradictionsFor(d, card, ctx);
+  return {
+    topicId: card.slug,
+    snapshot: {
+      analysisVersion: flags.analysisVersion,
+      currentVersion: DEPTH_ANALYSIS_VERSION,
+      model: d.analysis?.model ?? null,
+      lastAnalyzedAt: d.analysis?.updatedAt ?? null,
+    },
+    // three different things, never collapsed into one score
+    structure: {
+      taxonomyImportance: {
+        foundationRank: card.graph.foundationRank,
+        bridgeScore: card.graph.bridgeScore,
+        clusterId: card.graph.clusterId,
+        componentId: card.graph.componentId,
+        roles: card.graph.roles,
+        note: "Describes the shared taxonomy. Says nothing about this developer's skill.",
+      },
+      proficiency: {
+        level: card.level,
+        score: card.score,
+        baseline: card.baselineScore,
+        authenticity: card.authenticity,
+        note: "Judged from cited evidence and checked by guard-rails.",
+      },
+      confidence: {
+        level: ctx.confidence.effective,
+        stored: ctx.confidence.stated,
+        derived: ctx.confidence.derived,
+        ratio: ctx.confidence.score,
+        note: "How strong and varied the evidence is. Not how good the developer is.",
+      },
+    },
+    assessment: {
+      depth: card.level,
+      score: card.score,
+      confidence: ctx.confidence.effective,
+      confidenceRatio: ctx.confidence.score,
+      authenticity: card.authenticity,
+    },
+    claims: { observed, inferred, unknown: unknown.slice(0, 12) },
+    supportingEvidence,
+    graphPaths,
+    algorithmsApplied,
+    limitations,
+    contradictions: flags.contradictions,
+    stale: flags.stale,
+  };
+}
+
 // ============================================================
 // PLAIN-LANGUAGE STORY (graph facts -> words a normal user understands)
 // ============================================================
@@ -2347,16 +2928,6 @@ const joinList = (items: string[], max = 3): string => {
 const cardScore = (d: Dossier, slug: string): number =>
   d.bySlug.get(slug)?.score ?? 0;
 
-const citationLabel = (c: Citation): string =>
-  [
-    c.title || (c.snippet ? c.snippet.slice(0, 80) : "") || c.commit,
-    c.path,
-    c.repository,
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-/** Everything the explainer (LLM or deterministic) is allowed to talk about. */
 function plainFacts(
   card: TopicCard,
   ev: Row,
@@ -2462,7 +3033,6 @@ function plainFacts(
   };
 }
 
-/** Always-available story. Shown instantly and used when the model is down. */
 function plainStory(f: Row, ctx: ProofContext): PlainStory {
   const usedBy = f.otherTopicsBuiltOnIt as string[];
   const related = f.usedTogetherWith as string[];
@@ -2537,9 +3107,9 @@ function plainStory(f: Row, ctx: ProofContext): PlainStory {
       (f.limitations as string[])[0] ??
       "The graph shows activity and connections, not a test of ability.",
     followups: [
-      `What would take my ${f.topic} to the next level?`,
-      `Show me the work behind ${f.topic}`,
       `What does ${f.topic} build on?`,
+      `Show me the work behind ${f.topic}`,
+      `What is unproven about my ${f.topic}?`,
     ],
     proof: proof.items,
     prerequisitePaths: paths,
@@ -2547,6 +3117,180 @@ function plainStory(f: Row, ctx: ProofContext): PlainStory {
     confidence,
     confidenceNote,
   };
+}
+
+/** Numbers the model writes must exist in the facts it was given. */
+const numbersIn = (s: string): string[] => s.match(/\d+(?:\.\d+)?/g) ?? [];
+function ungroundedNumbers(facts: Row, texts: string[]): string[] {
+  const allowed = new Set([
+    ...numbersIn(JSON.stringify(facts)),
+    "0",
+    "1",
+    "2",
+    "3",
+  ]);
+  return uniq(texts.flatMap(numbersIn).filter((n) => !allowed.has(n)));
+}
+
+// ============================================================
+// ASSESSMENT STEPS: "How Pathway assessed this topic"
+// ============================================================
+
+interface AssessStep {
+  id: string;
+  title: string;
+  summary: string;
+  facts: Array<{ label: string; value: string }>;
+  items: string[];
+  text: string;
+  trace?: Row[];
+}
+
+function buildAssessment(
+  card: TopicCard,
+  detail: Row,
+  ev: Row,
+  ctx: ProofContext,
+): AssessStep[] {
+  const nodes = asRows(ev.nodes);
+  const edges = asRows(ev.edges);
+  const trace = asRows(ev.trace);
+  const backed = asRows(ev.backedBy);
+  const label = (id: string) =>
+    str(nodes.find((n) => n.id === id)?.label) || id;
+  const stats = (detail.stats ?? {}) as Row;
+  const dims = (detail.dimensions ?? null) as Row | null;
+  const e = card.evidence;
+  const hopCounts = (ev.hopCounts ?? {}) as Record<string, number>;
+  const signed = (n: number) => `${n >= 0 ? "+" : ""}${n}`;
+
+  const edgeLines = [...edges]
+    .sort((a, b) => num(a.hop) - num(b.hop))
+    .slice(0, 16)
+    .map(
+      (x) =>
+        `${label(str(x.source))} —${str(x.type)}→ ${label(str(x.target))} (hop ${num(x.hop)})${str(x.note) ? ` · ${str(x.note).slice(0, 120)}` : ""}`,
+    );
+
+  const approaches = asRows(detail.approaches);
+  const authCap = AUTHENTICITY_META[card.authenticity];
+  const band = DEPTH_BANDS[card.level];
+
+  return [
+    {
+      id: "discovery",
+      title: "Evidence discovery",
+      summary: `Pathway matched ${plural(e.files, "authored file")} across ${plural(e.commits, "commit")} in ${plural(e.repos, "repository", "repositories")} to this topic.`,
+      facts: [
+        { label: "Active days", value: String(e.activeDays) },
+        { label: "First seen", value: e.firstSeen || "–" },
+        { label: "Last seen", value: e.lastSeen || "–" },
+        { label: "Test files matched", value: String(num(stats.testFiles)) },
+        {
+          label: "Real work linked",
+          value: String(num(ev.buildTotals?.builds)),
+        },
+        {
+          label: "Practice missions linked",
+          value: String(num(ev.buildTotals?.missions)),
+        },
+        ...backed.map((b) => ({
+          label: `Cited ${str(b.kind)}`,
+          value: String(num(b.count)),
+        })),
+      ],
+      items: ctx.proof.topicCitations.slice(0, 5).map(citationLabel),
+      text: "",
+    },
+    {
+      id: "traversal",
+      title: "Graph traversal",
+      summary: `${edges.length} relationship(s) and ${Math.max(0, nodes.length - 1)} node(s) were returned around this topic, up to ${num(ev.maxHop)} hop(s) away.`,
+      facts: Object.entries(hopCounts).map(([h, n]) => ({
+        label: `Hop ${h}`,
+        value: `${n} node(s)`,
+      })),
+      items: edgeLines,
+      text: "Each query below ran against FalkorDB for this topic. Rows and timings are the real execution results.",
+      trace,
+    },
+    {
+      id: "implementation",
+      title: "Implementation analysis",
+      summary: approaches.length
+        ? `${plural(approaches.length, "approach", "approaches")} were judged separately.`
+        : "No approach is recorded for this topic.",
+      facts: [
+        {
+          label: "Safeguards observed",
+          value: String(asArray(detail.safeguards).length),
+        },
+        {
+          label: "Cited implementations",
+          value: String(asArray(detail.implementations).length),
+        },
+        { label: "Test files matched", value: String(num(stats.testFiles)) },
+      ],
+      items: [
+        ...approaches.map(
+          (a) =>
+            `${str(a.name)}: ${str(a.depth)}${a.isPrimary ? " (primary)" : ""}${str(a.howImplemented) ? ` — ${str(a.howImplemented)}` : ""}`,
+        ),
+        ...asArray<string>(detail.safeguards)
+          .slice(0, 4)
+          .map((s) => `Safeguard: ${s}`),
+      ],
+      text: "",
+    },
+    {
+      id: "judgment",
+      title: "Agent judgment",
+      summary: `Baseline ${card.baselineScore}, final ${card.score} (${card.levelLabel}), adjustment ${signed(card.scoreDelta)}.`,
+      facts: [
+        {
+          label: "Baseline",
+          value: `${card.baselineScore} (${str(detail.baselineLevel)})`,
+        },
+        { label: "Final", value: `${card.score} (${card.levelLabel})` },
+        {
+          label: "Decided by",
+          value: card.fallback
+            ? "graph baseline only"
+            : "model judgement + guard-rails",
+        },
+        {
+          label: "Authenticity",
+          value: `${authCap.label} (cap: ${authCap.maxLevel})`,
+        },
+        { label: "Level band", value: `${band[0]}–${band[1]}` },
+        ...(dims
+          ? [
+              {
+                label: "Implementation complexity",
+                value: String(num(dims.implementationComplexity)),
+              },
+              {
+                label: "Approaches credible",
+                value: `${num(dims.approachCoverage?.credible)}/${num(dims.approachCoverage?.assessed)}`,
+              },
+            ]
+          : []),
+      ],
+      items: [],
+      text: str(detail.rationale),
+    },
+    {
+      id: "confidence",
+      title: "Confidence and limitations",
+      summary: `Confidence is ${ctx.confidence.effective}${ctx.confidence.stated !== ctx.confidence.effective ? ` (stored as ${ctx.confidence.stated}; current evidence supports ${ctx.confidence.derived})` : ""}.`,
+      facts: ctx.confidence.factors.map((f) => ({
+        label: f.label,
+        value: `${f.value}/${f.max} · ${f.note}`,
+      })),
+      items: ctx.confidence.limits,
+      text: "Missing evidence lowers confidence. It is not treated as proof that the skill is absent.",
+    },
+  ];
 }
 
 async function buildGraphPayload(d: Dossier, slug: string) {
@@ -2658,6 +3402,12 @@ async function buildGraphPayload(d: Dossier, slug: string) {
         citedEdges: ev.backedBy.reduce((n, b) => n + b.count, 0),
       },
     },
+    assessment: buildAssessment(
+      card,
+      (detail ?? {}) as unknown as Row,
+      ev as unknown as Row,
+      ctx,
+    ),
   };
   const facts = plainFacts(card, base as unknown as Row, algorithms, ctx);
   return { ...base, plain: { facts, story: plainStory(facts, ctx) } };
@@ -2761,6 +3511,21 @@ topicsRouter.get(
 );
 
 topicsRouter.get(
+  "/api/topics/integrity",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    try {
+      const d = await dossierFor(req);
+      if (!d) return res.status(404).json(NOT_SYNCED);
+      return res.json(buildIntegrity(d));
+    } catch (err) {
+      console.error("GET /api/topics/integrity failed:", err);
+      return res.status(500).json({ error: "Failed to run integrity checks" });
+    }
+  },
+);
+
+topicsRouter.get(
   "/api/topics/search",
   requireAuth,
   async (req: AuthedRequest, res) => {
@@ -2774,7 +3539,6 @@ topicsRouter.get(
       if (!d) return res.status(404).json(NOT_SYNCED);
       const graph = await getGraphForDeveloper(d.developerId);
 
-      // full-text runs over the shared taxonomy: keep only topics visible to this developer
       const hits = await findTopicsByText(graph, q, 20);
       let results = hits
         .filter((h) => d.bySlug.has(h.slug) || d.neighbors.has(h.slug))
@@ -2855,7 +3619,6 @@ topicsRouter.get(
         };
       });
       const nameOf = (s: string) => steps.find((x) => x.slug === s)?.name ?? s;
-      // every hop says whether it is a foundation dependency or an association
       const segments = typedHops.map((h) => ({
         from: h.from,
         to: h.to,
@@ -2949,6 +3712,33 @@ topicsRouter.get(
 
 // ---- one topic -----------------------------------------------------------------
 
+/** Loads everything one topic needs, once, so detail and trace always agree. */
+async function loadTopic(d: Dossier, slug: string) {
+  const card = d.bySlug.get(slug);
+  if (!card) return { error: `No assessment for topic "${slug}".` } as const;
+  const graph = await getGraphForDeveloper(d.developerId);
+  const detail = await readTopicDepthDetail(graph, d.developerId, slug);
+  if (!detail) return { error: `No assessment for topic "${slug}".` } as const;
+  let ev: Row | null = null;
+  try {
+    ev = (await readTopicGraphEvidence(
+      graph,
+      d.developerId,
+      slug,
+    )) as unknown as Row | null;
+  } catch (err) {
+    console.error(
+      `${LOG} graph evidence unavailable:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+  const row = detail as unknown as Row;
+  const ctx = await proofContext(d, card, row, ev);
+  const limitations = limitationsFor(card, row, ctx);
+  const trace = buildTrace(d, card, row, ev, ctx, limitations);
+  return { card, detail, row, ev, ctx, limitations, trace } as const;
+}
+
 topicsRouter.get(
   "/api/topics/:slug",
   requireAuth,
@@ -2959,20 +3749,9 @@ topicsRouter.get(
     try {
       const d = await dossierFor(req);
       if (!d) return res.status(404).json(NOT_SYNCED);
-      const card = d.bySlug.get(slug);
-      if (!card)
-        return res
-          .status(404)
-          .json({ error: `No assessment for topic "${slug}".` });
-
-      const graph = await getGraphForDeveloper(d.developerId);
-      const detail = await readTopicDepthDetail(graph, d.developerId, slug);
-      if (!detail)
-        return res
-          .status(404)
-          .json({ error: `No assessment for topic "${slug}".` });
-
-      const ctx = await proofContext(d, card, detail as unknown as Row);
+      const t = await loadTopic(d, slug);
+      if ("error" in t) return res.status(404).json({ error: t.error });
+      const { card, detail, ctx, limitations, trace } = t;
 
       const nextLevel = DEPTH_LEVELS[card.levelRank + 1] ?? null;
       const evidenceByKind: Record<string, typeof detail.evidence> = {
@@ -2993,62 +3772,18 @@ topicsRouter.get(
               )
               .map(mini);
 
-      // What is NOT established, built only from stored fields. Never invented.
-      const limitations: string[] = [...detail.gaps];
-      if (ctx.confidence.effective === "low")
-        limitations.push(
-          "Confidence is low: little or narrow evidence sits behind this level.",
-        );
-      else if (ctx.confidence.effective !== card.confidence)
-        limitations.push(
-          `Confidence is shown as ${ctx.confidence.effective}: the stored value (${card.confidence}) is higher than the current evidence supports.`,
-        );
-      for (const lim of ctx.confidence.limits.slice(0, 2))
-        limitations.push(`Evidence is thin on: ${lim}.`);
-      if (card.authenticity !== "genuine_implementation")
-        limitations.push(
-          `Authenticity is "${AUTHENTICITY_META[card.authenticity].label.toLowerCase()}", so this is not shown as something the developer built.`,
-        );
-      if (card.fallback)
-        limitations.push(
-          "No model judgement was available; the graph baseline decided.",
-        );
-      if (card.evidence.commits <= 1 && card.evidence.files > 0)
-        limitations.push("Only one commit touches this topic.");
-      if (ctx.proof.counts.inferred > 0)
-        limitations.push(
-          `${plural(ctx.proof.counts.inferred, "linked skill")} ${ctx.proof.counts.inferred === 1 ? "is" : "are"} only inferred from the topic rating; no example was matched.`,
-        );
-      if (ctx.proof.counts.association > 0)
-        limitations.push(
-          `${plural(ctx.proof.counts.association, "linked skill")} ${ctx.proof.counts.association === 1 ? "is" : "are"} linked in the taxonomy only, not seen in your code.`,
-        );
-      for (const p of ctx.paths
-        .filter((x) => x.status !== "demonstrated")
-        .slice(0, 2))
-        limitations.push(
-          p.status === "unverified"
-            ? `Foundation path "${p.sentence}" has a foundation with no assessment (${p.weakest}).`
-            : `Foundation path "${p.sentence}" rests on a shallow foundation (${p.weakest}).`,
-        );
-      for (const p of detail.learning?.prerequisites ?? []) {
-        if (p.hops === 1 && p.edge.strength === "required" && !p.met)
-          limitations.push(
-            `Required foundation ${p.name} is not shown at working depth.`,
-          );
-      }
-
       return res.json({
         topic: {
           ...card,
           confidence: ctx.confidence.effective,
           statedConfidence: card.confidence,
         },
+        trace,
         verdict: detail.summary.verdict,
         rationale: detail.rationale,
         strengths: detail.strengths,
         gaps: detail.gaps,
-        limitations: uniq(limitations).slice(0, 10),
+        limitations,
         implementations: detail.implementations,
         safeguards: detail.safeguards,
         capabilityPaths: detail.capabilityPaths,
@@ -3064,6 +3799,11 @@ topicsRouter.get(
         ),
         evidence: { total: detail.evidence.length, byKind: evidenceByKind },
         stats: detail.stats,
+        history: detail.history,
+        dimensions: detail.dimensions,
+        evidenceBand: detail.evidenceBand,
+        approachEvidence: detail.approachEvidence,
+        learning: detail.learning,
         scoring: {
           level: card.level,
           score: card.score,
@@ -3101,6 +3841,26 @@ topicsRouter.get(
     } catch (err) {
       console.error("GET /api/topics/:slug failed:", err);
       return res.status(500).json({ error: "Failed to load topic" });
+    }
+  },
+);
+
+topicsRouter.get(
+  "/api/topics/:slug/trace",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const slug = slugify(str(req.params.slug));
+    if (!SLUG.test(slug))
+      return res.status(400).json({ error: "Invalid topic slug." });
+    try {
+      const d = await dossierFor(req);
+      if (!d) return res.status(404).json(NOT_SYNCED);
+      const t = await loadTopic(d, slug);
+      if ("error" in t) return res.status(404).json({ error: t.error });
+      return res.json(t.trace);
+    } catch (err) {
+      console.error("GET /api/topics/:slug/trace failed:", err);
+      return res.status(500).json({ error: "Failed to build reasoning trace" });
     }
   },
 );
@@ -3163,7 +3923,7 @@ topicsRouter.post(
   },
 );
 
-// ---- evidence map: graph + plain-language story ----------------------------------
+// ---- evidence map: graph + assessment steps + plain-language story ---------------
 
 topicsRouter.get(
   "/api/topics/:slug/graph",
@@ -3188,13 +3948,120 @@ topicsRouter.get(
   },
 );
 
+// ---- evolution: real DepthSnapshot history, diffed. Never invents a change. ------
+
+topicsRouter.get(
+  "/api/topics/:slug/evolution",
+  requireAuth,
+  async (req: AuthedRequest, res) => {
+    const slug = slugify(str(req.params.slug));
+    if (!SLUG.test(slug))
+      return res.status(400).json({ error: "Invalid topic slug." });
+    try {
+      const d = await dossierFor(req);
+      if (!d) return res.status(404).json(NOT_SYNCED);
+      if (!d.bySlug.has(slug))
+        return res
+          .status(404)
+          .json({ error: `No assessment for topic "${slug}".` });
+
+      const graph = await getGraphForDeveloper(d.developerId);
+      const [detail, ev, buildEdges, relatedEdges] = await Promise.all([
+        readTopicDepthDetail(graph, d.developerId, slug),
+        readTopicGraphEvidence(graph, d.developerId, slug),
+        readTaxonomyEdges(graph, "BUILDS_ON"),
+        readTaxonomyEdges(graph, "RELATED_TOPIC"),
+      ]);
+      if (!detail) return res.status(404).json({ error: "No assessment." });
+
+      const snaps = [...detail.history].reverse();
+      const touching = [...buildEdges, ...relatedEdges].filter(
+        (e) => e.from === slug || e.to === slug,
+      );
+      const builds = asRows((ev as unknown as Row | null)?.builds);
+      const nameOf = (s: string) => refFor(d, s).name;
+
+      const steps = snaps.map((s, i) => {
+        const prev = i > 0 ? snaps[i - 1] : null;
+        const from = prev ? Date.parse(prev.assessedAt) : 0;
+        const to = Date.parse(s.assessedAt);
+        const contributions = builds
+          .filter((b) => {
+            const t = Date.parse(str(b.createdAt));
+            return Number.isFinite(t) && t > from && t <= to;
+          })
+          .map((b) => ({
+            id: str(b.id),
+            title: str(b.title),
+            kind: str(b.kind),
+            repository: str(b.repository),
+            permalink: str(b.permalink),
+            createdAt: str(b.createdAt),
+          }));
+        const relations = touching
+          .filter((e) => e.buildId === s.buildId)
+          .map((e) => ({
+            type: e.type,
+            from: nameOf(e.from),
+            to: nameOf(e.to),
+            reason: e.reason,
+          }));
+        const levelChanged = !!prev && prev.level !== s.level;
+        const confChanged = !!prev && prev.confidence !== s.confidence;
+        const filesDelta = prev ? s.files - prev.files : 0;
+        const commitsDelta = prev ? s.commits - prev.commits : 0;
+
+        let reason: string;
+        if (!prev) {
+          reason =
+            "First assessment: there is no earlier snapshot to compare against.";
+        } else if (levelChanged || confChanged) {
+          const parts: string[] = [];
+          if (levelChanged) parts.push(`depth ${prev.level} → ${s.level}`);
+          if (confChanged)
+            parts.push(`confidence ${prev.confidence} → ${s.confidence}`);
+          reason = `${parts.join(", ")}, with ${filesDelta >= 0 ? "+" : ""}${filesDelta} files and ${commitsDelta >= 0 ? "+" : ""}${commitsDelta} commits since the previous snapshot. The new level was judged from cited evidence and checked by guard-rails.`;
+        } else if (filesDelta > 0 || commitsDelta > 0) {
+          reason = `Evidence grew (+${filesDelta} files, +${commitsDelta} commits) but depth and confidence held. Depth follows the kind of evidence, not its volume.`;
+        } else {
+          reason = "No change in depth, confidence or evidence.";
+        }
+
+        return {
+          buildId: s.buildId,
+          assessedAt: s.assessedAt,
+          level: s.level,
+          score: s.score,
+          confidence: s.confidence,
+          evidenceBand: s.evidenceBand,
+          files: s.files,
+          commits: s.commits,
+          approachCount: s.approachCount,
+          scoreDelta: prev ? s.score - prev.score : 0,
+          filesDelta,
+          commitsDelta,
+          levelChanged,
+          confidenceChanged: confChanged,
+          contributions,
+          relations,
+          reason,
+        };
+      });
+
+      return res.json({ slug, evolved: steps.length >= 2, steps });
+    } catch (err) {
+      console.error("GET /api/topics/:slug/evolution failed:", err);
+      return res.status(500).json({ error: "Failed to load evolution" });
+    }
+  },
+);
+
 /**
  * The agent: rewrites the graph facts as a plain-English explanation.
- * Facts are rebuilt on the server (never trusted from the client).
- * The proof classes, citations, prerequisite paths and confidence level are
- * always the server's deterministic values; the model only supplies wording,
- * and only for entries that are already "observed".
- * Falls back to the deterministic story if the model is unavailable.
+ * Facts are rebuilt on the server. Proof classes, citations, prerequisite paths
+ * and confidence are always the server's deterministic values; the model only
+ * supplies wording. Any number it writes that is not in the facts rejects the
+ * whole output and the deterministic story is used instead.
  */
 topicsRouter.post(
   "/api/topics/:slug/explain",
@@ -3216,40 +4083,57 @@ topicsRouter.post(
       const base: PlainStory = payload.plain.story;
       let story: PlainStory = base;
       let source: "llm" | "graph" = "graph";
+      let grounding: { checked: boolean; rejectedNumbers: string[] } = {
+        checked: false,
+        rejectedNumbers: [],
+      };
       try {
         const llm = createDepthLlmFromEnv();
         const cacheKey = `${d.developerId}:${slug}:${cardScore(d, slug)}:${base.confidence.effective}:${JSON.stringify(facts).length}`;
         const out = await explainTopicEvidence(llm, facts, cacheKey);
         if (out) {
-          story = {
-            ...base,
-            headline: out.headline,
-            summary: out.summary,
-            steps: out.steps,
-            meaning: out.meaning,
-            caveat: out.caveat || base.caveat,
-            followups: out.followups.length ? out.followups : base.followups,
-            prerequisiteSummary:
-              out.prerequisiteSummary || base.prerequisiteSummary,
-            confidenceNote: out.confidenceNote || base.confidenceNote,
-            proof: base.proof.map((item) => {
-              if (item.class !== "observed") return item;
-              const w = out.items.find((x) => x.id === item.id);
-              return w
-                ? {
-                    ...item,
-                    demonstrates: w.demonstrates || item.demonstrates,
-                    matters: w.matters || item.matters,
-                  }
-                : item;
-            }),
-          };
-          source = "llm";
+          const bad = ungroundedNumbers(facts, [
+            out.headline,
+            out.summary,
+            out.meaning,
+            out.caveat,
+            out.prerequisiteSummary,
+            out.confidenceNote,
+            ...out.steps.map((s) => s.text),
+            ...out.items.flatMap((i) => [i.demonstrates, i.matters]),
+          ]);
+          grounding = { checked: true, rejectedNumbers: bad };
+          if (bad.length === 0) {
+            story = {
+              ...base,
+              headline: out.headline,
+              summary: out.summary,
+              steps: out.steps,
+              meaning: out.meaning,
+              caveat: out.caveat || base.caveat,
+              followups: out.followups.length ? out.followups : base.followups,
+              prerequisiteSummary:
+                out.prerequisiteSummary || base.prerequisiteSummary,
+              confidenceNote: out.confidenceNote || base.confidenceNote,
+              proof: base.proof.map((item) => {
+                if (item.class !== "observed") return item;
+                const w = out.items.find((x) => x.id === item.id);
+                return w
+                  ? {
+                      ...item,
+                      demonstrates: w.demonstrates || item.demonstrates,
+                      matters: w.matters || item.matters,
+                    }
+                  : item;
+              }),
+            };
+            source = "llm";
+          }
         }
       } catch (err) {
         console.error("explain: model unavailable, using graph story:", err);
       }
-      return res.json({ story, source });
+      return res.json({ story, source, grounding });
     } catch (err) {
       console.error("POST /api/topics/:slug/explain failed:", err);
       return res.status(500).json({ error: "Failed to explain topic" });

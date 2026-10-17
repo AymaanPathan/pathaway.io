@@ -733,6 +733,11 @@ async function setupSchema(graph: Graph): Promise<void> {
     ["Topic", "id"],
     ["Topic", "slug"],
     ["Approach", "id"],
+    ["Approach", "slug"],
+    ["Approach", "topic_slug"],
+    ["DepthSnapshot", "id"],
+    ["DepthSnapshot", "developer_id"],
+    ["DepthSnapshot", "topic_slug"],
     ["DepthAssessment", "id"],
     ["DepthAssessment", "developer_id"],
     ["DepthAssessment", "topic_slug"],
@@ -4361,6 +4366,73 @@ export async function readTopicsForBackfill(
 
 // ---- developer-specific persistence ----------------------------------------------
 
+// ---- explainable depth: dimensions, evidence quantity, confidence weight ----
+
+/**
+ * Depth, confidence and evidence quantity are three different facts and are
+ * stored separately. These dimensions are INFORMATIONAL: they explain the
+ * depth level (they never change the score), so Overview and Chat can say why.
+ */
+export interface AssessmentDimensions {
+  /** 0..1: deterministic baseline score, i.e. the mechanism actually built */
+  implementationComplexity: number;
+  approachCoverage: { assessed: number; credible: number; ratio: number };
+  /** hardening / safeguard behaviours actually observed */
+  safeguards: number;
+  /** distinct cited implementations (not configuration or scaffold) */
+  independentImplementations: number;
+  repeatedApplication: { repos: number; activeDays: number; commits: number };
+  recencyDays: number | null;
+}
+
+export type EvidenceBand = "none" | "sparse" | "moderate" | "rich";
+
+export function evidenceBandFor(files: number, commits: number): EvidenceBand {
+  if (files <= 0) return "none";
+  if (files < 3 || commits < 2) return "sparse";
+  if (files < 15 || commits < 8) return "moderate";
+  return "rich";
+}
+
+export function assessmentDimensions(
+  a: DepthAssessmentRecord,
+): AssessmentDimensions {
+  const credible = a.approaches.filter(
+    (ap) => DEPTH_RANK[ap.depth] >= DEPTH_RANK.working,
+  ).length;
+  const last = Date.parse(a.stats.lastSeen);
+  return {
+    implementationComplexity: round(
+      Math.max(0, Math.min(1, a.baselineScore / 100)),
+      2,
+    ),
+    approachCoverage: {
+      assessed: a.approaches.length,
+      credible,
+      ratio: a.approaches.length ? round(credible / a.approaches.length, 2) : 0,
+    },
+    safeguards: (a.safeguards ?? []).length,
+    independentImplementations: (a.implementations ?? []).length,
+    repeatedApplication: {
+      repos: a.stats.repos,
+      activeDays: a.stats.activeDays,
+      commits: a.stats.commits,
+    },
+    recencyDays: Number.isFinite(last)
+      ? Math.max(0, Math.round((Date.now() - last) / DAY_MS))
+      : null,
+  };
+}
+
+const CONFIDENCE_WEIGHT: Record<Confidence, number> = {
+  high: 0.85,
+  medium: 0.6,
+  low: 0.35,
+};
+
+const snapshotId = (dev: string, slug: string, build: string) =>
+  `snap:${dev}:${slug}:${build}`;
+
 export async function storeDepthAssessments(
   graph: Graph,
   input: StoreDepthInput,
@@ -4443,10 +4515,12 @@ export async function storeDepthAssessments(
     WITH ap, item
     MATCH (t:Topic {id: item.topic_id})
     MERGE (ap)-[r:APPROACH_OF]->(t)
+    MERGE (t)-[h:HAS_APPROACH]->(ap)
+    SET h.build_id = $build_id, h.updated_at = $now
     RETURN count(r) AS n
     `,
     approachRows,
-    { strict: true },
+    { strict: true, params: { build_id: buildId, now } },
   );
 
   // 3) DepthAssessment nodes (DEVELOPER-specific; id embeds the developer id,
@@ -4486,6 +4560,13 @@ export async function storeDepthAssessments(
         a.first_seen = item.first_seen,
         a.last_seen = item.last_seen,
         a.fallback = item.fallback,
+        a.evidence_files = item.evidence_files,
+        a.evidence_cited = item.evidence_cited,
+        a.evidence_band = item.evidence_band,
+        a.dimensions_json = item.dimensions_json,
+        a.is_current = true,
+        a.stale = false,
+        a.stale_reason = "",
         a.analysis_version = $version,
         a.model = $model,
         a.build_id = $build_id,
@@ -4523,6 +4604,10 @@ export async function storeDepthAssessments(
       first_seen: a.stats.firstSeen,
       last_seen: a.stats.lastSeen,
       fallback: a.fallback,
+      evidence_files: a.stats.files,
+      evidence_cited: a.evidence.length,
+      evidence_band: evidenceBandFor(a.stats.files, a.stats.commits),
+      dimensions_json: JSON.stringify(assessmentDimensions(a)),
     })),
     {
       params: {
@@ -4643,6 +4728,130 @@ export async function storeDepthAssessments(
     );
   }
 
+  // 6b) Explicit evidence links on the SHARED evidence side:
+  //     (Demonstration)-[:EVIDENCE_FOR_TOPIC]->(Topic) and
+  //     (Demonstration)-[:DEMONSTRATES_APPROACH]->(Approach). Each carries
+  //     reason, confidence, source and build_id so the mapping is explainable.
+  //     Only demonstrations the assessment actually cited get a link.
+  const topicLinks = list.flatMap((a) =>
+    a.evidence
+      .filter((e) => e.kind === "demonstration")
+      .map((e) => ({
+        target_id: e.id,
+        topic_id: topicId(a.topic.slug),
+        topic_slug: a.topic.slug,
+        ref: e.key,
+        confidence: CONFIDENCE_WEIGHT[a.confidence],
+        reason:
+          `Cited in the ${a.level} assessment of ${a.topic.name}: ${e.label}`.slice(
+            0,
+            300,
+          ),
+      })),
+  );
+  if (topicLinks.length) {
+    result.evidenceEdges += await runCounted(
+      graph,
+      "EVIDENCE_FOR_TOPIC",
+      `
+      UNWIND $batch AS item
+      MATCH (x:Demonstration {id: item.target_id})
+      MATCH (t:Topic {id: item.topic_id})
+      MERGE (x)-[r:EVIDENCE_FOR_TOPIC {source: "depth_assessment"}]->(t)
+      SET r.developer_id = $developer_id, r.topic_slug = item.topic_slug,
+          r.ref = item.ref, r.reason = item.reason, r.confidence = item.confidence,
+          r.source = "depth_assessment", r.build_id = $build_id, r.updated_at = $now
+      RETURN count(r) AS n
+      `,
+      topicLinks,
+      { params: { developer_id: developerId, build_id: buildId, now } },
+    );
+  }
+  const approachLinks = list.flatMap((a) => {
+    const byKey = new Map(
+      a.evidence
+        .filter((e) => e.kind === "demonstration")
+        .map((e) => [e.key, e]),
+    );
+    return a.approaches.flatMap((ap) =>
+      unique(ap.evidenceRefs)
+        .map((key) => byKey.get(key))
+        .filter((e): e is EvidenceRef => Boolean(e))
+        .map((e) => ({
+          target_id: e.id,
+          approach_id: approachId(a.topic.slug, ap.slug),
+          topic_slug: a.topic.slug,
+          ref: e.key,
+          confidence: CONFIDENCE_WEIGHT[a.confidence],
+          reason: (ap.howImplemented || `Cited for ${ap.name}`).slice(0, 300),
+        })),
+    );
+  });
+  if (approachLinks.length) {
+    result.evidenceEdges += await runCounted(
+      graph,
+      "DEMONSTRATES_APPROACH",
+      `
+      UNWIND $batch AS item
+      MATCH (x:Demonstration {id: item.target_id})
+      MATCH (ap:Approach {id: item.approach_id})
+      MERGE (x)-[r:DEMONSTRATES_APPROACH {source: "depth_assessment"}]->(ap)
+      SET r.developer_id = $developer_id, r.topic_slug = item.topic_slug,
+          r.ref = item.ref, r.reason = item.reason, r.confidence = item.confidence,
+          r.source = "depth_assessment", r.build_id = $build_id, r.updated_at = $now
+      RETURN count(r) AS n
+      `,
+      approachLinks,
+      { params: { developer_id: developerId, build_id: buildId, now } },
+    );
+  }
+
+  // 6c) History: one immutable snapshot per developer/topic/build. Snapshots
+  //     hang off Developer and Topic (not the assessment), so replacing the
+  //     CURRENT assessment never deletes history.
+  await runCounted(
+    graph,
+    "DepthSnapshot nodes",
+    `
+    UNWIND $batch AS item
+    MERGE (s:DepthSnapshot {id: item.id})
+    SET s.developer_id = $developer_id, s.topic_slug = item.topic_slug,
+        s.topic_id = item.topic_id, s.level = item.level, s.level_rank = item.level_rank,
+        s.score = item.score, s.confidence = item.confidence,
+        s.evidence_band = item.evidence_band, s.approach_count = item.approach_count,
+        s.files = item.files, s.commits = item.commits, s.last_seen = item.last_seen,
+        s.build_id = $build_id, s.analysis_version = $version, s.assessed_at = $now
+    WITH s, item
+    MATCH (d:Developer {id: $developer_id})
+    MATCH (t:Topic {id: item.topic_id})
+    MERGE (d)-[:HAD_SNAPSHOT]->(s)
+    MERGE (s)-[:SNAPSHOT_OF]->(t)
+    RETURN count(s) AS n
+    `,
+    list.map((a) => ({
+      id: snapshotId(developerId, a.topic.slug, buildId),
+      topic_slug: a.topic.slug,
+      topic_id: topicId(a.topic.slug),
+      level: a.level,
+      level_rank: DEPTH_RANK[a.level],
+      score: a.score,
+      confidence: a.confidence,
+      evidence_band: evidenceBandFor(a.stats.files, a.stats.commits),
+      approach_count: a.approaches.length,
+      files: a.stats.files,
+      commits: a.stats.commits,
+      last_seen: a.stats.lastSeen,
+    })),
+    {
+      params: {
+        developer_id: developerId,
+        build_id: buildId,
+        version: DEPTH_ANALYSIS_VERSION,
+        now,
+      },
+    },
+  );
+
   // 7) Developer -> Topic roll-up for fast reads and algorithms.
   await runCounted(
     graph,
@@ -4704,6 +4913,26 @@ export async function storeDepthAssessments(
     DELETE r
     `,
     { params: { ids: owner.map((o) => o.assessment_id), build_id: buildId } },
+  );
+
+  // Evidence links written by this pipeline for the topics in this build.
+  // Links with another source (e.g. the knowledge-graph pipeline) are kept.
+  await graph.query(
+    `
+    MATCH (x:Demonstration)-[r:EVIDENCE_FOR_TOPIC|DEMONSTRATES_APPROACH]->()
+    WHERE r.developer_id = $developer_id
+      AND r.source = "depth_assessment"
+      AND r.topic_slug IN $slugs
+      AND coalesce(r.build_id, "") <> $build_id
+    DELETE r
+    `,
+    {
+      params: {
+        developer_id: developerId,
+        slugs: list.map((a) => a.topic.slug),
+        build_id: buildId,
+      },
+    },
   );
 
   if (input.replaceAll) {
@@ -4868,6 +5097,7 @@ export async function cleanupOrphans(graph: Graph): Promise<{
     `MATCH (x:Topic)
      WHERE NOT ()-[:OF_TOPIC]->(x)
        AND NOT ()-[:KNOWS_TOPIC]->(x)
+       AND NOT ()-[:SNAPSHOT_OF]->(x)
        AND NOT (x)-[:BUILDS_ON]-()
        AND NOT (x)-[:RELATED_TOPIC]-()
        AND NOT (x)-[:MAPS_TO]->()`,
@@ -5083,6 +5313,30 @@ export interface TopicDepthDetail {
   capabilityPaths: TopicEvidencePath[];
   /** full prerequisite / unlock traversal with developer depth and evidence */
   learning: TopicLearningGraph | null;
+  /** depth, confidence and evidence quantity are reported separately */
+  confidence: Confidence;
+  evidenceBand: EvidenceBand;
+  evidenceFiles: number;
+  dimensions: AssessmentDimensions | null;
+  /** per approach: depth plus the demonstrations linked via DEMONSTRATES_APPROACH */
+  approachEvidence: Array<{
+    slug: string;
+    name: string;
+    depth: DepthLevel;
+    demonstrationIds: string[];
+  }>;
+  /** one entry per analysed build, newest first */
+  history: Array<{
+    buildId: string;
+    level: DepthLevel;
+    score: number;
+    confidence: Confidence;
+    evidenceBand: string;
+    approachCount: number;
+    files: number;
+    commits: number;
+    assessedAt: string;
+  }>;
 }
 
 export async function readTopicDepthDetail(
@@ -5112,7 +5366,9 @@ export async function readTopicDepthDetail(
       RETURN a.rationale AS rationale, a.strengths_json AS strengths, a.gaps_json AS gaps,
              a.safeguards_json AS safeguards, a.implementations_json AS implementations,
              a.approaches_json AS approaches, a.evidence_json AS evidence,
-             a.stats_json AS stats, a.baseline_level AS baseline_level
+             a.stats_json AS stats, a.baseline_level AS baseline_level,
+             a.confidence AS confidence, a.evidence_band AS evidence_band,
+             a.evidence_files AS evidence_files, a.dimensions_json AS dimensions
       LIMIT 1
       `,
       { dev: developerId, slug },
@@ -5148,8 +5404,59 @@ export async function readTopicDepthDetail(
     .sort((a, b) => a.name.localeCompare(b.name))
     .slice(0, 12);
 
+  const [historyRows, approachRows] = await Promise.all([
+    tryRows(
+      graph,
+      "topic history",
+      `
+      MATCH (:Developer {id: $dev})-[:HAD_SNAPSHOT]->(s:DepthSnapshot {topic_slug: $slug})
+      RETURN s.build_id AS build_id, s.level AS level, s.score AS score,
+             s.confidence AS confidence, s.evidence_band AS evidence_band,
+             s.approach_count AS approach_count, s.files AS files,
+             s.commits AS commits, s.assessed_at AS assessed_at
+      ORDER BY s.assessed_at DESC
+      LIMIT 20
+      `,
+      { dev: developerId, slug },
+    ),
+    tryRows(
+      graph,
+      "approach evidence",
+      `
+      MATCH (:Developer {id: $dev})-[:ASSESSED]->(:DepthAssessment {topic_slug: $slug})
+            -[u:USES_APPROACH]->(ap:Approach)
+      OPTIONAL MATCH (x:Demonstration)-[r:DEMONSTRATES_APPROACH]->(ap)
+        WHERE r.developer_id = $dev
+      RETURN ap.slug AS slug, ap.name AS name, u.depth AS depth,
+             collect(DISTINCT x.id) AS demo_ids
+      `,
+      { dev: developerId, slug },
+    ),
+  ]);
+
   const a = rowsA?.[0] ?? {};
   return {
+    confidence: asConfidence(a.confidence),
+    evidenceBand: str(a.evidence_band, "none") as EvidenceBand,
+    evidenceFiles: num(a.evidence_files),
+    dimensions: parseJson<AssessmentDimensions | null>(a.dimensions, null),
+    approachEvidence: (approachRows ?? []).map((r) => ({
+      slug: str(r.slug),
+      name: str(r.name),
+      depth: asDepthLevel(r.depth),
+      demonstrationIds: strList(r.demo_ids).filter(Boolean),
+    })),
+    history: (historyRows ?? []).map((r) => ({
+      buildId: str(r.build_id),
+      level: asDepthLevel(r.level),
+      score: num(r.score),
+      confidence: asConfidence(r.confidence),
+      evidenceBand: str(r.evidence_band),
+      approachCount: num(r.approach_count),
+      files: num(r.files),
+      commits: num(r.commits),
+      assessedAt: str(r.assessed_at),
+    })),
     summary,
     rationale: str(a.rationale),
     strengths: parseJson<string[]>(a.strengths, []),
@@ -5257,7 +5564,7 @@ export async function readDeveloperKnowledgeGraph(
     MATCH (d:Developer {id: $dev})${hopPattern}(n)
     WITH DISTINCT n LIMIT ${maxNodes}
     RETURN labels(n) AS labels,
-           coalesce(n.id, n.slug, n.topic_slug, n.name, elementId(n)) AS id,
+           coalesce(n.id, n.slug, n.topic_slug, n.name, toString(ID(n))) AS id,
            coalesce(n.name, n.title, n.technique, n.summary, n.slug, n.topic_slug, "") AS name,
            properties(n) AS properties
     `,
@@ -5271,8 +5578,8 @@ export async function readDeveloperKnowledgeGraph(
     `
     MATCH (d:Developer {id: $dev})${hopPattern}(a)-[r]-(b)
     WITH DISTINCT a, r, b LIMIT ${maxNodes * 3}
-    RETURN coalesce(a.id, a.slug, a.topic_slug, a.name, elementId(a)) AS from_id,
-           coalesce(b.id, b.slug, b.topic_slug, b.name, elementId(b)) AS to_id,
+    RETURN coalesce(a.id, a.slug, a.topic_slug, a.name, toString(ID(a))) AS from_id,
+           coalesce(b.id, b.slug, b.topic_slug, b.name, toString(ID(b))) AS to_id,
            type(r) AS type, properties(r) AS properties
     `,
     { dev: developerId },
@@ -5362,11 +5669,11 @@ export async function readDeveloperTopicEvidenceGraph(
        OR support:TechniqueSpec OR support:Safeguard OR support:Technology
        OR support:EngineeringContext OR support:Problem OR support:Approach
     RETURN labels(e) AS evidence_labels,
-           coalesce(e.id, e.topic_slug, elementId(e)) AS evidence_id,
+           coalesce(e.id, e.topic_slug, toString(ID(e))) AS evidence_id,
            coalesce(e.name, e.technique, e.summary, e.title, "") AS evidence_name,
            type(r1) AS developer_relation,
            labels(support) AS support_labels,
-           coalesce(support.id, support.slug, support.name, elementId(support)) AS support_id,
+           coalesce(support.id, support.slug, support.name, toString(ID(support))) AS support_id,
            coalesce(support.name, support.path, support.technique, support.summary, "") AS support_name,
            type(r2) AS support_relation,
            properties(e) AS evidence_properties,
@@ -5508,7 +5815,12 @@ export interface TopicGraphEvidence {
     componentId: number | null;
     componentSize: number;
   };
-  reach: { prerequisites: number; unlocks: number; related: number; maxPrereqHop: number };
+  reach: {
+    prerequisites: number;
+    unlocks: number;
+    related: number;
+    maxPrereqHop: number;
+  };
   trace: TopicGraphTraceStep[];
 }
 
@@ -5532,17 +5844,36 @@ export async function readTopicGraphEvidence(
   ): Promise<Row[]> => {
     const t0 = Date.now();
     const r = (await tryRows(graph, name, query, params)) ?? [];
-    trace.push({ name, pattern, algorithm, rows: r.length, ms: Date.now() - t0 });
+    trace.push({
+      name,
+      pattern,
+      algorithm,
+      rows: r.length,
+      ms: Date.now() - t0,
+    });
     return r;
   };
 
   const nodes = new Map<string, EvidenceGraphNode>();
   const edges = new Map<string, EvidenceGraphEdge>();
-  const node = (id: string, kind: EvidenceNodeKind, label: string, hop: number, m: Row = {}) => {
+  const node = (
+    id: string,
+    kind: EvidenceNodeKind,
+    label: string,
+    hop: number,
+    m: Row = {},
+  ) => {
     const prev = nodes.get(id);
-    if (!prev || hop < prev.hop) nodes.set(id, { id, kind, label, hop, meta: m });
+    if (!prev || hop < prev.hop)
+      nodes.set(id, { id, kind, label, hop, meta: m });
   };
-  const edge = (source: string, target: string, type: string, hop: number, note = "") => {
+  const edge = (
+    source: string,
+    target: string,
+    type: string,
+    hop: number,
+    note = "",
+  ) => {
     const id = `${source}|${type}|${target}`;
     if (!edges.has(id)) edges.set(id, { id, source, target, type, hop, note });
   };
@@ -5596,8 +5927,15 @@ export async function readTopicGraphEvidence(
   const missions = demoRows.filter((r) => str(r.source) === "mission");
   const others = demoRows
     .filter((r) => str(r.source) !== "mission")
-    .sort((a, b) => num(b.depth_rank) - num(a.depth_rank) || str(b.created_at).localeCompare(str(a.created_at)));
-  const shown = [...missions.slice(0, 4), ...others.slice(0, 8 - Math.min(4, missions.length))];
+    .sort(
+      (a, b) =>
+        num(b.depth_rank) - num(a.depth_rank) ||
+        str(b.created_at).localeCompare(str(a.created_at)),
+    );
+  const shown = [
+    ...missions.slice(0, 4),
+    ...others.slice(0, 8 - Math.min(4, missions.length)),
+  ];
 
   const builds: TopicBuild[] = [];
   for (const r of shown) {
@@ -5606,7 +5944,10 @@ export async function readTopicGraphEvidence(
     const isMission = str(r.source) === "mission";
     const repo = str(r.repository);
     const label = cut80(str(r.title) || str(r.technique) || "demonstration");
-    node(`demo:${id}`, "demonstration", label, 2, { mission: isMission, depth: str(r.depth) });
+    node(`demo:${id}`, "demonstration", label, 2, {
+      mission: isMission,
+      depth: str(r.depth),
+    });
     edge(`demo:${id}`, `cap:${capId}`, "OF_CAPABILITY", 2);
     const routeIds = [topicNode, `cap:${capId}`, `demo:${id}`];
     const route = [
@@ -5654,8 +5995,15 @@ export async function readTopicGraphEvidence(
   );
   for (const r of expRows) {
     const id = str(r.id);
-    node(`exp:${id}`, "experience", cut80(str(r.technique)), 2, { evidence: num(r.evidence) });
-    edge(`exp:${id}`, `cap:${str(r.capability_id)}`, "DEMONSTRATES_CAPABILITY", 2);
+    node(`exp:${id}`, "experience", cut80(str(r.technique)), 2, {
+      evidence: num(r.evidence),
+    });
+    edge(
+      `exp:${id}`,
+      `cap:${str(r.capability_id)}`,
+      "DEMONSTRATES_CAPABILITY",
+      2,
+    );
   }
 
   // 4. Topic taxonomy: BUILDS_ON*1..3 out, *1..2 in, RELATED_TOPIC
@@ -5669,7 +6017,8 @@ export async function readTopicGraphEvidence(
   const related = relatedEdges.filter((e) => e.from === slug).slice(0, 8);
   trace.push({
     name: "Topic taxonomy walk",
-    pattern: "(Topic)-[:BUILDS_ON*1..3]->(Topic); (Topic)<-[:BUILDS_ON*1..2]-(Topic); (Topic)-[:RELATED_TOPIC]->(Topic)",
+    pattern:
+      "(Topic)-[:BUILDS_ON*1..3]->(Topic); (Topic)<-[:BUILDS_ON*1..2]-(Topic); (Topic)-[:RELATED_TOPIC]->(Topic)",
     algorithm: "Variable-length BFS (breadth-first walk)",
     rows: prereq.length + unlocks.length + related.length,
     ms: Date.now() - t0,
@@ -5713,14 +6062,19 @@ export async function readTopicGraphEvidence(
   const m = metricRows[0] ?? {};
   const clusterId = m.cl == null ? null : num(m.cl);
   const componentId = m.cc == null ? null : num(m.cc);
-  const sizeOf = async (prop: "cluster_id" | "component_id", v: number | null) =>
+  const sizeOf = async (
+    prop: "cluster_id" | "component_id",
+    v: number | null,
+  ) =>
     v == null
       ? 0
       : num(
-          (
-            (await tryRows(graph, `${prop} size`, `MATCH (t:Topic) WHERE t.${prop} = $v RETURN count(t) AS n`, { v })) ??
-            []
-          )[0]?.n,
+          ((await tryRows(
+            graph,
+            `${prop} size`,
+            `MATCH (t:Topic) WHERE t.${prop} = $v RETURN count(t) AS n`,
+            { v },
+          )) ?? [])[0]?.n,
         );
   const [clusterSize, componentSize] = await Promise.all([
     sizeOf("cluster_id", clusterId),
@@ -5729,12 +6083,15 @@ export async function readTopicGraphEvidence(
 
   const all = [...nodes.values()];
   const hopCounts: Record<number, number> = {};
-  for (const n of all) if (n.hop > 0) hopCounts[n.hop] = (hopCounts[n.hop] ?? 0) + 1;
+  for (const n of all)
+    if (n.hop > 0) hopCounts[n.hop] = (hopCounts[n.hop] ?? 0) + 1;
 
   return {
     slug,
     nodes: all,
-    edges: [...edges.values()].filter((e) => nodes.has(e.source) && nodes.has(e.target)),
+    edges: [...edges.values()].filter(
+      (e) => nodes.has(e.source) && nodes.has(e.target),
+    ),
     hopCounts,
     maxHop: Math.max(0, ...all.map((n) => n.hop)),
     builds,
@@ -5758,4 +6115,5 @@ export async function readTopicGraphEvidence(
   };
 }
 
-const cut80 = (s: string): string => (s.length <= 80 ? s : `${s.slice(0, 79)}…`);
+const cut80 = (s: string): string =>
+  s.length <= 80 ? s : `${s.slice(0, 79)}…`;

@@ -315,7 +315,10 @@ export interface Journey {
     capabilitiesWithEvidence: number;
     built: number;
     partial: number;
+    /** length of the returned `strengths` list (core + solid + emerging) */
     strengths: number;
+    /** core + solid only; emerging ones are listed but not counted as proven */
+    provenStrengths: number;
     /** repositories in which detectors found evidence */
     repositories: number;
     /** repositories the developer committed to at all (from FileChange nodes) */
@@ -550,6 +553,30 @@ export const GRAPH_MODEL = {
         "Technology skills (TypeScript, Express ...) from the skill graph.",
       why: "Tools they work with, complementary to capabilities.",
     },
+    {
+      type: "EVIDENCE_FOR_TOPIC",
+      from: "Demonstration",
+      to: "Topic",
+      meaning:
+        "This implementation is evidence for a canonical engineering topic. Carries reason, confidence, source, build_id and developer_id; one edge per source.",
+      why: "Lets a topic reach the exact code without relying on the broad capability hop.",
+    },
+    {
+      type: "DEMONSTRATES_APPROACH",
+      from: "Demonstration",
+      to: "Approach",
+      meaning:
+        "This implementation is evidence for one approach of a topic (for example Redis-backed caching). Carries reason, confidence, source and build_id.",
+      why: "Approaches are assessed independently, so each needs its own proof.",
+    },
+    {
+      type: "HAD_SNAPSHOT",
+      from: "Developer",
+      to: "DepthSnapshot",
+      meaning:
+        "One immutable record of a topic assessment per build (SNAPSHOT_OF links it to the Topic).",
+      why: "History of how topic depth and evidence changed, kept when the current assessment is replaced.",
+    },
   ],
   levels: {
     insufficient_evidence: "a single lone sighting; Pathway cannot tell yet",
@@ -591,6 +618,19 @@ export const GRAPH_MODEL = {
       pattern:
         "(Developer)-[DEMONSTRATED]->(Demonstration {created_at})-[OF_CAPABILITY]->(Capability), grouped by month",
       tool: "get_developer_journey / get_skill_evolution",
+    },
+    {
+      question: "Which topics and approaches does this experience support?",
+      pattern:
+        "(Experience)-[SUPPORTED_BY]->(Demonstration)-[EVIDENCE_FOR_TOPIC]->(Topic) and -[DEMONSTRATES_APPROACH]->(Approach)",
+      tool: "get_topic_experiences",
+    },
+    {
+      question:
+        "How did evidence for a topic grow, and when did each approach appear?",
+      pattern:
+        "(Demonstration {created_at})-[EVIDENCE_FOR_TOPIC]->(Topic), grouped by month and approach, plus (Developer)-[HAD_SNAPSHOT]->(DepthSnapshot)",
+      tool: "get_topic_history",
     },
   ],
 };
@@ -1196,13 +1236,21 @@ async function readProofs(
   return out;
 }
 
+/** Stored ranges can be missing or inverted: report 0/0 and drop the permalink instead of a wrong anchor. */
+function cleanRange(start: unknown, end: unknown) {
+  const a = Number(start);
+  const b = Number(end);
+  const ok = Number.isInteger(a) && Number.isInteger(b) && a >= 1 && b >= a;
+  return { ok, start: ok ? a : 0, end: ok ? b : 0 };
+}
+
 function toProof(p: Row): ProofRef {
   return {
     repository: str(p.repository),
     path: str(p.path),
-    startLine: num(p.start_line),
-    endLine: num(p.end_line),
-    permalink: str(p.permalink),
+    startLine: cleanRange(p.start_line, p.end_line).start,
+    endLine: cleanRange(p.start_line, p.end_line).end,
+    permalink: cleanRange(p.start_line, p.end_line).ok ? str(p.permalink) : "",
     snippet: str(p.snippet),
     commitSubject: str(p.commit_subject),
     depth: str(p.depth) || "usage",
@@ -1523,6 +1571,282 @@ async function readTimeline(
     .filter((r) => /^\d{4}-\d{2}$/.test(r.month));
 }
 
+// ---- TOPIC VIEW: experiences and history for one canonical topic ----------
+//
+// Read-only. Topic depth is NOT calculated here: the canonical depth
+// assessment lives in depth-analyzer-graph.ts. These readers only return the
+// evidence (counts, dates, provenance) and the recorded assessment history,
+// grouped by the canonical topic and approach ids.
+
+export interface TopicExperience {
+  /** stable identity: topic | approach (or technique) | technique */
+  identity: string;
+  experienceId: string;
+  technique: string;
+  summary: string;
+  capabilityId: string;
+  approachSlugs: string[];
+  depth: string;
+  /** strongest link confidence between these demonstrations and the topic */
+  linkConfidence: number;
+  evidenceCount: number;
+  firstSeen: string;
+  lastSeen: string;
+  repositories: string[];
+  /** provenance: the demonstrations, file changes and commits behind it */
+  demonstrationIds: string[];
+  fileChangeIds: string[];
+  commitShas: string[];
+}
+
+/**
+ * Experiences that have at least one demonstration linked to the topic. An
+ * experience is shown with only the evidence that belongs to this topic, so a
+ * broad capability label cannot pull unrelated implementations into it.
+ */
+export async function readTopicExperiences(
+  graph: Graph,
+  developerId: string,
+  topicSlug: string,
+  limit = 12,
+): Promise<TopicExperience[]> {
+  const result = await tryRows(
+    graph,
+    "topic experiences",
+    `
+    MATCH (d:Developer {id: $dev})-[:EXPERIENCED]->(e:Experience)-[:SUPPORTED_BY]->(x:Demonstration)
+          -[l:EVIDENCE_FOR_TOPIC]->(t:Topic {slug: $slug})
+    WHERE l.developer_id = $dev
+    OPTIONAL MATCH (x)-[a:DEMONSTRATES_APPROACH]->(ap:Approach)
+      WHERE a.developer_id = $dev AND ap.topic_slug = $slug
+    WITH e,
+         collect(DISTINCT ap.slug) AS approaches,
+         collect(DISTINCT x.id) AS demo_ids,
+         collect(DISTINCT x.file_change_id) AS fc_ids,
+         collect(DISTINCT x.commit_sha) AS shas,
+         max(l.confidence) AS conf,
+         min(x.created_at) AS first_seen,
+         max(x.created_at) AS last_seen,
+         max(x.depth_rank) AS best_rank
+    OPTIONAL MATCH (e)-[:OCCURS_IN]->(r:Repository)
+    RETURN e.id AS id, e.technique AS technique, coalesce(e.summary, "") AS summary,
+           e.capability_id AS capability_id, approaches, demo_ids, fc_ids, shas,
+           conf, first_seen, last_seen, best_rank,
+           collect(DISTINCT coalesce(r.full_name, r.name)) AS repos
+    ORDER BY best_rank DESC, size(demo_ids) DESC
+    LIMIT ${Math.max(1, Math.min(50, Math.floor(limit)))}
+    `,
+    { dev: developerId, slug: topicSlug },
+  );
+
+  return (result ?? []).map((r) => {
+    const approaches = strList(r.approaches).filter(Boolean);
+    const technique = str(r.technique);
+    const demos = strList(r.demo_ids).filter(Boolean);
+    return {
+      identity: [topicSlug, approaches[0] ?? technique, technique]
+        .join("|")
+        .toLowerCase(),
+      experienceId: str(r.id),
+      technique,
+      summary: str(r.summary),
+      capabilityId: str(r.capability_id),
+      approachSlugs: approaches,
+      depth: DEPTH_BY_RANK[num(r.best_rank)] || "usage",
+      linkConfidence: Math.round(num(r.conf) * 100) / 100,
+      evidenceCount: demos.length,
+      firstSeen: str(r.first_seen),
+      lastSeen: str(r.last_seen),
+      repositories: strList(r.repos).filter(Boolean),
+      demonstrationIds: demos,
+      fileChangeIds: strList(r.fc_ids).filter(Boolean),
+      commitShas: strList(r.shas).filter(Boolean),
+    };
+  });
+}
+
+export interface ExperienceProvenanceRow {
+  demonstrationId: string;
+  repositoryId: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  permalink: string;
+  commitSha: string;
+  commitSubject: string;
+  fileChangeId: string;
+  depth: string;
+  createdAt: string;
+}
+
+/** Experience -> demonstrations -> file change / commit, oldest first. */
+export async function readExperienceProvenance(
+  graph: Graph,
+  developerId: string,
+  experienceId: string,
+): Promise<ExperienceProvenanceRow[]> {
+  const result = await tryRows(
+    graph,
+    "experience provenance",
+    `
+    MATCH (d:Developer {id: $dev})-[:EXPERIENCED]->(e:Experience {id: $id})-[:SUPPORTED_BY]->(x:Demonstration)
+    RETURN x.id AS id, x.repository_id AS repository_id, x.path AS path,
+           x.start_line AS start_line, x.end_line AS end_line,
+           x.permalink AS permalink, x.commit_sha AS commit_sha,
+           x.commit_subject AS commit_subject, x.file_change_id AS file_change_id,
+           x.depth_rank AS depth_rank, x.created_at AS created_at
+    ORDER BY x.created_at
+    LIMIT 200
+    `,
+    { dev: developerId, id: experienceId },
+  );
+  return (result ?? []).map((r) => ({
+    demonstrationId: str(r.id),
+    repositoryId: str(r.repository_id),
+    path: str(r.path),
+    startLine: cleanRange(r.start_line, r.end_line).start,
+    endLine: cleanRange(r.start_line, r.end_line).end,
+    permalink: cleanRange(r.start_line, r.end_line).ok ? str(r.permalink) : "",
+    commitSha: str(r.commit_sha),
+    commitSubject: str(r.commit_subject),
+    fileChangeId: str(r.file_change_id),
+    depth: DEPTH_BY_RANK[num(r.depth_rank)] || "usage",
+    createdAt: str(r.created_at),
+  }));
+}
+
+export interface TopicTimelinePoint {
+  month: string;
+  /** "" when the evidence is not tied to a specific approach */
+  approachSlug: string;
+  count: number;
+  bestDepth: string;
+}
+
+export type TopicHistoryEventKind =
+  | "evidence_started"
+  | "approach_appeared"
+  | "approach_strengthened"
+  | "level_changed";
+
+export interface TopicHistoryEvent {
+  kind: TopicHistoryEventKind;
+  when: string;
+  approachSlug?: string;
+  detail: string;
+}
+
+export interface TopicHistory {
+  slug: string;
+  timeline: TopicTimelinePoint[];
+  events: TopicHistoryEvent[];
+  explanation: string;
+}
+
+/**
+ * How the evidence for a topic grew over time and when each approach first
+ * appeared or got stronger, plus level changes between recorded assessments.
+ */
+export async function readTopicHistory(
+  graph: Graph,
+  developerId: string,
+  topicSlug: string,
+): Promise<TopicHistory> {
+  const [timelineRows, snapshotRows] = await Promise.all([
+    tryRows(
+      graph,
+      "topic timeline",
+      `
+      MATCH (d:Developer {id: $dev})-[:DEMONSTRATED]->(x:Demonstration)
+            -[l:EVIDENCE_FOR_TOPIC]->(t:Topic {slug: $slug})
+      WHERE l.developer_id = $dev AND x.created_at IS NOT NULL AND x.created_at <> ""
+      OPTIONAL MATCH (x)-[a:DEMONSTRATES_APPROACH]->(ap:Approach)
+        WHERE a.developer_id = $dev AND ap.topic_slug = $slug
+      RETURN substring(x.created_at, 0, 7) AS month,
+             coalesce(ap.slug, "") AS approach,
+             count(DISTINCT x) AS n,
+             max(x.depth_rank) AS best_rank
+      ORDER BY month
+      `,
+      { dev: developerId, slug: topicSlug },
+    ),
+    tryRows(
+      graph,
+      "topic snapshots",
+      `
+      MATCH (:Developer {id: $dev})-[:HAD_SNAPSHOT]->(s:DepthSnapshot {topic_slug: $slug})
+      RETURN s.level AS level, s.assessed_at AS assessed_at
+      ORDER BY s.assessed_at
+      `,
+      { dev: developerId, slug: topicSlug },
+    ),
+  ]);
+
+  const timeline: TopicTimelinePoint[] = (timelineRows ?? [])
+    .map((r) => ({
+      month: str(r.month),
+      approachSlug: str(r.approach),
+      count: num(r.n),
+      bestDepth: DEPTH_BY_RANK[num(r.best_rank)] || "usage",
+    }))
+    .filter((r) => /^\d{4}-\d{2}$/.test(r.month));
+
+  const events: TopicHistoryEvent[] = [];
+  if (timeline.length) {
+    events.push({
+      kind: "evidence_started",
+      when: timeline[0].month,
+      detail: `First implementation evidence for this topic (${timeline[0].count} demonstration${timeline[0].count === 1 ? "" : "s"}).`,
+    });
+  }
+  const bestRank = new Map<string, number>();
+  for (const point of timeline) {
+    if (!point.approachSlug) continue;
+    const rank = DEPTH_BY_RANK.indexOf(point.bestDepth);
+    const seen = bestRank.get(point.approachSlug);
+    if (seen === undefined) {
+      events.push({
+        kind: "approach_appeared",
+        when: point.month,
+        approachSlug: point.approachSlug,
+        detail: `Approach ${point.approachSlug} first appeared at ${point.bestDepth} depth.`,
+      });
+    } else if (rank > seen) {
+      events.push({
+        kind: "approach_strengthened",
+        when: point.month,
+        approachSlug: point.approachSlug,
+        detail: `Approach ${point.approachSlug} moved from ${DEPTH_BY_RANK[seen]} to ${point.bestDepth} depth.`,
+      });
+    }
+    bestRank.set(point.approachSlug, Math.max(seen ?? 0, rank));
+  }
+  let previous = "";
+  for (const r of snapshotRows ?? []) {
+    const level = str(r.level);
+    if (previous && level && level !== previous) {
+      events.push({
+        kind: "level_changed",
+        when: str(r.assessed_at).slice(0, 10),
+        detail: `Assessed depth changed from ${previous} to ${level}.`,
+      });
+    }
+    if (level) previous = level;
+  }
+  events.sort((a, b) => a.when.localeCompare(b.when));
+
+  const approaches = bestRank.size;
+  const explanation = timeline.length
+    ? `Evidence for this topic spans ${timeline[0].month} to ${timeline[timeline.length - 1].month}` +
+      (approaches
+        ? `, across ${approaches} approach${approaches === 1 ? "" : "es"} that have linked implementation evidence.`
+        : ". No approach-level evidence is linked yet.") +
+      " The depth level itself comes from the topic assessment, not from this timeline."
+    : "No implementation evidence is linked to this topic yet.";
+
+  return { slug: topicSlug, timeline, events, explanation };
+}
+
 async function readJourneyRepositories(
   graph: Graph,
   developerId: string,
@@ -1753,9 +2077,11 @@ export async function readCapabilityTrace(
       modifiers: str(r.modifiers).split(" | ").filter(Boolean),
       repository: str(r.repository),
       path: str(r.path),
-      startLine: num(r.start_line),
-      endLine: num(r.end_line),
-      permalink: str(r.permalink),
+      startLine: cleanRange(r.start_line, r.end_line).start,
+      endLine: cleanRange(r.start_line, r.end_line).end,
+      permalink: cleanRange(r.start_line, r.end_line).ok
+        ? str(r.permalink)
+        : "",
       commitSubject: str(r.commit_subject),
       changeIntent: str(r.change_intent),
       layer: str(r.layer),
@@ -2199,7 +2525,8 @@ export async function readJourney(
       capabilitiesWithEvidence: capabilities.length,
       built: capabilities.filter((c) => c.state === "demonstrated").length,
       partial: capabilities.filter((c) => c.state === "partial").length,
-      strengths: strengths.filter((s) => s.tier !== "emerging").length,
+      strengths: strengths.length,
+      provenStrengths: strengths.filter((s) => s.tier !== "emerging").length,
       repositories: repositories.length,
       repositoriesTouched: self.totals.repositories,
     },

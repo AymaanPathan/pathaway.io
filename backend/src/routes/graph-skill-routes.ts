@@ -17,6 +17,7 @@ import {
   humanizeSkillStage,
   num,
   overviewJobs,
+  refreshDepthGraph,
   resetOverviewIntelligenceGraph,
   serializeSkillGroup,
   skillRebuildLocks,
@@ -107,6 +108,11 @@ graphSkillRouter.get(
             message: humanizeOverviewStage(stage, detail ?? {}),
           }),
       );
+      // The reset above deleted the demonstrations that depth assessments cite,
+      // so the topic graph must be rebuilt from the new evidence.
+      const depth = await refreshDepthGraph(graph, developerId, send, {
+        force: true,
+      });
       const groups = await getDeveloperSkillProfile(graph, developerId);
       send("areas_total", { count: groups.length });
       for (const group of groups) {
@@ -117,6 +123,7 @@ graphSkillRouter.get(
       send("complete", {
         developer: await getDeveloperInfo(graph, developerId),
         insights: buildSkillInsights(groups),
+        depth: depth.status,
       });
     } catch (err) {
       console.error(err);

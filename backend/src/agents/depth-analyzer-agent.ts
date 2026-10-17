@@ -1,5 +1,5 @@
 import type { Graph } from "../db/falkordb.js";
-import { cerebras, CEREBRAS_MODEL } from "../ai-models/cerebras.js";
+import { nvidia, NVIDIA_MODEL } from "../ai-models/nvidia-nemotron-3.5.js";
 import {
   DEPTH_BANDS,
   DEPTH_RANK,
@@ -177,7 +177,7 @@ type LlmFactoryOptions = {
 };
 
 function createOpenAiLlm(
-  client: typeof cerebras,
+  client: typeof nvidia,
   defaultModel: string,
   options: {
     model?: string;
@@ -290,12 +290,12 @@ function createOpenAiLlm(
   };
 }
 
-export function createCerebrasLlm(options: LlmFactoryOptions = {}): DepthLlm {
-  return createOpenAiLlm(cerebras, CEREBRAS_MODEL, options);
+export function createNvidiaLlm(options: LlmFactoryOptions = {}): DepthLlm {
+  return createOpenAiLlm(nvidia, NVIDIA_MODEL, options);
 }
 
 export function createDepthLlmFromEnv(): DepthLlm {
-  return createCerebrasLlm();
+  return createNvidiaLlm();
 }
 
 class LlmGateway {
@@ -1701,6 +1701,29 @@ function reconcile(
     const built =
       ev.baseline.components.ownImplementation !== undefined &&
       ev.baseline.components.ownImplementation >= 6;
+
+    // Counts alone never justify depth. Above "working" needs qualitative
+    // evidence (own code, hardening, revisits or tests); "deep" needs a built
+    // mechanism. The +1 ceiling above would otherwise let the model reach
+    // deep from a capped proficient baseline.
+    const c = ev.baseline.components;
+    const qualitative =
+      (c.ownImplementation ?? 0) +
+      (c.hardening ?? 0) +
+      (c.maturation ?? 0) +
+      (c.tests ?? 0);
+    if (DEPTH_RANK[level] > DEPTH_RANK.working && qualitative < 5) {
+      guards.push(
+        `level lowered from ${level} to working: no built mechanism, hardening, revisits or tests were observed (counts alone are not depth)`,
+      );
+      level = "working";
+    }
+    if (level === "deep" && !built) {
+      guards.push(
+        "level lowered from deep to proficient: no built mechanism or own definitions were detected",
+      );
+      level = "proficient";
+    }
     if (
       authenticity === "genuine_implementation" &&
       !built &&

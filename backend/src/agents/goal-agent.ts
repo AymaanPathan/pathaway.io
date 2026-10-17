@@ -11,8 +11,6 @@ import {
   type Resolution,
 } from "../graph/goal-graph.js";
 
-
-
 type Row = Record<string, any>;
 
 const LOG_PREFIX = "[goal-agent]";
@@ -32,10 +30,6 @@ const strList = (v: unknown, max = 6): string[] =>
     .map((x) => str(x))
     .filter(Boolean)
     .slice(0, max);
-
-
-
-
 
 export interface LlmRequest {
   system: string;
@@ -71,7 +65,7 @@ export function cerebrasClient(): LlmClient {
       try {
         const out = await call(req, Boolean(req.json));
         if (out.trim() || !req.json) return out;
-        
+
         return await call(req, false);
       } catch (error) {
         if (req.json && /response_format|json/i.test(String(error)))
@@ -96,7 +90,6 @@ async function callLlm(
   }
 }
 
-
 export function extractJson(text: string): Row | null {
   const cleaned = text
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -109,27 +102,25 @@ export function extractJson(text: string): Row | null {
     try {
       const v = JSON.parse(candidate);
       if (v && typeof v === "object" && !Array.isArray(v)) return v as Row;
-    } catch {
-      
-    }
+    } catch {}
   }
   return null;
 }
 
-
-
-
-
 export interface Decision {
   focusSlug: string;
   capabilityId: string | null;
-  
+  /** the approach of the focus topic this move changes; null when it adds an approach not yet built */
+  approachSlug: string | null;
+  /** what the graph shows, what the agent infers, and what has no evidence */
+  basis: { observed: string; inferred: string; missing: string };
+
   buildsOnSlugs: string[];
-  
+
   gapSlugs: string[];
   why: string;
   evidenceIds: string[];
-  
+
   considered: Array<{ option: string; whyNot: string }>;
 }
 
@@ -160,10 +151,17 @@ export interface PlannedTask {
     commit: string;
   };
   steps: string[];
-  
+
   doneWhen: string;
   why: string;
   focus: { slug: string; name: string; domain: string; level: string };
+  /** the assessed approach this move builds on, with its own depth and authenticity */
+  approach: {
+    slug: string;
+    name: string;
+    depth: string;
+    authenticity: string;
+  } | null;
   targetCapability: { id: string; name: string } | null;
   evidence: Array<{
     id: string;
@@ -195,16 +193,16 @@ export interface GoalPlan {
     | GoalGraphResult["clarification"]
     | { reason: string; suggestions: [] }
     | null;
-  
+
   errors: string[];
-  
+
   graph: {
     seeds: string[];
     topics: number;
     evidence: number;
     codeExcerpts: number;
     operations: GoalGraphResult["operations"];
-    
+
     topicNodes: Array<{
       slug: string;
       name: string;
@@ -216,11 +214,11 @@ export interface GoalPlan {
       assessed: boolean;
       authenticity: string;
     }>;
-    
+
     links: GoalGraphResult["links"];
-    
+
     context: GoalGraphResult["context"];
-    
+
     ranking: GoalGraphResult["ranking"];
   } | null;
   llmCalls: number;
@@ -236,10 +234,6 @@ export interface PlanGoalInput {
   timeoutMs?: number;
 }
 
-
-
-
-
 const SYSTEM = `You are the decision maker of a developer-growth agent. A knowledge graph gives you DATA about one developer: topics, related topics, groups of topics, assessed depth, what they built, safeguards, capabilities with demonstration counts, and real code. The graph never chooses. You do.
 
 Your job: decide the ONE next engineering move that moves this developer toward their goal, then turn it into a concrete task.
@@ -251,16 +245,21 @@ How to decide:
 4. Do NOT choose because a number is high (files, commits, repos, relevance). Those only describe volume.
 5. "0 demonstrations" or "not assessed" means no evidence was found. It is NOT a proven weakness.
 6. The developer named a topic (see resolvedBy.seeds). Your focusSlug MUST be one of those seed topics, unless resolvedBy.method is "domain". Related topics are context: use them in buildsOnSlugs or gapSlugs, never as the focus. Evidence with no capability or technique is still real authored code: you may start from it.
+7. Reason approach by approach. Each topic lists its approaches with their own depth, authenticity, hardening and gaps. The overall topic level hides this: a developer can be deep in one approach and have none in another. Pick the approach your move changes (decision.approachSlug, copied from the data) or, when the move adds an approach the developer has not built, set it to null and say which approach is absent in basis.missing. Evidence items list the approaches they demonstrate; prefer evidence linked to the approach you are changing.
+8. Separate what you know. basis.observed: what the data and code show, citing evidence ids. basis.inferred: what you conclude from it. basis.missing: what has no evidence yet. Missing evidence is not proof of weakness; never state a weakness as fact unless the code shows it.
+9. completedMoves lists missions this developer already verified on these topics. Do not repeat or lightly reword one.
 
 Reply with JSON only, exactly this shape:
 {
  "decision": {
   "focusSlug": "<topic slug from the data>",
   "capabilityId": "<capability id from the data or null>",
+  "approachSlug": "<approach slug of the focus topic from the data that this move changes, or null when adding a new approach>",
   "buildsOnSlugs": ["<proven topic slugs this builds on>"],
   "gapSlugs": ["<topic slugs whose gap this closes, may be empty>"],
   "why": "<2-3 sentences: why THIS move, citing evidence ids like E4>",
   "evidenceIds": ["E#", "..."],
+  "basis": {"observed": "<what the data and code show, citing E# ids>", "inferred": "<what you conclude from it>", "missing": "<what has no evidence yet, or empty>"},
   "considered": [{"option": "<alternative you weighed>", "whyNot": "<why you did not take it>"}]
  },
  "challenge": {
@@ -279,7 +278,7 @@ Reply with JSON only, exactly this shape:
 Rules:
 - Use only slugs, capability ids and evidence ids that appear in the data. Every slug in buildsOnSlugs needs at least one of its evidence ids in decision.evidenceIds.
 - Do not invent files, functions or capabilities. Only reference code shown in CODE.
-- Do not repeat something already built (see evidence techniques) or the previousMove.
+- Do not repeat something already built (see evidence techniques), the previousMove or a completedMoves entry. Compare your move against at least one alternative in decision.considered and say why this mechanism is the better step.
 - Forbidden phrases: "one level deeper", "add a test for the new case", "close this gap", "best practices", generic refactors.`;
 
 function renderUser(brief: Row): string {
@@ -291,10 +290,6 @@ function renderUser(brief: Row): string {
     .join("\n\n");
   return `DATA:\n${JSON.stringify(data)}\n\nCODE (the only code you may quote):\n${blocks || "(none)"}`;
 }
-
-
-
-
 
 const GENERIC =
   /one level deeper|add a test for the new case|close this gap|best practices?|refactor for (clarity|readability)|improve (the )?(error handling|performance|code quality)/i;
@@ -336,6 +331,15 @@ function readDraft(raw: Row | null): Draft | null {
         str(d.capabilityId) && str(d.capabilityId) !== "null"
           ? str(d.capabilityId)
           : null,
+      approachSlug:
+        str(d.approachSlug) && str(d.approachSlug) !== "null"
+          ? str(d.approachSlug)
+          : null,
+      basis: {
+        observed: str((d.basis as Row | undefined)?.observed),
+        inferred: str((d.basis as Row | undefined)?.inferred),
+        missing: str((d.basis as Row | undefined)?.missing),
+      },
       buildsOnSlugs: strList(d.buildsOnSlugs, 4),
       gapSlugs: strList(d.gapSlugs, 4),
       why: str(d.why),
@@ -376,7 +380,6 @@ function validate(
       `decision.focusSlug "${d.focusSlug}" is not a topic slug in the data`,
     );
 
-  
   const seedSlugs = result.resolution.seeds.map((s) => s.slug);
   if (
     result.resolution.method !== "domain" &&
@@ -414,12 +417,40 @@ function validate(
       );
   }
   if (d.why.length < 30) errors.push("decision.why is missing or too short");
+
+  // approach-aware: the move must name the approach it changes
+  const focusApproaches = topics.get(d.focusSlug)?.depth.approaches ?? [];
+  if (d.approachSlug) {
+    if (!focusApproaches.some((a) => a.slug === d.approachSlug))
+      errors.push(
+        `decision.approachSlug "${d.approachSlug}" is not an approach of ${d.focusSlug} in the data (${focusApproaches.map((a) => a.slug).join(", ") || "none assessed"}); use null when adding a new approach`,
+      );
+  } else if (focusApproaches.length && d.basis.missing.length < 15) {
+    errors.push(
+      "the focus topic has assessed approaches: set decision.approachSlug to the one you change, or use null and name the absent approach in decision.basis.missing",
+    );
+  }
+  // observed vs inferred vs missing, with evidence ids behind the observation
+  const observedIds = (d.basis.observed.match(/\bE\d+\b/gi) ?? []).map((x) =>
+    x.toUpperCase(),
+  );
+  if (d.basis.observed.length < 20 || !observedIds.length)
+    errors.push(
+      "decision.basis.observed must state what the data shows and cite at least one evidence id (E#)",
+    );
+  else if (observedIds.some((id) => !evidence.has(id)))
+    errors.push(
+      "decision.basis.observed cites an evidence id that is not in the data",
+    );
+  if (d.basis.inferred.length < 15)
+    errors.push(
+      "decision.basis.inferred must state what you conclude from the observation",
+    );
   if (!d.considered.length)
     errors.push(
       "decision.considered must list at least one alternative you weighed, with whyNot",
     );
 
-  
   const code = codeBy.get(c.existingEvidenceId);
   if (!code)
     errors.push(
@@ -472,7 +503,6 @@ function validate(
       `files mentioned that are not in the evidence: ${stray.slice(0, 3).join(", ")}`,
     );
 
-  
   if (
     result.evidence.some(
       (e) => e.technique && nearDuplicate(t.objective, e.technique),
@@ -486,13 +516,16 @@ function validate(
     nearDuplicate(t.objective, result.previousMove.title)
   )
     errors.push("the objective repeats the previously proposed move");
+  const repeated = result.completedMoves.find(
+    (m) => m.title && nearDuplicate(t.objective, m.title),
+  );
+  if (repeated)
+    errors.push(
+      `the objective repeats a mission the developer already verified ("${clip(repeated.title, 80)}")`,
+    );
 
   return errors.length ? { ok: false, errors } : { ok: true, draft };
 }
-
-
-
-
 
 const MAP_SYSTEM = `Pick the topics from the list that best match the developer's goal.
 Reply with JSON only: {"slugs":["slug1","slug2"]}
@@ -542,10 +575,6 @@ async function mapWishWithLlm(
   }
 }
 
-
-
-
-
 const MAX_ATTEMPTS = 3;
 
 export async function planGoal(
@@ -580,7 +609,6 @@ export async function planGoal(
     };
   };
 
-  
   if (!wish && !goalTopics?.length) {
     const rows = await graph.query(
       `MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment)-[:OF_TOPIC]->(t:Topic)
@@ -596,7 +624,6 @@ export async function planGoal(
     );
   }
 
-  
   let t0 = Date.now();
   let result = await buildGoalGraph(graph, {
     developerId: input.developerId,
@@ -650,7 +677,6 @@ export async function planGoal(
     ranking: result.ranking,
   };
 
-  
   if (!result.code.length) {
     notes.push(
       result.evidence.length
@@ -681,8 +707,6 @@ export async function planGoal(
       ],
     });
 
-  
-  
   const user = renderUser(briefForAgent(result));
   let previous = "";
   let errors: string[] = [];
@@ -730,7 +754,6 @@ export async function planGoal(
       errors,
     });
 
-  
   const { decision, challenge, task: t } = draft;
   const topic = result.topics.find((x) => x.slug === decision.focusSlug)!;
   const anchor = result.evidence.find(
@@ -760,6 +783,19 @@ export async function planGoal(
       domain: topic.domain,
       level: topic.depth.level,
     },
+    approach: (() => {
+      const a = topic.depth.approaches.find(
+        (x) => x.slug === decision.approachSlug,
+      );
+      return a
+        ? {
+            slug: a.slug,
+            name: a.name,
+            depth: a.depth,
+            authenticity: a.authenticity,
+          }
+        : null;
+    })(),
     targetCapability: cap
       ? { id: cap.capabilityId, name: cap.capability }
       : null,
@@ -780,7 +816,6 @@ export async function planGoal(
     gapSlugs: decision.gapSlugs,
   };
 
-  
   let stored: NextMoveStored | null = null;
   if (input.persist !== false) {
     t0 = Date.now();

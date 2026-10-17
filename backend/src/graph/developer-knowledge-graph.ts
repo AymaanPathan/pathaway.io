@@ -1483,6 +1483,18 @@ function depthFor(
   return rank >= 3 ? "strong" : rank === 2 ? "implementation" : "usage";
 }
 
+/** A usable range is two positive integers with start <= end; otherwise null. */
+export function validLineRange(
+  start: unknown,
+  end: unknown,
+): { start: number; end: number } | null {
+  const a = Number(start);
+  const b = Number(end);
+  if (!Number.isInteger(a) || !Number.isInteger(b)) return null;
+  if (a < 1 || b < a) return null;
+  return { start: a, end: b };
+}
+
 function buildPermalink(
   fullName: string,
   sha: string,
@@ -1545,12 +1557,33 @@ export function extractDemonstrations(
       .filter((m) => m.pattern.test(modifierCode))
       .map((m) => m.label);
 
-    const windowLines = added.slice(
+    const rawWindow = added.slice(
       Math.max(0, anchorIndex - SNIPPET_LINES_BEFORE),
       anchorIndex + SNIPPET_LINES_AFTER,
     );
-    const startLine = windowLines[0].line;
-    const endLine = windowLines[windowLines.length - 1].line;
+    // Keep only the run around the anchor whose line numbers are close, so a
+    // snippet never spans separate hunks and the range matches the text shown.
+    const anchorPos = rawWindow.findIndex((l) => l === added[anchorIndex]);
+    let lo = anchorPos;
+    let hi = anchorPos;
+    const GAP = 3;
+    while (lo > 0 && rawWindow[lo].line - rawWindow[lo - 1].line <= GAP)
+      lo -= 1;
+    while (
+      hi < rawWindow.length - 1 &&
+      rawWindow[hi + 1].line - rawWindow[hi].line <= GAP
+    )
+      hi += 1;
+    const windowLines = rawWindow.slice(lo, hi + 1);
+    const range = validLineRange(
+      windowLines[0].line,
+      windowLines[windowLines.length - 1].line,
+    );
+    // An invalid range means no line anchor: skip the demonstration rather
+    // than store start_line 0 or end < start.
+    if (!range) continue;
+    const startLine = range.start;
+    const endLine = range.end;
 
     let snippet = dedent(windowLines.map((l) => l.text)).trim();
     if (snippet.length > MAX_SNIPPET_CHARS) {
@@ -4417,6 +4450,8 @@ const DEMONSTRATION_INDEXES: Array<{ label: string; property: string }> = [
   { label: "Capability", property: "id" },
   { label: "CapabilitySchema", property: "id" },
   { label: "Demonstration", property: "id" },
+  { label: "Topic", property: "id" },
+  { label: "Approach", property: "id" },
   { label: "EngineeringContext", property: "id" },
   { label: "Experience", property: "id" },
   { label: "Experience", property: "fingerprint" },
@@ -4750,6 +4785,157 @@ async function storeDemonstrations(
     edgeRows,
     true,
   );
+}
+
+// ============================================================
+// DEMONSTRATION -> TOPIC / APPROACH EVIDENCE LINKS
+//
+// A Demonstration is one concrete piece of implementation evidence. These
+// links attach it to the canonical Topic (and, when it can be attributed, the
+// Approach) it is evidence for, so a topic reaches code WITHOUT depending on
+// the broad Topic -[:MAPS_TO]-> Capability hop at read time.
+//
+//   (Demonstration)-[:EVIDENCE_FOR_TOPIC {source}]->(Topic)
+//   (Demonstration)-[:DEMONSTRATES_APPROACH {source}]->(Approach)
+//
+// Every edge carries reason, confidence, source, build_id and developer_id.
+// There is one edge per (demonstration, target, source), so the depth
+// pipeline ("depth_assessment") and this file ("capability_mapping",
+// "technique_match") never overwrite each other.
+//
+// Attribution rules:
+//   - only implementation / strong demonstrations are linked; a "usage"
+//     match (an import, a config line) is never proof of a topic;
+//   - confidence = mapping weight x depth factor, so a loose mapping stays a
+//     low-confidence link that readers can threshold;
+//   - an approach link needs the demonstration's technique to name the
+//     approach exactly; the depth pipeline adds the cited, LLM-judged links.
+// ============================================================
+
+const TOPIC_LINK_MIN_WEIGHT = 0.3;
+const TOPIC_LINK_SOURCES = ["capability_mapping", "technique_match"];
+
+export interface TopicLinkResult {
+  topicLinks: number;
+  approachLinks: number;
+  removedStale: number;
+}
+
+export async function linkDemonstrationsToTopics(
+  graph: Graph,
+  developerId: string,
+  buildId: string,
+): Promise<TopicLinkResult> {
+  const now = new Date().toISOString();
+  const result: TopicLinkResult = {
+    topicLinks: 0,
+    approachLinks: 0,
+    removedStale: 0,
+  };
+
+  try {
+    // 1) Demonstration -> Topic through the validated capability mapping.
+    const linked = await queryRows(
+      graph,
+      `
+      MATCH (d:Developer {id: $developer_id})-[:DEMONSTRATED]->(x:Demonstration)
+            -[:OF_CAPABILITY]->(c:Capability)<-[m:MAPS_TO]-(t:Topic)
+      WHERE coalesce(x.depth_rank, 0) >= 2 AND coalesce(m.weight, 0) >= $min_weight
+      MERGE (x)-[r:EVIDENCE_FOR_TOPIC {source: "capability_mapping"}]->(t)
+      SET r.developer_id = $developer_id,
+          r.topic_slug = t.slug,
+          r.capability_id = c.id,
+          r.confidence = m.weight * CASE WHEN x.depth_rank >= 3 THEN 1.0 ELSE 0.8 END,
+          r.reason = CASE WHEN coalesce(m.reason, "") <> "" THEN m.reason
+                          ELSE "Capability " + c.id + " maps to topic " + t.slug END,
+          r.build_id = $build_id,
+          r.updated_at = $now
+      RETURN count(r) AS n
+      `,
+      {
+        developer_id: developerId,
+        build_id: buildId,
+        min_weight: TOPIC_LINK_MIN_WEIGHT,
+        now,
+      },
+    );
+    result.topicLinks = safeNumber(linked[0]?.n);
+
+    // 2) Demonstration -> Approach where the technique names the approach.
+    const candidates = await queryRows(
+      graph,
+      `
+      MATCH (x:Demonstration)-[e:EVIDENCE_FOR_TOPIC {source: "capability_mapping"}]->(t:Topic)
+            <-[:APPROACH_OF]-(ap:Approach)
+      WHERE e.developer_id = $developer_id AND e.build_id = $build_id
+      RETURN x.id AS id, x.technique AS technique, ap.id AS approach_id,
+             ap.slug AS approach_slug, ap.name AS approach_name,
+             t.slug AS topic_slug, e.confidence AS confidence
+      `,
+      { developer_id: developerId, build_id: buildId },
+    );
+    const approachRows = candidates
+      .filter((r) => {
+        const technique = slugify(safeString(r.technique));
+        return (
+          technique !== "" &&
+          (technique === safeString(r.approach_slug) ||
+            technique === slugify(safeString(r.approach_name)))
+        );
+      })
+      .map((r) => ({
+        id: safeString(r.id),
+        approach_id: safeString(r.approach_id),
+        topic_slug: safeString(r.topic_slug),
+        confidence: Math.min(0.7, safeNumber(r.confidence)),
+        reason: `Technique "${safeString(r.technique)}" matches approach "${safeString(r.approach_name)}"`,
+      }));
+    if (approachRows.length) {
+      result.approachLinks = await runCounted(
+        graph,
+        "DEMONSTRATES_APPROACH (technique match)",
+        `
+        UNWIND $batch AS item
+        MATCH (x:Demonstration {id: item.id})
+        MATCH (ap:Approach {id: item.approach_id})
+        MERGE (x)-[r:DEMONSTRATES_APPROACH {source: "technique_match"}]->(ap)
+        SET r.developer_id = $developer_id, r.topic_slug = item.topic_slug,
+            r.confidence = item.confidence, r.reason = item.reason,
+            r.build_id = $build_id, r.updated_at = $now
+        RETURN count(r) AS n
+        `,
+        approachRows,
+        { developer_id: developerId, build_id: buildId, now },
+      );
+    }
+
+    // 3) Stale links from earlier builds (only the sources written here).
+    const removed = await queryRows(
+      graph,
+      `
+      MATCH (x:Demonstration)-[r:EVIDENCE_FOR_TOPIC|DEMONSTRATES_APPROACH]->()
+      WHERE r.developer_id = $developer_id
+        AND r.source IN $sources
+        AND coalesce(r.build_id, "") <> $build_id
+      DELETE r
+      RETURN count(r) AS n
+      `,
+      {
+        developer_id: developerId,
+        build_id: buildId,
+        sources: TOPIC_LINK_SOURCES,
+      },
+    );
+    result.removedStale = safeNumber(removed[0]?.n);
+  } catch (error) {
+    // Links are derived data. A failure must not fail the evidence build.
+    log("topic evidence linking failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  log("topic evidence links written", result as unknown as AnyObject);
+  return result;
 }
 
 async function storeDemonstrationUsage(
@@ -5186,6 +5372,17 @@ export async function buildOverviewIntelligenceGraph(
   );
   await cleanupStaleExperiences(graph, developerId, buildId);
 
+  // Attach implementation evidence to canonical topics / approaches. Topic
+  // nodes come from the depth pipeline, so on a first run this finds nothing
+  // and the links appear on the next build (or when the depth pipeline calls
+  // linkDemonstrationsToTopics after writing its mappings).
+  const topicLinks = await linkDemonstrationsToTopics(
+    graph,
+    developerId,
+    buildId,
+  );
+  onProgress("overview_graph_topic_links", { ...topicLinks });
+
   const skillRepositoryRelations = await storeSkillRepositoryRelations(
     graph,
     developerId,
@@ -5427,9 +5624,11 @@ export async function getCapabilityEvidence(
     depth: (safeString(row.depth) || "usage") as DemonstrationDepth,
     repository: safeString(row.repository),
     path: safeString(row.path),
-    startLine: safeNumber(row.start_line),
-    endLine: safeNumber(row.end_line),
-    permalink: safeString(row.permalink),
+    startLine: validLineRange(row.start_line, row.end_line)?.start ?? 0,
+    endLine: validLineRange(row.start_line, row.end_line)?.end ?? 0,
+    permalink: validLineRange(row.start_line, row.end_line)
+      ? safeString(row.permalink)
+      : "",
     commitSha: safeString(row.commit_sha),
     commitSubject: safeString(row.commit_subject),
     changeIntent: safeString(row.change_intent),

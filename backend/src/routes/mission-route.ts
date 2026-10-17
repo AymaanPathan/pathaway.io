@@ -20,6 +20,7 @@ import {
 import { githubInspector } from "../service/mission-repo.service.js";
 import { getGithubToken } from "../auth/github-oauth.js";
 import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
+import { onTopicsChanged } from "./topics-route.js";
 
 const LOG = "[mission-routes]";
 const IS_PROD = process.env.NODE_ENV === "production";
@@ -368,6 +369,10 @@ export function missionRoutes(deps: MissionDeps): Router {
           capabilityRollupsUpdated:
             run.learning.learning?.capabilityRollupsUpdated ?? 0,
         });
+        // verified work changed the graph: drop the cached topics dossier so
+        // the topics and goal views read the new evidence immediately
+        if ((run.learning.learning?.accepted ?? 0) > 0)
+          onTopicsChanged(developerId);
       }
       res.json({ run });
     }),

@@ -9,6 +9,7 @@ import {
   getGithubAccessToken,
   humanizeSkillStage,
   humanizeOverviewStage,
+  refreshDepthGraph,
 } from "./route-context.js";
 
 export const onboardingRouter = Router();
@@ -125,7 +126,18 @@ onboardingRouter.get(
           }),
       );
 
-      // 4 + 5. Journey index and a light verification, in parallel
+      // 4. Topic graph: topics, approaches and depth assessments backed by the
+      // evidence above. Goal planning and topic chat read this. Skipped when
+      // the developer's assessments are already current, so logging in again
+      // does not re-run the model.
+      const depth = await refreshDepthGraph(
+        graph,
+        developer.developerId,
+        send,
+        { force: false },
+      );
+
+      // 5 + 6. Journey index and a light verification, in parallel
       send("journey-graph:schema", {
         message: "Preparing journey search index on capabilities",
       });
@@ -172,7 +184,11 @@ onboardingRouter.get(
 
       send("complete", {
         message:
-          "GitHub data synced and the knowledge, journey, depth and topic graphs are ready.",
+          depth.status === "failed"
+            ? "GitHub data synced and the knowledge and journey graphs are ready. Topic analysis did not finish; run it again from the topics page."
+            : "GitHub data synced and the knowledge, journey, depth and topic graphs are ready.",
+        depth: depth.status,
+        topics: depth.status === "failed" ? 0 : depth.topics,
       });
     } catch (err) {
       console.error(err);

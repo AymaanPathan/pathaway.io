@@ -12,8 +12,6 @@ import {
 } from "../service/mission-repo.service.js";
 import { validateMission } from "../evaluations/mission-validator.service.js";
 
-
-
 export interface PlanMissionInput {
   saved: SavedMove;
   inspection: RepoInspection;
@@ -56,6 +54,8 @@ How to write the mission:
 7. grounding.observedNow is a VERBATIM fragment (12-140 chars) copied from the current code excerpt. grounding.gapStillOpen explains why the gap still exists today, using ONLY the evidence and the gapCheck you were given. If gapCheck.dependencyHits or gapCheck.pathHits is non-empty, do not claim the library or capability is missing; say what the code actually shows.
 8. contract: the decisions the developer must not have to guess, because our tests rely on them. "library" is the npm package the move requires, or null when none. "decisions" has 3 to 8 items covering, as far as they apply: the library or mechanism, exported function names and signatures our tests will import, the data or key format, serialization, lifetime/TTL, who owns the connection or resource lifecycle, error behaviour, and what any clear/reset/delete operation means. Each decision is concrete (a format, a value, a rule), not advice.
 9. expectedSkills says what in the diff will show the capability.
+10. Preserve the evidence chain: selected approach -> observed limitation -> implementation change -> verifiable acceptance criteria. savedMove.approach names the approach the goal agent chose (null when the move adds one the developer has not built); savedMove.mechanism and savedMove.limitation say what the code shows. Your title, steps and criteria must change THAT mechanism and name it. Never pick another approach, topic or capability, and never claim the capability is missing when gapCheck shows hits.
+11. Do not repeat finished work: earlierMissions lists every mission already given, and verifiedMissions lists the ones the developer completed and had verified. Never repeat or lightly reword one.
 Do not invent files, functions, endpoints or capabilities. Do not repeat what the developer already built or an earlier mission. Forbidden phrases: "one level deeper", "add a test for the new case", "close this gap", "best practices", generic refactors. Never write a shell command.
 
 Reply with JSON only, exactly this shape:
@@ -104,6 +104,9 @@ function renderUser(input: PlanMissionInput): string {
       limitation: challenge.limitation ?? "",
       doneWhen: saved.doneWhen,
       stepsFromGoalAgent: saved.details.steps ?? [],
+      approach: decision.approachSlug ?? null,
+      evidenceBasis: decision.basis ?? null,
+      alternativesConsidered: decision.considered ?? [],
       focusTopic: saved.focusSlug,
       gapTopics: saved.gapSlugs,
       builtOnTopics: saved.strengthSlugs,
@@ -136,6 +139,9 @@ function renderUser(input: PlanMissionInput): string {
     earlierMissions: previousMissions
       .filter((m) => m.status !== "abandoned")
       .map((m) => m.spec.title),
+    verifiedMissions: previousMissions
+      .filter((m) => m.verificationState === "verified")
+      .map((m) => m.spec.title),
   };
   return `DATA:\n${JSON.stringify(data)}\n\nCURRENT CODE ${inspection.startPath} (the only code you may quote)\n\`\`\`\n${inspection.excerpt}\n\`\`\``;
 }
@@ -159,7 +165,6 @@ async function callLlm(
     clearTimeout(timer);
   }
 }
-
 
 function readContract(parsed: unknown): {
   contract: MissionContract | null;
@@ -188,6 +193,33 @@ function readContract(parsed: unknown): {
   return { contract: { library, decisions }, errors: [] };
 }
 
+/** The mission must not switch capability: a non-null expected skill has to include the saved one. */
+function capabilityKept(spec: MissionSpec, saved: SavedMove): string[] {
+  if (!saved.capability) return [];
+  const ids = spec.expectedSkills
+    .map((e) => e.capabilityId)
+    .filter((id): id is string => Boolean(id));
+  if (ids.length === 0 || ids.includes(saved.capability.id)) return [];
+  return [
+    `expectedSkills must advance the saved capability "${saved.capability.id}", not ${ids.join(", ")}`,
+  ];
+}
+
+/** The mission text must name the mechanism the goal agent selected (its own wording, not a new one). */
+function mechanismPreserved(spec: MissionSpec, saved: SavedMove): string[] {
+  const challenge = (saved.details.challenge ?? {}) as Row;
+  const mechanism = text(challenge.mechanism).toLowerCase();
+  const tokens = [...new Set(mechanism.match(/[a-z][a-z0-9_-]{4,}/g) ?? [])];
+  if (tokens.length === 0) return [];
+  const body = [spec.title, spec.objective, ...spec.steps]
+    .join(" ")
+    .toLowerCase();
+  return tokens.some((t) => body.includes(t))
+    ? []
+    : [
+        `the mission does not name the mechanism the goal agent selected ("${clip(text(challenge.mechanism), 120)}"); change that mechanism, do not choose another`,
+      ];
+}
 
 function criteriaNameMechanism(
   spec: MissionSpec,
@@ -204,7 +236,6 @@ function criteriaNameMechanism(
         `at least 2 acceptance criteria must name "${contract.library}" and assert the interaction with it (found ${naming})`,
       ];
 }
-
 
 function stripTesting(spec: MissionSpec): MissionSpec {
   const modifyPaths = spec.scope.modifyPaths.filter((p) => !TEST_PATH.test(p));
@@ -270,7 +301,12 @@ export async function planMission(
       const mechanismErrors = contract
         ? criteriaNameMechanism(checked.spec, contract)
         : [];
-      const extra = [...contractErrors, ...mechanismErrors];
+      const extra = [
+        ...contractErrors,
+        ...mechanismErrors,
+        ...capabilityKept(checked.spec, input.saved),
+        ...mechanismPreserved(checked.spec, input.saved),
+      ];
       if (extra.length === 0 && contract) {
         notes.push(...checked.warnings.map((w) => `validator: ${w}`));
         return {

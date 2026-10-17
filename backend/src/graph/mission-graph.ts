@@ -16,6 +16,18 @@ import type { Graph } from "../db/falkordb.js";
  *   (Mission)-[:IN_REPOSITORY]->(Repository)
  *   (Mission)-[:EVALUATED_AS]->(Evaluation)
  *   (Developer)-[:DEMONSTRATED]->(Demonstration {source:"mission"})-[:OF_CAPABILITY]->(Capability)
+ *   (Demonstration {source:"mission"})-[:EVIDENCE_FOR_TOPIC {source:"mission_verified"}]->(Topic)
+ *
+ * Three different facts, kept apart (Mission.verification_state):
+ *   assigned   the developer was given the task (proposed / in_progress / submitted)
+ *   evaluated  the code was assessed; the outcome may still be needs_work
+ *   verified   every criterion was met AND verified against the diff, CI did not
+ *              fail or stay pending, and a demonstration exists
+ * Only "verified" writes a Demonstration and reaches the topic pipeline. A
+ * completed verdict alone is never proof of a capability. A later submission
+ * that is no longer verified retracts the demonstration it had produced, and
+ * the affected topic assessment is flagged stale (DepthAssessment.stale) so
+ * only that assessment is recomputed.
  *
  * A Mission keeps a full snapshot of the move it came from, because
  * storeNextMove() replaces the NextMove of a goal when a new one is planned.
@@ -348,6 +360,7 @@ export interface MissionRepoPin {
 }
 
 export interface StoredMission {
+  verificationState: string;
   id: string;
   goalId: string;
   developerId: string;
@@ -997,9 +1010,13 @@ export async function recordEvaluation(
   stored: boolean;
   evaluationId: string;
   demonstrationId: string | null;
+  verification: MissionVerification;
+  /** set when the topic model has new (or retracted) evidence to absorb */
+  topicUpdate: MissionTopicUpdate | null;
 }> {
   const now = new Date().toISOString();
   const evaluationId = `evaluation:${mission.id}:${sha8(ev.headCommit)}`;
+  const verification = verifyEvaluation(ev);
 
   const wrote = await count(
     graph,
@@ -1010,7 +1027,8 @@ export async function recordEvaluation(
     SET e.mission_id = $mid, e.developer_id = $dev, e.verdict = $verdict,
         e.head_commit = $head, e.ci_state = $ci, e.summary = $summary,
         e.results_json = $results, e.scope_warnings_json = $warnings,
-        e.changed_files_json = $files, e.created_at = $now
+        e.changed_files_json = $files, e.created_at = $now,
+        e.verified = $verified, e.verification_reasons_json = $vreasons
     MERGE (m)-[:EVALUATED_AS]->(e)
     RETURN count(e) AS n
     `,
@@ -1025,17 +1043,28 @@ export async function recordEvaluation(
       results: JSON.stringify(ev.results).slice(0, 8000),
       warnings: JSON.stringify(ev.scopeWarnings).slice(0, 2000),
       files: JSON.stringify(ev.changedFiles).slice(0, 4000),
+      verified: verification.verified,
+      vreasons: JSON.stringify(verification.reasons).slice(0, 2000),
       now,
     },
   );
-  if (!wrote) return { stored: false, evaluationId, demonstrationId: null };
+  if (!wrote) {
+    return {
+      stored: false,
+      evaluationId,
+      demonstrationId: null,
+      verification,
+      topicUpdate: null,
+    };
+  }
 
   await query(
     graph,
     "update mission status",
     `MATCH (m:Mission {id: $mid})
      SET m.status = $status, m.submitted_head = $head, m.updated_at = $now,
-         m.completed_at = $completed
+         m.completed_at = $completed, m.verification_state = $vstate,
+         m.verified_at = $verified_at
      RETURN count(m) AS n`,
     {
       mid: mission.id,
@@ -1043,11 +1072,13 @@ export async function recordEvaluation(
       head: ev.headCommit,
       now,
       completed: ev.verdict === "completed" ? now : "",
+      vstate: verification.verified ? "verified" : "evaluated",
+      verified_at: verification.verified ? now : "",
     },
   );
 
   let demonstrationId: string | null = null;
-  if (ev.verdict === "completed" && ev.demonstration) {
+  if (verification.verified && ev.demonstration) {
     const d = ev.demonstration;
     demonstrationId = `demo:${mission.id}`;
     const ok = await count(
@@ -1096,12 +1127,242 @@ export async function recordEvaluation(
       );
   }
 
+  // Hand verified evidence to the topic model; retract it when no longer verified.
+  let topicUpdate: MissionTopicUpdate | null = null;
+  if (demonstrationId && mission.focusSlug) {
+    const linked = await count(
+      graph,
+      "mission evidence for topic",
+      `
+      MATCH (x:Demonstration {id: $xid})
+      MATCH (t:Topic {slug: $slug})
+      MERGE (x)-[r:EVIDENCE_FOR_TOPIC {source: "mission_verified"}]->(t)
+      SET r.developer_id = $dev, r.topic_slug = $slug, r.mission_id = $mid,
+          r.confidence = $confidence, r.reason = $reason,
+          r.build_id = $eid, r.updated_at = $now
+      RETURN count(r) AS n
+      `,
+      {
+        xid: demonstrationId,
+        slug: mission.focusSlug,
+        dev: mission.developerId,
+        mid: mission.id,
+        confidence: MISSION_LINK_CONFIDENCE,
+        reason: clipText(
+          `Verified mission "${mission.spec.title}": ${ev.results.length} criteria met on ${ev.headCommit.slice(0, 8)}`,
+          300,
+        ),
+        eid: evaluationId,
+        now,
+      },
+    );
+    topicUpdate = {
+      developerId: mission.developerId,
+      topicSlug: mission.focusSlug,
+      capabilityId: ev.demonstration?.capabilityId ?? mission.capabilityId,
+      demonstrationId,
+      missionId: mission.id,
+      linked: linked > 0,
+    };
+    await markTopicAssessmentStale(
+      graph,
+      mission.developerId,
+      mission.focusSlug,
+      `verified mission ${mission.id}`,
+    );
+  } else if (!verification.verified) {
+    const retracted = await count(
+      graph,
+      "retract mission demonstration",
+      `
+      MATCH (x:Demonstration {id: $xid})
+      WHERE x.source = "mission"
+      WITH x, 1 AS one
+      DETACH DELETE x
+      RETURN sum(one) AS n
+      `,
+      { xid: `demo:${mission.id}` },
+    );
+    if (retracted > 0 && mission.focusSlug) {
+      await markTopicAssessmentStale(
+        graph,
+        mission.developerId,
+        mission.focusSlug,
+        `mission ${mission.id} is no longer verified`,
+      );
+      topicUpdate = {
+        developerId: mission.developerId,
+        topicSlug: mission.focusSlug,
+        capabilityId: mission.capabilityId,
+        demonstrationId: null,
+        missionId: mission.id,
+        linked: false,
+      };
+    }
+  }
+
   log("evaluation recorded", {
     missionId: mission.id,
     verdict: ev.verdict,
+    verified: verification.verified,
     demonstration: demonstrationId,
+    topicUpdate: topicUpdate?.topicSlug ?? null,
   });
-  return { stored: true, evaluationId, demonstrationId };
+  return {
+    stored: true,
+    evaluationId,
+    demonstrationId,
+    verification,
+    topicUpdate,
+  };
+}
+
+// ------------------------------------------------------------
+// verification: assigned -> evaluated -> verified
+// ------------------------------------------------------------
+
+export type VerificationState = "assigned" | "evaluated" | "verified";
+
+export interface MissionVerification {
+  state: "evaluated" | "verified";
+  verified: boolean;
+  /** why a completed verdict was or was not accepted as proof */
+  reasons: string[];
+}
+
+/** What the topic pipeline needs to absorb (or drop) one mission's evidence. */
+export interface MissionTopicUpdate {
+  developerId: string;
+  topicSlug: string;
+  capabilityId: string | null;
+  /** null when previously verified evidence was retracted */
+  demonstrationId: string | null;
+  missionId: string;
+  /** false when the Topic node does not exist yet (the depth run will create it) */
+  linked: boolean;
+}
+
+/** Confidence given to a mission-verified link; below a long track record, above a keyword match. */
+const MISSION_LINK_CONFIDENCE = 0.8;
+
+/**
+ * A mission is verified only when the whole implementation contract holds:
+ * a completed verdict, at least one criterion, every criterion met AND
+ * verified against the diff (the quote was found, the check's preconditions
+ * held), CI neither failed nor pending, and a demonstration to attach.
+ * Pure function: no database access.
+ */
+export function verifyEvaluation(ev: EvaluationRecord): MissionVerification {
+  const reasons: string[] = [];
+  if (ev.verdict !== "completed") reasons.push("the verdict is not completed");
+  if (ev.results.length === 0) reasons.push("no criteria were evaluated");
+  const unmet = ev.results.filter((r) => !r.met).length;
+  if (unmet > 0) reasons.push(`${unmet} criteria are not met`);
+  const unverified = ev.results.filter((r) => r.met && !r.verified).length;
+  if (unverified > 0)
+    reasons.push(
+      `${unverified} met criteria are not verified against the diff`,
+    );
+  if (ev.ciState === "failure") reasons.push("CI failed");
+  if (ev.ciState === "pending") reasons.push("CI is still pending");
+  if (!ev.demonstration)
+    reasons.push("no demonstration was extracted from the code");
+  const verified = reasons.length === 0;
+  return {
+    state: verified ? "verified" : "evaluated",
+    verified,
+    reasons: verified
+      ? ["all criteria met and verified, CI acceptable, evidence extracted"]
+      : reasons,
+  };
+}
+
+/** Flags the developer's assessment of a topic so only it is recomputed. */
+export async function markTopicAssessmentStale(
+  graph: Graph,
+  developerId: string,
+  topicSlug: string,
+  reason: string,
+): Promise<number> {
+  return count(
+    graph,
+    "mark topic assessment stale",
+    `
+    MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment {topic_slug: $slug})
+    SET a.stale = true, a.stale_reason = $reason, a.stale_at = $now
+    RETURN count(a) AS n
+    `,
+    {
+      dev: developerId,
+      slug: topicSlug,
+      reason: clipText(reason, 200),
+      now: new Date().toISOString(),
+    },
+  );
+}
+
+/** Topic slugs whose assessment is flagged stale: the only ones to recompute. */
+export async function readStaleTopicAssessments(
+  graph: Graph,
+  developerId: string,
+): Promise<Array<{ topicSlug: string; reason: string; staleAt: string }>> {
+  const result = await query(
+    graph,
+    "stale topic assessments",
+    `
+    MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment)
+    WHERE a.stale = true
+    RETURN a.topic_slug AS slug, coalesce(a.stale_reason, "") AS reason,
+           coalesce(a.stale_at, "") AS stale_at
+    ORDER BY a.stale_at
+    `,
+    { dev: developerId },
+  );
+  return (result ?? []).map((r) => ({
+    topicSlug: str(r.slug),
+    reason: str(r.reason),
+    staleAt: str(r.stale_at),
+  }));
+}
+
+/** Verified missions with their evidence, optionally for one topic. */
+export async function readVerifiedMissions(
+  graph: Graph,
+  developerId: string,
+  topicSlug?: string,
+): Promise<
+  Array<{
+    missionId: string;
+    topicSlug: string;
+    capabilityId: string;
+    demonstrationId: string;
+    verifiedAt: string;
+  }>
+> {
+  const result = await query(
+    graph,
+    "verified missions",
+    `
+    MATCH (:Developer {id: $dev})-[:ASSIGNED]->(m:Mission {verification_state: "verified"})
+    MATCH (x:Demonstration)
+    WHERE x.id = "demo:" + m.id
+    OPTIONAL MATCH (m)-[:FOCUSES_ON]->(t:Topic)
+    WITH m, x, t
+    WHERE $slug = "" OR t.slug = $slug
+    RETURN m.id AS id, coalesce(t.slug, "") AS slug,
+           coalesce(m.capability_id, "") AS capability_id, x.id AS demo_id,
+           coalesce(m.verified_at, "") AS verified_at
+    ORDER BY m.verified_at DESC
+    `,
+    { dev: developerId, slug: topicSlug ?? "" },
+  );
+  return (result ?? []).map((r) => ({
+    missionId: str(r.id),
+    topicSlug: str(r.slug),
+    capabilityId: str(r.capability_id),
+    demonstrationId: str(r.demo_id),
+    verifiedAt: str(r.verified_at),
+  }));
 }
 
 /** Remembers the developer's fork + working branch on the Mission node. */
