@@ -2,7 +2,7 @@ import { Router, type Response } from "express";
 import { getGraphForDeveloper } from "../db/falkordb.js";
 import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
 import {
-  createNvidiaLlm,
+  createCerebrasLlm,
   type DepthLlm,
 } from "../agents/depth-analyzer-agent.js";
 import {
@@ -38,7 +38,7 @@ let llm: DepthLlm | null | undefined;
 function chatLlm(): DepthLlm | null {
   if (llm !== undefined) return llm;
   try {
-    llm = createNvidiaLlm({
+    llm = createCerebrasLlm({
       timeoutMs: Number(process.env.TOPIC_CHAT_TIMEOUT_MS) || 30_000,
       maxRetries: Number(process.env.TOPIC_CHAT_RETRIES) || 1,
     });

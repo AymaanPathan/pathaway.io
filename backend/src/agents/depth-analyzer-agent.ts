@@ -1,5 +1,5 @@
 import type { Graph } from "../db/falkordb.js";
-import { nvidia, NVIDIA_MODEL } from "../ai-models/nvidia-nemotron-3.5.js";
+import { cerebras, CEREBRAS_MODEL } from "../ai-models/cerebras.js";
 import {
   DEPTH_BANDS,
   DEPTH_RANK,
@@ -81,10 +81,6 @@ const envNum = (name: string, fallback: number): number => {
     : fallback;
 };
 
-
-
-
-
 export interface DepthLlmRequest {
   stage: "discover" | "judge" | "synthesize" | "explain";
   system: string;
@@ -93,15 +89,12 @@ export interface DepthLlmRequest {
   temperature?: number;
 }
 
-
 export interface DepthLlm {
   readonly model: string;
   completeJson(request: DepthLlmRequest): Promise<unknown>;
 }
 
-
 export class LlmTransportError extends Error {}
-
 
 export class LlmOutputError extends Error {
   constructor(
@@ -112,7 +105,6 @@ export class LlmOutputError extends Error {
     super(message);
   }
 }
-
 
 function repairJson(s: string): string {
   let inStr = false;
@@ -146,7 +138,6 @@ function repairJson(s: string): string {
   return body + safeStack.reverse().join("");
 }
 
-
 export function extractJson(text: string): unknown {
   let cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
   const lastClose = cleaned.toLowerCase().lastIndexOf("</think>");
@@ -163,7 +154,7 @@ export function extractJson(text: string): unknown {
     try {
       return JSON.parse(cleaned.slice(start, end + 1));
     } catch {
-      
+      // fall through to repair
     }
   }
   return JSON.parse(repairJson(cleaned.slice(start)));
@@ -176,7 +167,6 @@ function retryAfterMs(err: any): number | null {
   return Number.isFinite(secs) && secs > 0 ? secs * 1000 : null;
 }
 
-
 type LlmFactoryOptions = {
   model?: string;
   timeoutMs?: number;
@@ -187,7 +177,7 @@ type LlmFactoryOptions = {
 };
 
 function createOpenAiLlm(
-  client: typeof nvidia,
+  client: typeof cerebras,
   defaultModel: string,
   options: {
     model?: string;
@@ -205,8 +195,6 @@ function createOpenAiLlm(
     options.jsonMode ?? process.env.DEPTH_LLM_JSON_MODE === "true";
   const thinking =
     options.thinking ?? process.env.DEPTH_LLM_THINKING === "true";
-  
-  
   const systemPrefix =
     options.systemPrefix ?? process.env.DEPTH_LLM_SYSTEM_PREFIX ?? "";
 
@@ -302,15 +290,13 @@ function createOpenAiLlm(
   };
 }
 
-export function createNvidiaLlm(options: LlmFactoryOptions = {}): DepthLlm {
-  return createOpenAiLlm(nvidia, NVIDIA_MODEL, options);
+export function createCerebrasLlm(options: LlmFactoryOptions = {}): DepthLlm {
+  return createOpenAiLlm(cerebras, CEREBRAS_MODEL, options);
 }
-
 
 export function createDepthLlmFromEnv(): DepthLlm {
-  return createNvidiaLlm();
+  return createCerebrasLlm();
 }
-
 
 class LlmGateway {
   calls = 0;
@@ -332,7 +318,6 @@ class LlmGateway {
     return this.llm.model;
   }
 
-  
   get open(): boolean {
     return this.breaker > 0 && this.consecutiveFailures >= this.breaker;
   }
@@ -425,7 +410,6 @@ class LlmGateway {
           continue;
         }
 
-        
         if (attempt === 2) break;
         current = {
           ...request,
@@ -470,13 +454,7 @@ async function mapPool<T, R>(
   return results;
 }
 
-
-
-
-
-
 type InferableDomain = Exclude<TopicDomain, "general">;
-
 
 const DOMAIN_ORDER: InferableDomain[] = [
   "mobile",
@@ -486,7 +464,6 @@ const DOMAIN_ORDER: InferableDomain[] = [
   "frontend",
   "backend",
 ];
-
 
 const DOMAIN_TERMS: Record<InferableDomain, string[]> = {
   mobile: [
@@ -653,7 +630,6 @@ const DOMAIN_TERMS: Record<InferableDomain, string[]> = {
   ],
 };
 
-
 const DOMAIN_MIN_SCORE = 2;
 
 function tokenSet(texts: string[]): Set<string> {
@@ -681,7 +657,6 @@ export interface DomainEvidence {
   capabilityNames?: string[];
   technologies?: string[];
 }
-
 
 export function inferDomain(e: DomainEvidence): TopicDomain {
   const groups: Array<{ tokens: Set<string>; weight: number }> = [
@@ -712,10 +687,6 @@ export function inferDomain(e: DomainEvidence): TopicDomain {
   return bestScore >= DOMAIN_MIN_SCORE ? best : "general";
 }
 
-
-
-
-
 const DISCOVER_SYSTEM = `You are the topic cartographer of Pathway, a developer-memory system.
 You receive an EVIDENCE ATLAS built from ONE developer's real GitHub code: packages they import, code-signal counters, domain vocabulary taken from their own symbol and file names, groups of atoms that are used together, capabilities/experiences already detected, skills and repository descriptions.
 
@@ -729,13 +700,12 @@ RULES
 5. DOMAIN. "domain" MUST be exactly one of: frontend, backend, database, infrastructure, ai_ml, mobile, general. Use "general" only when the evidence does not point to one of the others.
 6. REUSE. If a topic in existingTopicCatalog is the same concept, reuse its slug exactly and set "reuses_existing" to true. Otherwise invent a stable lowercase snake_case slug.
 7. COVERAGE. A developer with many packages, signals and capabilities has MANY topics. Return AT LEAST "minTopics" topics (never more than "topicLimit") whenever the atlas supports them. Never collapse the whole atlas into one topic. Every capability in the atlas should be covered by some topic through "capability_ids". If "alreadyFound" is non-empty, return ONLY additional, distinct topics that are not in it. Order topics by how much evidence supports them.
-8. RELATIONS. "builds_on" (up to 3): foundations this topic stands on. "related" (up to 4): sibling topics that are worked on together. EVERY entry is an object {"slug","reason","strength"}. "reason" is ONE concrete sentence of at least 8 words saying WHY, naming the real mechanism (for example "the store holds server responses that the caching layer invalidates after a mutation"). Never write "X builds on Y" as a reason. "strength" is "required" or "helpful". Use slugs from your own answer, "alreadyFound" or the catalog only. Connect every topic to at least one other topic when a real link exists.
+8. RELATIONS. "builds_on" (up to 3): foundations this topic stands on. "related" (up to 4): sibling topics that are worked on together. EVERY entry is an object {"slug","reason","strength"}. "reason" is ONE concrete sentence of at least 8 words saying WHY, naming the real mechanism (for example "the store holds server responses that the caching layer invalidates after a mutation"). Never write "X builds on Y" as a reason. "strength" is "required" or "helpful". Use slugs from your own answer, "alreadyFound" or the catalog only. Connect every topic to at least one other topic when a real link exists. "builds_on" is ONLY for a real prerequisite (you cannot do A well without B). Topics that merely appear together belong in "related", never in "builds_on".
 9. Signals such as async_await or error_handling are generic and fire in almost every file: do not use them as the only support of a topic.
 10. OUTPUT SIZE: be compact. Descriptions are one short sentence. Max 8 keywords per topic and 6 per approach. Output minified JSON on one line, no indentation, no commentary. Do not think out loud: answer with the JSON object only.
 
 Return ONLY this JSON:
 {"topics":[{"slug":"","name":"","domain":"frontend|backend|database|infrastructure|ai_ml|mobile|general","description":"one sentence","aliases":[],"reuses_existing":false,"keywords":[],"packages":[],"signals":[],"capability_ids":[],"builds_on":[{"slug":"","reason":"","strength":"required|helpful"}],"related":[{"slug":"","reason":""}],"approaches":[{"slug":"","name":"","description":"one sentence","packages":[],"signals":[],"keywords":[]}]}]}`;
-
 
 const PROMPT_CAPABILITY_LIMIT = 40;
 
@@ -805,9 +775,6 @@ const cleanKeywords = (list: string[], max = 12): string[] =>
       .filter((k) => k.length >= 3),
   ).slice(0, max);
 
-
-
-
 function buildEvidenceVocabulary(atlas: EvidenceAtlas): Set<string> {
   const vocab = new Set<string>();
   const add = (text: string) => {
@@ -847,18 +814,14 @@ function keywordGrounded(keyword: string, vocab: Set<string>): boolean {
   return false;
 }
 
-
-
 export interface CoverageReport {
   atlasCapabilities: number;
   mappedCapabilities: number;
   unmappedCapabilityIds: string[];
-  
   topicsWithoutCapability: string[];
   topicCount: number;
   topicLimit: number;
   topicLimitReached: boolean;
-  
   complete: boolean;
   notes: string[];
 }
@@ -879,7 +842,6 @@ export interface SanitizeResult {
 export interface DiscoveryResult extends SanitizeResult {
   coverage: CoverageReport;
 }
-
 
 export function computeCoverage(
   atlas: EvidenceAtlas,
@@ -956,7 +918,6 @@ export function sanitizeDiscovery(
   const capNameById = new Map(atlas.capabilities.map((c) => [c.id, c.name]));
   const evidenceVocab = buildEvidenceVocabulary(atlas);
 
-  
   const capByKey = new Map<string, string | null>();
   for (const c of atlas.capabilities) {
     const key = slugify(c.id);
@@ -964,9 +925,6 @@ export function sanitizeDiscovery(
     capByKey.set(key, capByKey.has(key) ? null : c.id);
   }
 
-  
-  
-  
   const catalogByKey = new Map<string, string>();
   for (const c of catalog) {
     catalogByKey.set(slugify(c.slug), c.slug);
@@ -975,7 +933,7 @@ export function sanitizeDiscovery(
   }
   const rawTopics = asObjects(raw.topics);
   const discoveredByKey = new Map<string, string>();
-  
+
   for (const p of prior) {
     discoveredByKey.set(slugify(p.slug), p.slug);
     discoveredByKey.set(slugify(p.name), p.slug);
@@ -1000,7 +958,6 @@ export function sanitizeDiscovery(
     return catalogByKey.get(key) ?? discoveredByKey.get(key) ?? null;
   };
 
-  
   const resolveRelationDetails = (
     value: unknown,
     sourceSlug: string,
@@ -1040,7 +997,6 @@ export function sanitizeDiscovery(
   const topics: TopicSpec[] = [];
   const seen = new Set<string>(prior.map((p) => p.slug));
 
-  
   const atoms = (o: Row, label: string) => {
     const proposedKeywords = cleanKeywords(asList(o.keywords, 16, 40));
     const keywords = proposedKeywords.filter((k) =>
@@ -1089,8 +1045,6 @@ export function sanitizeDiscovery(
 
     const topicAtoms = atoms(t, slug);
 
-    
-    
     const capabilityIds: string[] = [];
     const rejectedCaps: string[] = [];
     for (const id of asList(t.capability_ids, 8, 80)) {
@@ -1156,9 +1110,6 @@ export function sanitizeDiscovery(
       });
     }
 
-    
-    
-    
     const proposedDomain = asStr(t.domain, 40);
     const normalizedDomain = asTopicDomain(proposedDomain);
     let domain: TopicDomain;
@@ -1229,7 +1180,6 @@ export function sanitizeDiscovery(
     domainCorrections,
   };
 }
-
 
 export function fallbackTopics(
   atlas: EvidenceAtlas,
@@ -1309,7 +1259,6 @@ export function fallbackTopics(
   return out;
 }
 
-
 async function discoverTopics(
   gateway: LlmGateway,
   atlas: EvidenceAtlas,
@@ -1377,12 +1326,10 @@ async function discoverTopics(
         rejectedKeywords: r.rejectedKeywords.length,
         total: result.topics.length,
       });
-      if (result.topics.length === before) break; 
+      if (result.topics.length === before) break;
     }
   }
 
-  
-  
   const extra = fallbackTopics(atlas, maxTopics, result.topics);
   if (extra.length) {
     usedFallback.push(
@@ -1394,10 +1341,6 @@ async function discoverTopics(
   const coverage = computeCoverage(atlas, result.topics, maxTopics);
   return { ...result, coverage };
 }
-
-
-
-
 
 const JUDGE_SYSTEM = `You are the depth analyzer of Pathway. You judge how deeply ONE developer knows ONE topic, using ONLY the evidence you are given. The evidence was extracted from their own authored code by graph queries; short refs (S1, D1, E1, C1) point to concrete code samples, detector demonstrations, grouped experiences and commits.
 
@@ -1419,13 +1362,21 @@ Signals of real depth: own definitions that match the topic (definedSymbols), ha
 
 APPROACHES. For each approach that has evidence, judge its depth and authenticity separately and explain HOW it was implemented in one or two plain sentences grounded in the samples. Say which approach is primary (most used / most mature).
 
+THREE KINDS OF STATEMENT (never blur them)
+- OBSERVED: the code itself shows it. You MUST cite the ref (S1, D1, E1, C1) of the sample, detection, experience or commit that shows it, and say what that code does (for example "S2 defines its own token-bucket limiter with a reset timer").
+- INFERRED: a reasonable conclusion that no single ref shows (for example "likely understands cache invalidation because it fixed stale reads in C3"). Mark it with the word "inferred".
+- ASSOCIATION: the topic or capability is merely linked to something else in the taxonomy, or only a package is present. Mark it with the word "associated". An association is NEVER evidence of skill and never raises the level.
+In "rationale" write short sentences that start with "Observed:", "Inferred:" or "Associated:" so a reader can tell them apart. Prefer observed claims; give at most one or two inferred ones.
+
+CONFIDENCE reflects BOTH strength and diversity of the evidence, not only quantity. High needs several kinds of evidence (code samples, detector hits, grouped experiences, commits), more than one repository, repeated work over time, and signs of iteration or tests. One repository, one kind of evidence, one burst of commits, or no follow-up work means medium at best. Thin or single-sighting evidence is low.
+
 RULES
-- Judge only from the evidence. Never claim a behaviour you cannot point to. Cite refs for every claim.
+- Judge only from the evidence. Never claim a behaviour you cannot point to. Cite refs for every observed claim.
 - baseline is a deterministic prior computed from counts. You may go above or below it, but explain why in the rationale. You cannot go more than one level above it.
 - Evidence of absence is weak: say what you cannot see instead of assuming.
 - Detectors are heuristics. A pattern match is not proof of quality: read the samples.
 - If evidence is too thin to judge, say so with low confidence and set needs_more_evidence. Only ask when you can name exact packages (from "knownPackages") or keywords that would reveal the missing code.
-- Keep verdict to 2-3 plain sentences a developer would find fair. Keep rationale under 120 words.
+- Keep verdict to 2-3 plain sentences a developer would find fair. Keep rationale under 160 words.
 - Output minified JSON on one line, no indentation, no commentary. Do not think out loud: answer with the JSON object only.
 
 Return ONLY this JSON:
@@ -1595,14 +1546,18 @@ function parseJudgement(raw: Row): Judgement {
   };
 }
 
-
-
 const MAX_LEVEL_BY_AUTHENTICITY: Record<Authenticity, DepthLevel> = {
   genuine_implementation: "deep",
   working_usage: "proficient",
   incidental: "working",
   boilerplate: "surface",
   insufficient_evidence: "surface",
+};
+
+const CONFIDENCE_RANK: Record<Confidence, number> = {
+  high: 3,
+  medium: 2,
+  low: 1,
 };
 
 const rankToLevel = (rank: number): DepthLevel =>
@@ -1627,6 +1582,66 @@ function fallbackAuthenticity(ev: TopicEvidence): Authenticity {
   if (built) return "genuine_implementation";
   if (ev.totals.commits >= 2) return "working_usage";
   return "incidental";
+}
+
+/**
+ * How strong AND how varied the evidence is. Confidence is capped by this, so
+ * a model saying "high" on a single repository or a single kind of evidence is
+ * brought back down. Everything here is read from graph counts, never invented.
+ */
+interface EvidenceStrength {
+  ratio: number;
+  kinds: number;
+  cap: Confidence;
+  reasons: string[];
+}
+
+function evidenceStrength(ev: TopicEvidence): EvidenceStrength {
+  const t = ev.totals;
+  const step = (v: number, steps: number[]) =>
+    steps.filter((s) => v >= s).length;
+
+  const files = step(t.files, [3, 8, 20]);
+  const commits = step(t.commits, [2, 5, 12]);
+  const repos = step(t.repos, [2, 3]);
+  const kindFlags: Array<[string, boolean]> = [
+    ["code samples", ev.samples.length > 0],
+    ["detector hits", ev.demonstrations.length > 0],
+    ["grouped experiences", ev.experiences.length > 0],
+    ["commits", ev.commits.length > 0],
+  ];
+  const kindNames = kindFlags.filter(([, on]) => on).map(([n]) => n);
+  const kinds = kindNames.length;
+  const tests = ev.approaches.some((a) => a.testFiles > 0) ? 1 : 0;
+  const revisits = ev.approaches.some((a) => a.revisitedFiles > 0) ? 1 : 0;
+  const hardening = Math.min(2, ev.hardening.length);
+  const own = ev.baseline.components.ownImplementation ?? 0;
+  const built = own >= 10 ? 2 : own >= 6 ? 1 : 0;
+  const scaffoldPenalty = ev.scaffold.share >= 0.5 ? 2 : 0;
+
+  // max: files 3 + commits 3 + repos 2 + kinds 4 + tests 1 + revisits 1 + hardening 2 + built 2
+  const total =
+    files + commits + repos + kinds + tests + revisits + hardening + built;
+  const ratio = Math.max(0, total - scaffoldPenalty) / 18;
+
+  let cap: Confidence =
+    ratio >= 0.6 && kinds >= 3 && t.commits >= 5
+      ? "high"
+      : ratio >= 0.35
+        ? "medium"
+        : "low";
+  if (t.repos < 2 && cap === "high") cap = "medium";
+
+  const reasons: string[] = [
+    `${t.files} file${t.files === 1 ? "" : "s"}, ${t.commits} commit${t.commits === 1 ? "" : "s"}, ${t.repos} repositor${t.repos === 1 ? "y" : "ies"}`,
+    `${kinds} of 4 evidence kinds${kinds ? ` (${kindNames.join(", ")})` : ""}`,
+  ];
+  if (!tests) reasons.push("no related tests seen");
+  if (!revisits) reasons.push("no file revisited after first write");
+  if (scaffoldPenalty) reasons.push("much of the evidence is scaffold-like");
+  if (t.repos < 2) reasons.push("single-repository evidence cannot be high");
+
+  return { ratio, kinds, cap, reasons };
 }
 
 function reconcile(
@@ -1716,16 +1731,26 @@ function reconcile(
       verdict = `${ev.spec.name}: ${level} (${authenticity}).`;
   }
 
-  
+  // Confidence: the model may lower it, never raise it above what the
+  // strength AND diversity of the evidence supports.
+  let confidenceNote = "";
   if (ev.matched) {
-    if (ev.totals.files < 3 || ev.totals.commits < 2) confidence = "low";
-    else if (ev.totals.files < 8 && confidence === "high")
-      confidence = "medium";
+    const strength = evidenceStrength(ev);
+    if (ev.totals.files < 3 || ev.totals.commits < 2) {
+      confidence = "low";
+    } else if (CONFIDENCE_RANK[strength.cap] < CONFIDENCE_RANK[confidence]) {
+      guards.push(
+        `confidence lowered from ${confidence} to ${strength.cap}: evidence is not strong and varied enough`,
+      );
+      confidence = strength.cap;
+    }
+    confidenceNote = `[Confidence ${confidence}: ${strength.reasons.join("; ")}]`;
   }
   if (guards.length)
     rationale = `${rationale}${rationale ? " " : ""}[Guard-rails: ${guards.join("; ")}]`;
+  if (confidenceNote)
+    rationale = `${rationale}${rationale ? " " : ""}${confidenceNote}`;
 
-  
   const judged = new Map((judgement?.approaches ?? []).map((a) => [a.slug, a]));
   const withEvidence = ev.approaches.filter((a) => a.files > 0);
 
@@ -1804,7 +1829,6 @@ function reconcile(
     }
   }
 
-  
   let citedKeys = uniq([
     ...(judgement?.evidence ?? []),
     ...records.flatMap((r) => r.evidenceRefs),
@@ -1869,11 +1893,6 @@ function reconcile(
   };
 }
 
-
-
-
-
-
 const isThinEvidence = (ev: TopicEvidence): boolean =>
   ev.totals.files <= 1 && ev.totals.commits <= 1;
 
@@ -1895,7 +1914,6 @@ async function judgeTopic(
   while (true) {
     if (!evidence.matched) return { evidence, judgement: null, refined };
     if (isThinEvidence(evidence)) return { evidence, judgement: null, refined };
-    
     if (gateway.open) return { evidence, judgement: null, refined };
 
     const raw = await gateway.json({
@@ -1954,31 +1972,17 @@ async function judgeTopic(
   }
 }
 
-
-
-
-
 const SYNTH_SYSTEM = `You write a descriptive DEPTH PROFILE from per-topic assessments. Be concrete and fair. Never invent topics.
 Describe observed patterns only. Choose which topics belong in each list; the code orders the lists afterwards from the assessment data (depth, confidence, evidence volume). Do not rank topics yourself. Graph-wide topic ranking and recommendations belong exclusively to FalkorDB graph algorithms and graph traversal; these summary lists are descriptive, not a replacement for that ranking.
 Output minified JSON on one line, no commentary. Do not think out loud: answer with the JSON object only.
 Return ONLY this JSON:
 {"headline":"one sentence","pattern":"2-4 sentences","strongest":["topic_slug"],"broad_but_shallow":["topic_slug"],"deepening":[{"slug":"topic_slug","why":"one sentence"}]}`;
 
-
-
-const CONFIDENCE_RANK: Record<Confidence, number> = {
-  high: 3,
-  medium: 2,
-  low: 1,
-};
-
-
 const evidenceVolume = (r: DepthAssessmentRecord): number =>
   r.stats.files + 2 * r.stats.commits + 3 * r.stats.repos;
 
 const nameOrder = (a: DepthAssessmentRecord, b: DepthAssessmentRecord) =>
   a.topic.name.localeCompare(b.topic.name);
-
 
 export const byStrength = (
   a: DepthAssessmentRecord,
@@ -1990,7 +1994,6 @@ export const byStrength = (
   b.score - a.score ||
   nameOrder(a, b);
 
-
 export const byBreadth = (a: DepthAssessmentRecord, b: DepthAssessmentRecord) =>
   evidenceVolume(b) - evidenceVolume(a) ||
   b.stats.files - a.stats.files ||
@@ -1998,7 +2001,6 @@ export const byBreadth = (a: DepthAssessmentRecord, b: DepthAssessmentRecord) =>
 
 const gapText = (r: DepthAssessmentRecord): string | undefined =>
   r.gaps[0] ?? r.approaches.find((a) => a.gaps.length > 0)?.gaps[0];
-
 
 export const byDeepening = (
   a: DepthAssessmentRecord,
@@ -2012,8 +2014,6 @@ export const byDeepening = (
 export function deterministicSummary(
   records: DepthAssessmentRecord[],
 ): DepthProfileSummary {
-  
-  
   const strongest = records
     .filter((r) => DEPTH_RANK[r.level] >= 3)
     .sort(byStrength)
@@ -2092,7 +2092,6 @@ async function synthesize(
         .filter((r): r is DepthAssessmentRecord => Boolean(r)),
     );
 
-  
   const strongest = pick(raw.strongest, 6)
     .sort(byStrength)
     .map((r) => ({
@@ -2132,33 +2131,18 @@ async function synthesize(
   };
 }
 
-
-
-
-
 export interface DepthAnalyzerOptions {
   llm: DepthLlm;
-  
   maxTopics?: number;
-  
   gatherConcurrency?: number;
-  
   judgeConcurrency?: number;
-  
   llmConcurrency?: number;
-  
   llmTpm?: number;
-  
   llmBreaker?: number;
-  
   maxRefinements?: number;
-  
   synthesize?: boolean;
-  
   persist?: boolean;
-  
   refreshMetrics?: boolean;
-  
   force?: boolean;
   onProgress?: ProgressFn;
 }
@@ -2175,17 +2159,13 @@ export interface RelationReport {
   rejected: RelationRejection[];
 }
 
-
 export interface DepthDiagnostics {
   rejectedCapabilityIds: Array<{ topic: string; capabilityIds: string[] }>;
   rejectedKeywords: Array<{ topic: string; keywords: string[] }>;
   domainCorrections: SanitizeResult["domainCorrections"];
-  
   discoveryCoverage: CoverageReport;
-  
   coverage: CoverageReport;
   rejectedRelations: RelationRejection[];
-  
   storage: {
     mappings: number;
     unresolvedMappings: StoreDepthResult["unresolvedMappings"];
@@ -2208,13 +2188,11 @@ export interface DepthAnalysisResult {
   diagnostics: DepthDiagnostics;
   llmCalls: number;
   llmFailures: string[];
-  
   llmCircuitOpen: boolean;
   usedFallback: string[];
   refinements: number;
   durationMs: number;
 }
-
 
 export function deriveEvidenceRelations(
   specs: TopicSpec[],
@@ -2282,7 +2260,7 @@ export function deriveEvidenceRelations(
     )
       take(p);
   }
-  
+
   for (const s of specs) {
     if ((degree.get(s.slug) ?? 0) > 0) continue;
     const best = pairs.find(
@@ -2300,7 +2278,6 @@ export function deriveEvidenceRelations(
     basis: "evidence_overlap" as const,
   }));
 }
-
 
 export function buildRelationsReport(
   specs: TopicSpec[],
@@ -2336,7 +2313,6 @@ export function buildRelationsReport(
     reason: string,
   ) => rejected.push({ from, to, type, reason });
 
-  
   for (const spec of specs) {
     for (const target of spec.buildsOn) {
       if (target === spec.slug) {
@@ -2455,7 +2431,6 @@ export function buildRelationsReport(
     }
   }
 
-  
   let fromEvidence = 0;
   for (const r of deriveEvidenceRelations(specs, footprints)) {
     const key = [r.from, r.to].sort().join("~");
@@ -2489,8 +2464,6 @@ export function buildRelations(
   return buildRelationsReport(specs, catalog, footprints).relations;
 }
 
-
-
 const discoveryCache = new Map<
   string,
   { fp: string; discovery: DiscoveryResult }
@@ -2520,7 +2493,6 @@ const evidenceFingerprint = (ev: TopicEvidence): string =>
     ev.baseline.score,
   ]);
 
-
 export async function analyzeDeveloperDepth(
   graph: Graph,
   developerId: string,
@@ -2545,12 +2517,10 @@ export async function analyzeDeveloperDepth(
 
   await ensureDepthSchema(graph);
 
-  
   const atlas = await readEvidenceAtlas(graph, developerId, onProgress);
   if (!atlas) throw new Error(`Unknown developer ${developerId}`);
   const catalog = await listTopicCatalog(graph, 200);
 
-  
   onProgress("depth_discovering", { packages: atlas.packages.length });
   const discoveryKey = `${developerId}:${maxTopics}`;
   const fp = atlasFingerprint(atlas);
@@ -2576,7 +2546,6 @@ export async function analyzeDeveloperDepth(
   }
   onProgress("depth_topics_proposed", { count: discovery.topics.length });
 
-  
   const gathered = await mapPool(
     discovery.topics,
     options.gatherConcurrency ?? 6,
@@ -2601,10 +2570,9 @@ export async function analyzeDeveloperDepth(
         reason: "the graph found no matching authored code",
       });
   }
-  
+
   live.sort((a, b) => b.totals.files - a.totals.files);
 
-  
   let refinements = 0;
   const footprints = new Map<string, TopicFootprint>();
   const assessments = await mapPool(
@@ -2659,14 +2627,9 @@ export async function analyzeDeveloperDepth(
       return record;
     },
   );
-  
-  
-  
-  
+
   assessments.sort((a, b) => a.topic.name.localeCompare(b.topic.name));
 
-  
-  
   const finalSpecs = assessments.map((a) => a.spec);
   const coverage = computeCoverage(
     atlas,
@@ -2675,10 +2638,8 @@ export async function analyzeDeveloperDepth(
     discovery.topics,
   );
 
-  
   const relationReport = buildRelationsReport(finalSpecs, catalog, footprints);
 
-  
   const summaryPromise: Promise<DepthProfileSummary> =
     options.synthesize === false
       ? Promise.resolve(deterministicSummary(assessments))
@@ -2766,7 +2727,6 @@ export async function analyzeDeveloperDepth(
   return result;
 }
 
-
 export async function relinkTopicTaxonomy(
   graph: Graph,
   developerId: string,
@@ -2833,7 +2793,6 @@ export async function relinkTopicTaxonomy(
   };
 }
 
-
 export async function reanalyzeTopicDepth(
   graph: Graph,
   developerId: string,
@@ -2892,7 +2851,6 @@ export type {
 };
 export { levelForScore };
 
-
 // ============================================================
 // PLAIN-LANGUAGE EXPLAINER (turns graph facts into a human story)
 // ============================================================
@@ -2904,27 +2862,31 @@ export interface TopicExplanation {
   meaning: string;
   caveat: string;
   followups: string[];
+  /** wording for "observed" proof-ledger entries, keyed by ledger id */
+  items: Array<{ id: string; demonstrates: string; matters: string }>;
+  prerequisiteSummary: string;
+  confidenceNote: string;
 }
 
 const EXPLAIN_SYSTEM = `You are Pathway's explainer. You receive FACTS about ONE topic from a developer's own code and must explain them to a NON-TECHNICAL reader (a recruiter, a manager, or a junior developer).
 
 RULES
-1. Use ONLY the facts given. Never invent projects, numbers, skills, repositories or dates. If a fact is empty or zero, say plainly that nothing was found.
+1. Use ONLY the facts given. Never invent projects, numbers, skills, repositories, files or dates. If a fact is empty or zero, say plainly that nothing was found.
 2. No jargon. Never use these words: PageRank, betweenness, centrality, Cypher, FalkorDB, node, edge, hop, traversal, taxonomy, algorithm, graph query. Say "skill", "real work", "project", "foundation", "related topic" instead.
 3. Short sentences. Write to "you" (the developer) when natural.
 4. Be fair and honest: say what is proven and what is NOT. Low confidence must be stated plainly.
-5. "steps" are 3 or 4 items that walk the reader through the evidence in this order: what was found, which skills it covers, where it fits among other topics, where the work lives. Each text is 1-2 sentences.
+5. "steps" are 3 or 4 items that walk the reader through the evidence in this order: what was found, which skills it covers, where it fits among other topics, where the work lives. Each text is 1-2 sentences. In the skills step, say how many skills are seen in your code, how many are only inferred and how many are only linked.
 6. "meaning" explains in one sentence what the level means for this person. "caveat" is the single most important limit.
 7. "followups" are 3 short questions the reader could ask next about THIS topic.
-8. Output minified JSON on one line. No commentary, no code fences.
+8. PROOF. "proofLedger" lists skills with a class: "observed" (seen in the developer's own code), "inferred" (concluded from the topic rating, no example matched) or "association" (only linked in the topic map). "cited" holds the real code titles, paths and projects. For every ledger entry whose class is "observed" write one item {"id","demonstrates","matters"}: "demonstrates" is ONE sentence saying what the cited work shows, using only the words in "cited" (name the project or file when given); "matters" is ONE sentence on why that is useful evidence. If "practiceOnly" is true say it comes from a practice mission, not from your own project. Do NOT write items for "inferred" or "association" entries, and never describe them as something the developer built or did.
+9. PREREQUISITES. "prerequisitePaths" are genuine foundation chains (each step needs the next). "status" is demonstrated (backed by your code), weak (shallow) or unverified (not assessed). Write "prerequisiteSummary" in 1-2 sentences naming the chain and its weakest link. Never present "usedTogetherWith" as a prerequisite; related topics are only associations.
+10. CONFIDENCE. "confidenceDetail" has the confidence level with its strengths and limits. Write "confidenceNote" as ONE sentence that says why confidence is at that level, using both the amount and the variety of evidence (projects, kinds of evidence, repeat work). Do not contradict the level.
+11. Output minified JSON on one line. No commentary, no code fences.
 
 Return ONLY this JSON:
-{"headline":"one short sentence","summary":"2-3 plain sentences","steps":[{"title":"3-5 words","text":""}],"meaning":"","caveat":"","followups":["","",""]}`;
+{"headline":"one short sentence","summary":"2-3 plain sentences","steps":[{"title":"3-5 words","text":""}],"meaning":"","caveat":"","followups":["","",""],"items":[{"id":"","demonstrates":"","matters":""}],"prerequisiteSummary":"","confidenceNote":""}`;
 
-const explainCache = new Map<
-  string,
-  { at: number; value: TopicExplanation }
->();
+const explainCache = new Map<string, { at: number; value: TopicExplanation }>();
 const EXPLAIN_TTL_MS = 10 * 60_000;
 
 export async function explainTopicEvidence(
@@ -2940,7 +2902,7 @@ export async function explainTopicEvidence(
     stage: "explain",
     system: EXPLAIN_SYSTEM,
     user: `FACTS:\n${JSON.stringify(facts)}`,
-    maxTokens: 1400,
+    maxTokens: 2400,
     temperature: 0.2,
   });
   if (!raw) return null;
@@ -2949,6 +2911,21 @@ export async function explainTopicEvidence(
     .slice(0, 4)
     .map((s) => ({ title: asStr(s.title, 80), text: asStr(s.text, 340) }))
     .filter((s) => s.title && s.text);
+
+  // only ids that exist in the facts we sent, and only observed entries
+  const observedIds = new Set(
+    asObjects(facts.proofLedger)
+      .filter((x) => x.class === "observed")
+      .map((x) => asStr(x.id, 80)),
+  );
+  const items = asObjects(raw.items)
+    .map((x) => ({
+      id: asStr(x.id, 80),
+      demonstrates: asStr(x.demonstrates, 320),
+      matters: asStr(x.matters, 260),
+    }))
+    .filter((x) => x.id && observedIds.has(x.id));
+
   const out: TopicExplanation = {
     headline: asStr(raw.headline, 200),
     summary: asStr(raw.summary, 600),
@@ -2956,6 +2933,9 @@ export async function explainTopicEvidence(
     meaning: asStr(raw.meaning, 300),
     caveat: asStr(raw.caveat, 300),
     followups: asList(raw.followups, 3, 140),
+    items,
+    prerequisiteSummary: asStr(raw.prerequisiteSummary, 360),
+    confidenceNote: asStr(raw.confidenceNote, 300),
   };
   if (!out.headline || !out.summary || out.steps.length < 2) return null;
 

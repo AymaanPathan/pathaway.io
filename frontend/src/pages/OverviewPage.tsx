@@ -97,6 +97,34 @@ const PALETTE = [
 ];
 const PAGE = 8;
 
+/** How each kind of claim is shown: only "observed" is proof. */
+const CLASS_STYLE: Record<
+  string,
+  { label: string; bg: string; color: string; bar: string }
+> = {
+  observed: { label: "Seen in your code", bg: GREEN, color: WHITE, bar: GREEN },
+  inferred: {
+    label: "Inferred, not seen",
+    bg: YELLOW,
+    color: INK,
+    bar: YELLOW,
+  },
+  association: { label: "Linked only", bg: LAVENDER, color: INK, bar: LINE },
+};
+const PREREQ_STYLE: Record<
+  string,
+  { label: string; bg: string; color: string }
+> = {
+  demonstrated: { label: "Backed by your code", bg: GREEN, color: WHITE },
+  weak: { label: "Shallow foundation", bg: YELLOW, color: INK },
+  unverified: { label: "Foundation not assessed", bg: LAVENDER, color: INK },
+};
+const CONF_COLOR: Record<string, string> = {
+  high: GREEN,
+  medium: YELLOW,
+  low: CORAL,
+};
+
 /* -------------------------------------------------------------------------- */
 /* HELPERS                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -117,6 +145,16 @@ const humanize = (s: string) =>
   s ? s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()) : "Other";
 const fix = (v: unknown, d = 3) =>
   v == null || !Number.isFinite(Number(v)) ? "–" : Number(v).toFixed(d);
+const looksLikeCode = (s: string) =>
+  /[{};]|=>|\bfunction\b|\bimport\b|\breturn\b/.test(s);
+
+/** One short label for a citation: title, commit, snippet, then path. */
+const citeLabel = (c: Obj): string =>
+  asString(c.title) ||
+  cut(asString(c.commit), 80) ||
+  (c.snippet ? cut(asString(c.snippet).replace(/\s+/g, " "), 80) : "") ||
+  asString(c.path) ||
+  "Cited work";
 
 function timeAgo(value?: string) {
   if (!value) return "";
@@ -439,24 +477,42 @@ function localAnswer(q: string, c: ChatCtx): { text: string; slugs: string[] } {
     /evidence|support|why|prove|proof|demonstrat|justif|rated|rate\b/.test(s)
   ) {
     if (!d) return needDetail();
-    const paths = asArray<Obj>(d.capabilityPaths).filter(
-      (p) => num(p.demonstrations) > 0,
-    );
+    const proof = asArray<Obj>(d.proof);
+    const seen = proof.filter((p) => p.class === "observed");
+    const inferred = proof.filter((p) => p.class === "inferred");
+    const linked = proof.filter((p) => p.class === "association");
     const impl = asArray<Obj>(d.implementations);
     const lvl =
       LEVEL_LABEL[asString(d.topic?.level)] ?? asString(d.topic?.level);
-    let text = `${focusName} is assessed at ${lvl}. ${asString(d.verdict)}`;
-    if (paths.length)
-      text += ` Linked capabilities with demonstrations: ${paths
+    const conf = asString(d.confidence?.effective ?? d.topic?.confidence);
+    let text = `${focusName} is assessed at ${lvl}${conf ? ` with ${conf} confidence` : ""}. ${asString(d.verdict)}`;
+    if (seen.length)
+      text += ` Seen in your code: ${seen
         .slice(0, 3)
-        .map((p) => `${asString(p.capability)} (${num(p.demonstrations)})`)
+        .map((p) => {
+          const first = asArray<Obj>(p.citations)[0];
+          const n = num(p.demonstrations);
+          return `${asString(p.capability)} (${n} example${n === 1 ? "" : "s"}${first ? `, e.g. ${cut(citeLabel(first), 70)}` : ""})`;
+        })
+        .join("; ")}.`;
+    else if (proof.length)
+      text += " No linked skill is seen directly in your code.";
+    if (inferred.length)
+      text += ` Only inferred, not seen: ${inferred
+        .slice(0, 3)
+        .map((p) => asString(p.capability))
         .join(", ")}.`;
-    if (impl.length)
+    if (linked.length)
+      text += ` Linked in the topic map only: ${linked
+        .slice(0, 3)
+        .map((p) => asString(p.capability))
+        .join(", ")}.`;
+    if (!proof.length && impl.length)
       text += ` Implementations cited: ${impl
         .slice(0, 3)
         .map((i) => cut(asString(i.what), 80))
         .join("; ")}.`;
-    else text += " No specific implementation is cited for it.";
+    else if (!proof.length) text += " No specific implementation is cited for it.";
     const lim = limitationsOf(d);
     if (lim.length) text += ` Not established: ${lim[0]}`;
     return { text, slugs: focusSlugs };
@@ -465,6 +521,23 @@ function localAnswer(q: string, c: ChatCtx): { text: string; slugs: string[] } {
   // capabilities
   if (/capabilit/.test(s)) {
     if (!d) return needDetail();
+    const proof = asArray<Obj>(d.proof);
+    if (proof.length) {
+      const by = (k: string) =>
+        proof
+          .filter((p) => p.class === k)
+          .slice(0, 4)
+          .map((p) => asString(p.capability))
+          .join(", ");
+      const parts: string[] = [];
+      if (by("observed")) parts.push(`seen in your code: ${by("observed")}`);
+      if (by("inferred")) parts.push(`inferred, not seen: ${by("inferred")}`);
+      if (by("association")) parts.push(`linked only: ${by("association")}`);
+      return {
+        text: `${focusName} maps to skills that are ${parts.join("; ")}. Only the first group is proof; a mapping alone is taxonomy.`,
+        slugs: focusSlugs,
+      };
+    }
     const paths = asArray<Obj>(d.capabilityPaths);
     return {
       text: paths.length
@@ -515,18 +588,31 @@ function localAnswer(q: string, c: ChatCtx): { text: string; slugs: string[] } {
     if (d) {
       const f = asArray<Obj>(d.graph?.foundations);
       const u = asArray<Obj>(d.graph?.unlocks);
+      const paths = asArray<Obj>(d.prerequisitePaths);
       const parts: string[] = [];
-      parts.push(
-        f.length
-          ? `${focusName} builds on ${f
-              .slice(0, 5)
-              .map(
-                (x) =>
-                  `${asString(x.name)} (${LEVEL_LABEL[asString(x.developerLevel)] ?? "none"})`,
-              )
-              .join(", ")}.`
-          : `The graph records no BUILDS_ON foundation for ${focusName}.`,
-      );
+      if (paths.length) {
+        parts.push(
+          `Genuine foundation paths: ${paths
+            .slice(0, 3)
+            .map(
+              (p) =>
+                `${asString(p.sentence)} (${(PREREQ_STYLE[asString(p.status)]?.label ?? "").toLowerCase()})`,
+            )
+            .join("; ")}.`,
+        );
+      } else {
+        parts.push(
+          f.length
+            ? `${focusName} builds on ${f
+                .slice(0, 5)
+                .map(
+                  (x) =>
+                    `${asString(x.name)} (${LEVEL_LABEL[asString(x.developerLevel)] ?? "none"})`,
+                )
+                .join(", ")}.`
+            : `The graph records no BUILDS_ON foundation for ${focusName}.`,
+        );
+      }
       if (u.length) parts.push(`Built on top of it: ${names(u.slice(0, 5))}.`);
       return { text: parts.join(" "), slugs: [...focusSlugs, ...slugsOf(f)] };
     }
@@ -2943,8 +3029,8 @@ function TopicGraph({
 
 /* -------------------------------------------------------------------------- */
 /* TOPIC PANEL: the explanation, in the order a judge asks the questions      */
-/*   verdict -> capabilities -> implementations -> safeguards -> unproven     */
-/*   -> graph relationships -> raw evidence                                   */
+/*   verdict -> proof by capability -> what was built -> prerequisite paths   */
+/*   -> confidence -> unproven -> graph relationships -> raw evidence         */
 /* -------------------------------------------------------------------------- */
 
 function TopicPanel({
@@ -2978,11 +3064,11 @@ function TopicPanel({
   const level = asString(t.level);
   const band = asArray<number>(sc.band);
   const name = asString(t.name) || humanize(slug);
-  const capPaths = asArray<Obj>(detail?.capabilityPaths);
+  const proof = asArray<Obj>(detail?.proof);
+  const prereqs = asArray<Obj>(detail?.prerequisitePaths);
   const impls = asArray<Obj>(detail?.implementations);
   const safeguards = asArray<string>(detail?.safeguards);
   const limits = limitationsOf(detail);
-  const demoCount = capPaths.reduce((n, p) => n + num(p.demonstrations), 0);
 
   return (
     <div className="space-y-4">
@@ -3082,53 +3168,9 @@ function TopicPanel({
             </p>
           </Block>
 
-          {/* 2. capabilities (taxonomy mapping + this developer's demonstrations) */}
-          <Block
-            title={`Capabilities demonstrated${
-              capPaths.length
-                ? ` (${demoCount} demonstration${demoCount === 1 ? "" : "s"})`
-                : ""
-            }`}
-          >
-            {capPaths.length ? (
-              <div className="space-y-2">
-                {capPaths.slice(0, 6).map((p, i) => {
-                  const d = num(p.demonstrations);
-                  return (
-                    <div
-                      key={`${asString(p.capabilityId)}-${i}`}
-                      className="pl-3"
-                      style={{
-                        borderLeft: `3px solid ${d > 0 ? GREEN : LINE}`,
-                      }}
-                    >
-                      <div className="flex items-center justify-between gap-2 text-[13px] font-black">
-                        <span>{asString(p.capability)}</span>
-                        <span className="text-[12px] text-neutral-700">
-                          {d} demo{d === 1 ? "" : "s"}
-                          {p.weight != null
-                            ? ` · weight ${fix(p.weight, 2)}`
-                            : ""}
-                        </span>
-                      </div>
-                      {p.reason && (
-                        <p className="text-[12px] leading-4 text-neutral-800">
-                          {asString(p.reason)}
-                        </p>
-                      )}
-                    </div>
-                  );
-                })}
-                <p className="text-[12px] leading-4 text-neutral-700">
-                  The mapping to a capability is taxonomy. Only the
-                  demonstration count reflects this developer's actual work.
-                </p>
-              </div>
-            ) : (
-              <p className="text-[13px] leading-5 text-neutral-800">
-                No capability is linked to this topic in the graph.
-              </p>
-            )}
+          {/* 2. proof, skill by skill: observed vs inferred vs linked only */}
+          <Block title="Proof by skill">
+            <ProofLedger items={proof} />
           </Block>
 
           {/* 3. concrete implementations */}
@@ -3137,34 +3179,62 @@ function TopicPanel({
           >
             {impls.length ? (
               <ul className="space-y-2">
-                {impls.slice(0, 5).map((im, i) => (
-                  <li key={i} className="text-[13px] leading-5">
-                    <span className="font-bold">{asString(im.what)}</span>
-                    {(im.path || im.repository) && (
-                      <div className="break-all text-[12px] text-neutral-700">
-                        {im.permalink ? (
-                          <a
-                            href={asString(im.permalink)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="underline"
-                          >
-                            {cut(asString(im.path || im.repository), 80)}
-                          </a>
-                        ) : (
-                          cut(asString(im.path || im.repository), 80)
-                        )}
-                        {im.ref ? ` · ${asString(im.ref)}` : ""}
-                      </div>
-                    )}
-                  </li>
-                ))}
+                {impls.slice(0, 5).map((im, i) => {
+                  const what = asString(im.what);
+                  const code = looksLikeCode(what);
+                  return (
+                    <li key={i} className="text-[13px] leading-5">
+                      {code ? (
+                        <pre
+                          className="overflow-x-auto rounded-lg p-2 text-[11px] leading-4"
+                          style={{
+                            backgroundColor: PAPER,
+                            border: `1.5px solid ${INK}`,
+                            fontFamily:
+                              "ui-monospace, SFMono-Regular, Menlo, monospace",
+                          }}
+                        >
+                          {cut(what, 400)}
+                        </pre>
+                      ) : (
+                        <span className="font-bold">{what}</span>
+                      )}
+                      {(im.path || im.repository) && (
+                        <div className="break-all text-[12px] text-neutral-700">
+                          {im.permalink ? (
+                            <a
+                              href={asString(im.permalink)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="underline"
+                            >
+                              {cut(asString(im.path || im.repository), 80)}
+                            </a>
+                          ) : (
+                            cut(asString(im.path || im.repository), 80)
+                          )}
+                          {im.ref ? ` · ${asString(im.ref)}` : ""}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             ) : (
               <p className="text-[13px] leading-5 text-neutral-800">
                 The assessment cites no specific implementation.
               </p>
             )}
+          </Block>
+
+          {/* 4. genuine prerequisite paths (BUILDS_ON only) */}
+          <Block title="Prerequisite paths">
+            <PrereqPaths paths={prereqs} onPick={onPick} />
+          </Block>
+
+          {/* 5. why this confidence level */}
+          <Block title="Why this confidence">
+            <ConfidenceBox c={detail.confidence} />
           </Block>
 
           {safeguards.length > 0 && (
@@ -3178,7 +3248,7 @@ function TopicPanel({
             </Block>
           )}
 
-          {/* 4. what is NOT established */}
+          {/* 6. what is NOT established */}
           <Block title="What remains unproven">
             {limits.length ? (
               <Bullets items={limits} />
@@ -3220,7 +3290,7 @@ function TopicPanel({
             </Fold>
           )}
 
-          {/* 5. graph relationships, kept separate by meaning */}
+          {/* 7. graph relationships, kept separate by meaning */}
           <Fold title="Where it sits in the graph" open>
             <div className="space-y-2 text-[13px]">
               <div className="flex flex-wrap gap-1.5">
@@ -3244,13 +3314,13 @@ function TopicPanel({
                 onPick={onPick}
               />
               <RefList
-                title="Related (association, not prerequisite)"
+                title="Related (association only, not a prerequisite)"
                 list={asArray<Obj>(g.related)}
                 onPick={onPick}
               />
               {g.community && (
                 <RefList
-                  title="Community peers"
+                  title="Community peers (association only)"
                   list={asArray<Obj>(g.community.peers)}
                   onPick={onPick}
                 />
@@ -3393,6 +3463,321 @@ function Bullets({ items, ok = false }: { items: string[]; ok?: boolean }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* PROOF PIECES: citations, proof ledger, prerequisite paths, confidence      */
+/* -------------------------------------------------------------------------- */
+
+function CitationRow({ c }: { c: Obj }) {
+  const where = [asString(c.repository), asString(c.path)]
+    .filter(Boolean)
+    .join(" · ");
+  const kindLabel =
+    c.kind === "practice_mission"
+      ? "Practice mission"
+      : c.kind === "commit"
+        ? "Change"
+        : c.kind === "real_work"
+          ? "Real work"
+          : c.kind === "implementation"
+            ? "Implementation"
+            : "Code";
+  const snippet = asString(c.snippet);
+  const title = asString(c.title);
+  const commit = asString(c.commit);
+  return (
+    <li
+      className="rounded-lg p-2"
+      style={{ backgroundColor: PAPER, border: `1.5px solid ${INK}` }}
+    >
+      <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
+        <span
+          className="rounded-full px-1.5 text-[10px] font-black uppercase"
+          style={{ backgroundColor: WHITE, border: `1.5px solid ${INK}` }}
+        >
+          {kindLabel}
+        </span>
+        <span className="font-bold">{cut(citeLabel(c), 90)}</span>
+      </div>
+      {snippet !== "" && (
+        <pre
+          className="mt-1 overflow-x-auto rounded-md p-1.5 text-[11px] leading-4"
+          style={{
+            backgroundColor: WHITE,
+            border: `1px solid ${LINE}`,
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          }}
+        >
+          {cut(snippet, 400)}
+        </pre>
+      )}
+      {commit !== "" && title !== "" && (
+        <div className="mt-0.5 text-[11px] leading-4 text-neutral-700">
+          Change: {cut(commit, 90)}
+        </div>
+      )}
+      {where && (
+        <div className="mt-0.5 break-all text-[11px] leading-4 text-neutral-700">
+          {cut(where, 100)}
+        </div>
+      )}
+      {c.permalink && (
+        <a
+          href={asString(c.permalink)}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-0.5 block text-[11px] font-bold underline"
+        >
+          View the code
+        </a>
+      )}
+    </li>
+  );
+}
+
+/**
+ * One entry per linked skill, split by how strongly the graph backs it:
+ *   observed    -> a detected example in the developer's own code (cited)
+ *   inferred    -> concluded from the topic rating, no example matched
+ *   association -> linked in the topic map only
+ */
+function ProofLedger({ items }: { items: Obj[] }) {
+  if (!items.length)
+    return (
+      <p className="text-[13px] leading-5 text-neutral-800">
+        No capability is linked to this topic in the graph.
+      </p>
+    );
+  const count = (k: string) => items.filter((i) => i.class === k).length;
+  return (
+    <div className="space-y-2.5">
+      <p className="text-[12px] leading-4 text-neutral-700">
+        {count("observed")} seen in your code · {count("inferred")} inferred ·{" "}
+        {count("association")} linked only. Only “seen in your code” is proof;
+        the other two are weaker and are labelled so.
+      </p>
+      {items.map((p, i) => {
+        const cls = CLASS_STYLE[asString(p.class)] ?? CLASS_STYLE.association;
+        const cites = asArray<Obj>(p.citations);
+        const d = num(p.demonstrations);
+        return (
+          <div
+            key={`${asString(p.id)}-${i}`}
+            className="pl-3"
+            style={{ borderLeft: `4px solid ${cls.bar}` }}
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[13px] font-black">
+                {asString(p.capability)}
+              </span>
+              <Chip text={cls.label} background={cls.bg} color={cls.color} />
+              <span className="text-[11px] font-bold text-neutral-700">
+                {d} detected
+                {p.weight != null ? ` · weight ${fix(p.weight, 2)}` : ""}
+              </span>
+            </div>
+            <p className="mt-0.5 text-[13px] leading-5 text-neutral-900">
+              {asString(p.demonstrates)}
+            </p>
+            {asString(p.matters) && (
+              <p className="text-[12px] leading-4 text-neutral-700">
+                Why it matters: {asString(p.matters)}
+              </p>
+            )}
+            {asString(p.limit) && (
+              <p className="text-[12px] font-bold leading-4" style={{ color: CORAL }}>
+                Limit: {asString(p.limit)}
+              </p>
+            )}
+            {cites.length > 0 && (
+              <>
+                <ul className="mt-1.5 space-y-1.5">
+                  {cites.map((c, j) => (
+                    <CitationRow key={j} c={c} />
+                  ))}
+                </ul>
+                {p.attributed === false && (
+                  <p className="mt-1 text-[11px] leading-4 text-neutral-700">
+                    Cited for the topic as a whole. The graph does not tie
+                    these to this skill alone.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Genuine prerequisite chains. Only BUILDS_ON dependencies with a stated reason
+ * appear here; related topics are associations and are never shown as prerequisites.
+ */
+function PrereqPaths({
+  paths,
+  onPick,
+}: {
+  paths: Obj[];
+  onPick?: (slug: string) => void;
+}) {
+  if (!paths.length)
+    return (
+      <p className="text-[13px] leading-5 text-neutral-800">
+        No foundation dependency is recorded for this topic. Related topics are
+        associations, not prerequisites.
+      </p>
+    );
+  return (
+    <div className="space-y-2.5">
+      {paths.map((p, i) => {
+        const st = PREREQ_STYLE[asString(p.status)] ?? PREREQ_STYLE.unverified;
+        const steps = asArray<Obj>(p.steps);
+        const reasons = asArray<string>(p.reasons);
+        const strength = asString(p.strength);
+        return (
+          <div
+            key={i}
+            className="rounded-lg p-2.5"
+            style={{ backgroundColor: PAPER, border: `1.5px solid ${INK}` }}
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Chip text={st.label} background={st.bg} color={st.color} />
+              {strength && strength !== "unknown" && (
+                <Chip text={strength} background={CARD} />
+              )}
+              <span className="text-[11px] font-bold text-neutral-700">
+                {num(p.hops)} step{num(p.hops) === 1 ? "" : "s"} down
+              </span>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-1">
+              {steps.map((s, j) => {
+                const assessed = s.assessed !== false && s.level != null;
+                const canOpen = assessed && j > 0 && !!onPick;
+                return (
+                  <span key={j} className="inline-flex items-center gap-1">
+                    {j > 0 && (
+                      <span className="text-[11px] font-black text-neutral-700">
+                        builds on
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        canOpen ? onPick?.(asString(s.slug)) : undefined
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+                      style={{
+                        backgroundColor: assessed ? WHITE : CARD,
+                        border: `2px ${assessed ? "solid" : "dashed"} ${INK}`,
+                        cursor: canOpen ? "pointer" : "default",
+                      }}
+                    >
+                      <span
+                        className="h-2 w-2 rounded-full"
+                        style={{
+                          backgroundColor:
+                            LEVEL_COLOR[asString(s.level)] ?? "#d1d5db",
+                          border: `1px solid ${INK}`,
+                        }}
+                      />
+                      {asString(s.name)}
+                      {!assessed && (
+                        <span className="text-[10px] text-neutral-700">
+                          not assessed
+                        </span>
+                      )}
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+            {reasons.length > 0 && (
+              <ul className="mt-2 space-y-0.5">
+                {reasons.map((r, j) => (
+                  <li
+                    key={j}
+                    className="text-[12px] leading-4 text-neutral-800"
+                  >
+                    <b>
+                      {asString(steps[j]?.name)} → {asString(steps[j + 1]?.name)}
+                      :
+                    </b>{" "}
+                    {r}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+      <p className="text-[12px] leading-4 text-neutral-700">
+        Only “builds on” dependencies with a stated reason are shown. A
+        dependency in the map is not proof the foundation was learned; the
+        badge says whether your own code backs it.
+      </p>
+    </div>
+  );
+}
+
+/** Confidence from the strength AND the variety of the evidence, factor by factor. */
+function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
+  if (!c) return null;
+  const eff = asString(c.effective);
+  const factors = asArray<Obj>(c.factors);
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Chip
+          text={`${eff} confidence`}
+          background={CONF_COLOR[eff] ?? CARD}
+          color={eff === "high" ? WHITE : INK}
+        />
+        {asString(c.stated) !== eff && (
+          <span className="text-[12px] leading-4 text-neutral-800">
+            Stored as {asString(c.stated)}; the current evidence supports{" "}
+            {asString(c.derived)}, so the lower value is shown.
+          </span>
+        )}
+      </div>
+      <div className="mt-2 space-y-1.5">
+        {factors.map((f) => (
+          <div key={asString(f.id)}>
+            <div className="flex items-center gap-2 text-[12px]">
+              <span className="w-36 shrink-0 font-black">
+                {asString(f.label)}
+              </span>
+              <div
+                className="h-2 flex-1 overflow-hidden rounded-full"
+                style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
+              >
+                <div
+                  className="h-full"
+                  style={{
+                    width: `${(num(f.value) / Math.max(1, num(f.max))) * 100}%`,
+                    backgroundColor: SKY,
+                  }}
+                />
+              </div>
+              <span className="w-9 text-right font-bold">
+                {num(f.value)}/{num(f.max)}
+              </span>
+            </div>
+            <div className="pl-[9.5rem] text-[11px] leading-4 text-neutral-700">
+              {asString(f.note)}
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-[12px] leading-4 text-neutral-700">
+        Confidence rises with more files, changes, projects and time, and with
+        more kinds of evidence. One project or one kind of evidence keeps it
+        from reaching high.
+      </p>
+    </div>
   );
 }
 
@@ -3965,6 +4350,17 @@ function TopicGraphEvidence({
   const steps = asArray<Obj>(story?.steps);
   const followups = asArray<string>(story?.followups).slice(0, 3);
   const litOn = lit.size > 0;
+  const proofItems = asArray<Obj>(
+    asArray(story?.proof).length ? story?.proof : data.proof,
+  );
+  const prereqPaths = asArray<Obj>(
+    asArray(story?.prerequisitePaths).length
+      ? story?.prerequisitePaths
+      : data.prerequisitePaths,
+  );
+  const confidenceView = (story?.confidence ?? data.confidence) as
+    | Obj
+    | undefined;
 
   return (
     <section
@@ -4073,6 +4469,50 @@ function TopicGraphEvidence({
                 <p className="mt-1 text-[13px] leading-5">
                   {asString(story.caveat)}
                 </p>
+              </div>
+            </div>
+
+            {/* proof, skill by skill: seen vs inferred vs linked only */}
+            {proofItems.length > 0 && (
+              <div
+                className="mt-3 rounded-xl p-3"
+                style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
+              >
+                <div className="mb-1.5 text-[13px] font-black">
+                  Proof, skill by skill
+                </div>
+                <ProofLedger items={proofItems} />
+              </div>
+            )}
+
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <div
+                className="rounded-xl p-3"
+                style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
+              >
+                <div className="mb-1 text-[13px] font-black">
+                  Genuine prerequisite paths
+                </div>
+                {asString(story.prerequisiteSummary) && (
+                  <p className="mb-2 text-[13px] leading-5 text-neutral-900">
+                    {asString(story.prerequisiteSummary)}
+                  </p>
+                )}
+                <PrereqPaths paths={prereqPaths} onPick={onPick} />
+              </div>
+              <div
+                className="rounded-xl p-3"
+                style={{ backgroundColor: PAPER, border: `2px solid ${INK}` }}
+              >
+                <div className="mb-1 text-[13px] font-black">
+                  Why this confidence level
+                </div>
+                {asString(story.confidenceNote) && (
+                  <p className="mb-2 text-[13px] leading-5 text-neutral-900">
+                    {asString(story.confidenceNote)}
+                  </p>
+                )}
+                <ConfidenceBox c={confidenceView} />
               </div>
             </div>
 
@@ -4512,7 +4952,7 @@ function TopicGraphEvidence({
               : `moved it ${num(score.adjustment) > 0 ? "up" : "down"} by ${Math.abs(num(score.adjustment))}`}
             . Confidence is <b>{asString(score.confidence)}</b>
             {asString(score.confidence) === "low"
-              ? ", because there is not much evidence yet."
+              ? ", because the evidence is thin or narrow."
               : "."}
           </p>
           <div className="mt-2 flex flex-wrap gap-1.5">

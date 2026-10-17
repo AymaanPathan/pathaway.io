@@ -62,6 +62,7 @@ const avg = (items: number[]): number =>
   items.length
     ? Math.round(items.reduce((a, b) => a + b, 0) / items.length)
     : 0;
+const asRows = (v: unknown): Row[] => (Array.isArray(v) ? (v as Row[]) : []);
 
 const NOT_SYNCED = {
   error: "No topics yet: this developer has not been synced.",
@@ -308,14 +309,14 @@ const PIPELINE = [
     id: "judge",
     engine: "llm",
     title: "Judge depth",
-    does: "The model judges level, authenticity and how each approach was implemented, citing evidence refs. It may request one extra evidence round via full-text probes.",
+    does: "The model judges level, authenticity and how each approach was implemented, citing evidence refs and separating observed, inferred and associated claims. It may request one extra evidence round via full-text probes.",
   },
   {
     step: 5,
     id: "reconcile",
     engine: "deterministic",
     title: "Guard-rails",
-    does: "The graph baseline and authenticity caps keep the model honest. Every adjustment is written into the rationale.",
+    does: "The graph baseline, authenticity caps and an evidence-strength cap on confidence keep the model honest. Every adjustment is written into the rationale.",
   },
   {
     step: 6,
@@ -366,9 +367,10 @@ const GUARD_RAILS = [
   "Authenticity caps the level: genuine_implementation up to deep, working_usage up to proficient, incidental up to working, boilerplate and insufficient_evidence up to surface.",
   "Genuine implementation is downgraded to working usage when there are no own definitions, no built mechanism and fewer than 3 files.",
   "When 70% or more of the evidence sits in scaffold-like commits the topic is marked boilerplate.",
-  "Confidence follows the amount of evidence: fewer than 3 files or fewer than 2 commits is always low.",
+  "Confidence follows the strength and the diversity of the evidence: fewer than 3 files or fewer than 2 commits is always low; evidence from a single repository, from fewer than three kinds (code samples, detector hits, grouped experiences, commits), or with no directly observed work cannot be high. The model may lower confidence, never raise it above this cap. The API shows the lower of the stored value and the value re-derived from the current evidence.",
   "The score is clamped into the band of its level, and an approach can never be deeper than its topic.",
   "The baseline is reduced when evidence is mostly scaffold (x0.6), when one commit (cap 25) or one file (cap 20) touches the topic.",
+  "A capability is only 'observed' when a detected demonstration in the developer's own code backs it. Without one it is 'inferred' (concluded from the topic rating) or 'association' (linked in the taxonomy only). Related topics are never prerequisites; only BUILDS_ON edges with a stated reason form a prerequisite path.",
 ];
 
 const ENDPOINTS = [
@@ -399,7 +401,12 @@ const ENDPOINTS = [
     path: "/api/topics/path?from=&to=",
     purpose: "Shortest path with typed hops",
   },
-  { method: "GET", path: "/api/topics/:slug", purpose: "Topic detail" },
+  {
+    method: "GET",
+    path: "/api/topics/:slug",
+    purpose:
+      "Topic detail with proof ledger, prerequisite paths and confidence",
+  },
   {
     method: "GET",
     path: "/api/topics/:slug/graph",
@@ -1795,6 +1802,525 @@ function launch(
 }
 
 // ============================================================
+// PROOF: what is observed, what is only inferred, what is merely associated;
+// genuine prerequisite paths; confidence from strength AND diversity of evidence
+// ============================================================
+
+type ProofClass = "observed" | "inferred" | "association";
+
+const CLASS_LABEL: Record<ProofClass, string> = {
+  observed: "Seen in your code",
+  inferred: "Inferred, not seen",
+  association: "Linked only",
+};
+
+interface Citation {
+  kind: "real_work" | "practice_mission" | "implementation" | "code" | "commit";
+  title: string;
+  /** code text when the graph kept it (implementation notes can hold a snippet) */
+  snippet: string;
+  path: string;
+  repository: string;
+  commit: string;
+  permalink: string;
+  when: string;
+}
+
+interface ProofItem {
+  id: string;
+  capabilityId: string;
+  capability: string;
+  class: ProofClass;
+  classLabel: string;
+  demonstrations: number;
+  weight: number | null;
+  /** every citation behind it is a practice mission, not the developer's own project */
+  practiceOnly: boolean;
+  /** true when the graph ties the citations to THIS capability */
+  attributed: boolean;
+  citations: Citation[];
+  demonstrates: string;
+  matters: string;
+  limit: string;
+}
+
+interface ProofResult {
+  items: ProofItem[];
+  topicCitations: Citation[];
+  counts: { observed: number; inferred: number; association: number };
+}
+
+const looksLikeCode = (s: string): boolean =>
+  /[{};]|=>|\bfunction\b|\bimport\b|\breturn\b/.test(s);
+
+const isCitation = (c: Citation): boolean =>
+  Boolean(c.title || c.snippet || c.path || c.commit || c.permalink);
+
+function citeBuild(b: Row): Citation {
+  return {
+    kind: b.kind === "mission" ? "practice_mission" : "real_work",
+    title: str(b.title),
+    snippet: "",
+    path: str(b.path),
+    repository: str(b.repository),
+    commit: str(b.commitSubject),
+    permalink: str(b.permalink),
+    when: str(b.createdAt),
+  };
+}
+
+function citeImplementation(i: Row): Citation {
+  const what = str(i.what);
+  const code = looksLikeCode(what);
+  return {
+    kind: "implementation",
+    title: code ? "" : what,
+    snippet: code ? what.slice(0, 400) : "",
+    path: str(i.path),
+    repository: str(i.repository),
+    commit: "",
+    permalink: str(i.permalink),
+    when: "",
+  };
+}
+
+function citeEvidence(e: Row): Citation | null {
+  const kind = str(e.kind);
+  if (kind !== "code" && kind !== "commit" && kind !== "demonstration")
+    return null;
+  const title = str(
+    e.title ?? e.subject ?? e.technique ?? e.label ?? e.ref ?? e.key,
+  );
+  return {
+    kind:
+      kind === "commit"
+        ? "commit"
+        : kind === "demonstration"
+          ? "implementation"
+          : "code",
+    title: kind === "code" ? "" : title,
+    snippet: "",
+    path: str(e.path),
+    repository: str(e.repository),
+    commit: kind === "commit" ? title : str(e.commitSubject),
+    permalink: str(e.permalink),
+    when: str(e.createdAt ?? e.date),
+  };
+}
+
+function dedupeCitations(list: Citation[]): Citation[] {
+  const seen = new Set<string>();
+  return list.filter((c) => {
+    if (!isCitation(c)) return false;
+    const key =
+      c.permalink ||
+      [c.repository, c.path, c.title, c.snippet.slice(0, 40), c.commit].join(
+        "|",
+      );
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+const plural = (n: number, one: string, many = `${one}s`): string =>
+  `${n} ${n === 1 ? one : many}`;
+
+function buildProof(card: TopicCard, detail: Row, builds: Row[]): ProofResult {
+  const paths = asRows(detail.capabilityPaths);
+  const impls = asRows(detail.implementations);
+  const evidence = asRows(detail.evidence);
+
+  const topicCitations = dedupeCitations([
+    ...impls.map(citeImplementation),
+    ...evidence.map(citeEvidence).filter((c): c is Citation => c !== null),
+  ]).slice(0, 8);
+
+  const level = LEVEL_META[card.level].label.toLowerCase();
+  const strongTopic =
+    card.levelRank >= 2 && topicCitations.length > 0 && card.evidence.files > 0;
+
+  const items: ProofItem[] = paths.map((p, i) => {
+    const capabilityId = str(p.capabilityId);
+    const name = str(p.capability) || capabilityId || "this skill";
+    const demos = num(p.demonstrations);
+
+    // citations the graph itself ties to this capability
+    const linked = dedupeCitations(
+      builds
+        .filter(
+          (b) =>
+            (capabilityId && str(b.capabilityId) === capabilityId) ||
+            (str(b.capability) !== "" &&
+              str(b.capability) === str(p.capability)),
+        )
+        .map(citeBuild),
+    );
+
+    const cls: ProofClass =
+      demos > 0 || linked.length > 0
+        ? "observed"
+        : strongTopic
+          ? "inferred"
+          : "association";
+
+    const practiceOnly =
+      cls === "observed" &&
+      linked.length > 0 &&
+      linked.every((c) => c.kind === "practice_mission");
+
+    let citations: Citation[] = [];
+    let attributed = false;
+    if (cls === "observed") {
+      if (linked.length) {
+        citations = linked.slice(0, 3);
+        attributed = true;
+      } else {
+        citations = topicCitations.slice(0, 3);
+      }
+    } else if (cls === "inferred") {
+      citations = topicCitations.slice(0, 2);
+    }
+
+    const count = Math.max(demos, linked.length);
+    const first = citations[0];
+    const where = first?.repository ? ` in ${first.repository}` : "";
+    const example = first?.title ? `, such as “${first.title}”` : "";
+
+    let demonstrates: string;
+    let matters: string;
+    let limit: string;
+    if (cls === "observed") {
+      demonstrates = `${plural(count, "detected example")} of ${name} in your own code${example}${where}.${practiceOnly ? " Only practice missions back it." : ""}`;
+      matters = `This is applied work, not a label. Your ${level} rating in ${card.name} rests partly on it.`;
+      limit = practiceOnly
+        ? "Practice missions are guided exercises, not your own project."
+        : count <= 1
+          ? "Only one example was found. Repeated use would make it stronger."
+          : "";
+    } else if (cls === "inferred") {
+      demonstrates = `No example of ${name} was matched directly. It is inferred because ${card.name} is rated ${level} from ${plural(card.evidence.files, "file")} with cited code.`;
+      matters =
+        "Treat it as likely, not proven. One matched example would confirm it.";
+      limit = "No direct example in your code.";
+    } else {
+      demonstrates = `${name} is linked to ${card.name} in the topic map. Nothing in your code was matched to it.`;
+      matters =
+        "A link in the map is not evidence of skill. It only shows where this topic could lead.";
+      limit = "Taxonomy mapping only.";
+    }
+
+    return {
+      id: `${capabilityId || "cap"}:${i}`,
+      capabilityId,
+      capability: name,
+      class: cls,
+      classLabel: CLASS_LABEL[cls],
+      demonstrations: demos,
+      weight: nullableNum(p.weight),
+      practiceOnly,
+      attributed,
+      citations,
+      demonstrates,
+      matters,
+      limit,
+    };
+  });
+
+  const order: Record<ProofClass, number> = {
+    observed: 0,
+    inferred: 1,
+    association: 2,
+  };
+  items.sort(
+    (a, b) =>
+      order[a.class] - order[b.class] ||
+      b.demonstrations - a.demonstrations ||
+      a.capability.localeCompare(b.capability),
+  );
+
+  return {
+    items,
+    topicCitations,
+    counts: {
+      observed: items.filter((x) => x.class === "observed").length,
+      inferred: items.filter((x) => x.class === "inferred").length,
+      association: items.filter((x) => x.class === "association").length,
+    },
+  };
+}
+
+interface PrereqStep {
+  slug: string;
+  name: string;
+  assessed: boolean;
+  level: DepthLevel | null;
+  score: number | null;
+}
+
+interface PrereqPath {
+  steps: PrereqStep[];
+  hops: number;
+  /** one stated reason per hop, taken from the BUILDS_ON edge */
+  reasons: string[];
+  strength: "required" | "helpful" | "unknown";
+  status: "demonstrated" | "weak" | "unverified";
+  weakest: string;
+  sentence: string;
+}
+
+/**
+ * Genuine prerequisite chains: only BUILDS_ON edges that carry a stated reason.
+ * RELATED_TOPIC never appears here; it is an association, not a prerequisite.
+ */
+function buildPrereqPaths(d: Dossier, slug: string, detail: Row): PrereqPath[] {
+  const adj = new Map<string, EdgeRow[]>();
+  for (const e of d.edges) {
+    if (e.type !== "BUILDS_ON" || !e.reason) continue;
+    adj.set(e.source, [...(adj.get(e.source) ?? []), e]);
+  }
+  const learn = asRows(detail.learning?.prerequisites);
+  const strengthOf = (target: string): PrereqPath["strength"] => {
+    const hit = learn.find((p) => str(p.slug ?? p.topic?.slug) === target);
+    const s = str(hit?.edge?.strength);
+    return s === "required" || s === "helpful" ? s : "unknown";
+  };
+
+  const trails: EdgeRow[][] = [];
+  const walk = (node: string, trail: EdgeRow[], seen: Set<string>): void => {
+    const next = (adj.get(node) ?? []).filter((e) => !seen.has(e.target));
+    if (!next.length || trail.length >= 3) {
+      if (trail.length) trails.push(trail);
+      return;
+    }
+    for (const e of next)
+      walk(e.target, [...trail, e], new Set([...seen, e.target]));
+  };
+  walk(slug, [], new Set([slug]));
+
+  const rankOf = (s: PrereqStep): number =>
+    s.assessed ? DEPTH_RANK[s.level ?? "none"] : -1;
+
+  return trails
+    .map((trail): PrereqPath => {
+      const names = [slug, ...trail.map((e) => e.target)];
+      const steps: PrereqStep[] = names.map((s) => {
+        const r = refFor(d, s);
+        return {
+          slug: s,
+          name: r.name,
+          assessed: r.assessed,
+          level: r.level,
+          score: r.score,
+        };
+      });
+      const found = steps.slice(1);
+      const status: PrereqPath["status"] = found.some((s) => !s.assessed)
+        ? "unverified"
+        : found.some((s) => rankOf(s) <= 1)
+          ? "weak"
+          : "demonstrated";
+      const weakest =
+        [...found].sort((a, b) => rankOf(a) - rankOf(b))[0]?.name ?? "";
+      return {
+        steps,
+        hops: trail.length,
+        reasons: trail.map((e) => e.reason),
+        strength: strengthOf(trail[0].target),
+        status,
+        weakest,
+        sentence: steps.map((s) => s.name).join(" builds on "),
+      };
+    })
+    .sort(
+      (a, b) =>
+        a.hops - b.hops ||
+        Number(b.strength === "required") - Number(a.strength === "required") ||
+        a.sentence.localeCompare(b.sentence),
+    )
+    .slice(0, 8);
+}
+
+interface ConfidenceFactor {
+  id: string;
+  label: string;
+  value: number;
+  max: number;
+  note: string;
+}
+
+interface ConfidenceView {
+  /** what the assessment stored */
+  stated: string;
+  /** what the current evidence supports */
+  derived: string;
+  /** the lower of the two, which is what the UI shows */
+  effective: string;
+  score: number;
+  factors: ConfidenceFactor[];
+  strengths: string[];
+  limits: string[];
+}
+
+const CONF_RANK: Record<string, number> = { low: 1, medium: 2, high: 3 };
+const EVIDENCE_KINDS = ["code", "demonstration", "experience", "commit"];
+
+function buildConfidence(
+  card: TopicCard,
+  detail: Row,
+  proof: ProofResult,
+  paths: PrereqPath[],
+): ConfidenceView {
+  const ev = card.evidence;
+  const step = (v: number, steps: number[]): number =>
+    steps.filter((s) => v >= s).length;
+  const kindsSeen = EVIDENCE_KINDS.filter((k) =>
+    asRows(detail.evidence).some((e) => str(e.kind) === k),
+  );
+  const observedReal = proof.items.filter(
+    (i) => i.class === "observed" && !i.practiceOnly,
+  ).length;
+
+  const factors: ConfidenceFactor[] = [
+    {
+      id: "files",
+      label: "Files touched",
+      value: step(ev.files, [3, 8, 20]),
+      max: 3,
+      note: plural(ev.files, "file"),
+    },
+    {
+      id: "commits",
+      label: "Separate changes",
+      value: step(ev.commits, [2, 5, 12]),
+      max: 3,
+      note: plural(ev.commits, "commit"),
+    },
+    {
+      id: "repos",
+      label: "Projects",
+      value: step(ev.repos, [2, 3]),
+      max: 2,
+      note:
+        ev.repos < 2
+          ? "evidence comes from a single project"
+          : `${ev.repos} projects`,
+    },
+    {
+      id: "days",
+      label: "Work over time",
+      value: step(ev.activeDays, [3, 10]),
+      max: 2,
+      note: plural(ev.activeDays, "active day"),
+    },
+    {
+      id: "kinds",
+      label: "Kinds of evidence",
+      value: kindsSeen.length,
+      max: 4,
+      note: `${kindsSeen.length} of 4 kinds (${kindsSeen.join(", ") || "none"})`,
+    },
+    {
+      id: "observed",
+      label: "Skills seen in your code",
+      value: Math.min(3, observedReal),
+      max: 3,
+      note: `${observedReal} skill${observedReal === 1 ? "" : "s"} with a detected example in your own work`,
+    },
+    {
+      id: "authenticity",
+      label: "Built or only used",
+      value:
+        card.authenticity === "genuine_implementation"
+          ? 2
+          : card.authenticity === "working_usage"
+            ? 1
+            : 0,
+      max: 2,
+      note: AUTHENTICITY_META[card.authenticity].label.toLowerCase(),
+    },
+  ];
+  if (paths.length) {
+    const good = paths.filter((p) => p.status === "demonstrated").length;
+    factors.push({
+      id: "foundations",
+      label: "Foundations backed",
+      value: Math.round((good / paths.length) * 2),
+      max: 2,
+      note: `${good} of ${paths.length} foundation path${paths.length === 1 ? "" : "s"} backed by your code`,
+    });
+  }
+
+  const total = factors.reduce((n, f) => n + f.value, 0);
+  const max = factors.reduce((n, f) => n + f.max, 0);
+  const ratio = max ? total / max : 0;
+
+  let derived: string =
+    ratio >= 0.6 && kindsSeen.length >= 3
+      ? "high"
+      : ratio >= 0.35
+        ? "medium"
+        : "low";
+  if (ev.files < 3 || ev.commits < 2) derived = "low";
+  if (derived === "high" && ev.repos < 2) derived = "medium";
+  if (derived === "high" && observedReal === 0) derived = "medium";
+  if (card.fallback) derived = "low";
+
+  const stated = card.confidence || "low";
+  const effective =
+    (CONF_RANK[derived] ?? 1) < (CONF_RANK[stated] ?? 1) ? derived : stated;
+
+  return {
+    stated,
+    derived,
+    effective,
+    score: round(ratio, 2),
+    factors,
+    strengths: factors
+      .filter((f) => f.value / f.max >= 0.67)
+      .map((f) => `${f.label}: ${f.note}`),
+    limits: factors
+      .filter((f) => f.value / f.max < 0.5)
+      .map((f) => `${f.label}: ${f.note}`),
+  };
+}
+
+interface ProofContext {
+  proof: ProofResult;
+  paths: PrereqPath[];
+  confidence: ConfidenceView;
+}
+
+async function proofContext(
+  d: Dossier,
+  card: TopicCard,
+  detail: Row,
+  ev?: Row | null,
+): Promise<ProofContext> {
+  let builds = asRows(ev?.builds);
+  if (!ev) {
+    try {
+      const graph = await getGraphForDeveloper(d.developerId);
+      const e = (await readTopicGraphEvidence(
+        graph,
+        d.developerId,
+        card.slug,
+      )) as unknown as Row | null;
+      builds = asRows(e?.builds);
+    } catch (err) {
+      console.error(
+        `${LOG} proof builds unavailable:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+  const proof = buildProof(card, detail, builds);
+  const paths = buildPrereqPaths(d, card.slug, detail);
+  const confidence = buildConfidence(card, detail, proof, paths);
+  return { proof, paths, confidence };
+}
+
+// ============================================================
 // PLAIN-LANGUAGE STORY (graph facts -> words a normal user understands)
 // ============================================================
 
@@ -1805,9 +2331,12 @@ interface PlainStory {
   meaning: string;
   caveat: string;
   followups: string[];
+  proof: ProofItem[];
+  prerequisitePaths: PrereqPath[];
+  prerequisiteSummary: string;
+  confidence: ConfidenceView;
+  confidenceNote: string;
 }
-
-const asRows = (v: unknown): Row[] => (Array.isArray(v) ? (v as Row[]) : []);
 
 const joinList = (items: string[], max = 3): string => {
   const a = uniq(items.filter(Boolean)).slice(0, max);
@@ -1818,8 +2347,22 @@ const joinList = (items: string[], max = 3): string => {
 const cardScore = (d: Dossier, slug: string): number =>
   d.bySlug.get(slug)?.score ?? 0;
 
+const citationLabel = (c: Citation): string =>
+  [
+    c.title || (c.snippet ? c.snippet.slice(0, 80) : "") || c.commit,
+    c.path,
+    c.repository,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
 /** Everything the explainer (LLM or deterministic) is allowed to talk about. */
-function plainFacts(card: TopicCard, ev: Row, algorithms: Row[]): Row {
+function plainFacts(
+  card: TopicCard,
+  ev: Row,
+  algorithms: Row[],
+  ctx: ProofContext,
+): Row {
   const nodes = asRows(ev.nodes);
   const edges = asRows(ev.edges);
   const builds = asRows(ev.builds);
@@ -1837,25 +2380,32 @@ function plainFacts(card: TopicCard, ev: Row, algorithms: Row[]): Row {
   const projects = nodes
     .filter((n) => n.kind === "repository")
     .map((n) => str(n.label));
-  const buildsOn = edges
-    .filter((e) => e.type === "BUILDS_ON" && e.source === topicNode)
-    .map((e) => label(str(e.target)));
   const usedBy = edges
     .filter((e) => e.type === "BUILDS_ON" && e.target === topicNode)
     .map((e) => label(str(e.source)));
   const related = edges
     .filter((e) => e.type === "RELATED_TOPIC" && e.source === topicNode)
     .map((e) => label(str(e.target)));
+  const buildsOn = uniq(
+    ctx.paths.filter((p) => p.hops === 1).map((p) => p.steps[1]?.name ?? ""),
+  ).filter(Boolean);
 
+  const conf = ctx.confidence;
   const limitations: string[] = [];
-  if (card.confidence === "low")
+  if (conf.effective === "low")
     limitations.push("Confidence is low because there is little evidence.");
+  else if (conf.limits.length)
+    limitations.push(`Confidence is held back: ${conf.limits[0]}.`);
   if (card.authenticity !== "genuine_implementation")
     limitations.push(
       "The code looks more like using this than building it from scratch.",
     );
   if (card.evidence.commits <= 1 && card.evidence.files > 0)
     limitations.push("Only one change to the code touches this topic.");
+  if (ctx.proof.counts.inferred + ctx.proof.counts.association > 0)
+    limitations.push(
+      `${ctx.proof.counts.inferred + ctx.proof.counts.association} linked skill${ctx.proof.counts.inferred + ctx.proof.counts.association === 1 ? " is" : "s are"} not seen in your code.`,
+    );
   if (num(ev.buildTotals?.missions) === 0)
     limitations.push("No completed practice mission is linked to it.");
   if (builds.length === 0)
@@ -1867,7 +2417,7 @@ function plainFacts(card: TopicCard, ev: Row, algorithms: Row[]): Row {
     level: card.levelLabel,
     levelMeaning: LEVEL_META[card.level].meaning,
     score: card.score,
-    confidence: card.confidence,
+    confidence: conf.effective,
     authenticity: card.authenticityLabel,
     filesChecked: card.evidence.files,
     changesChecked: card.evidence.commits,
@@ -1881,25 +2431,45 @@ function plainFacts(card: TopicCard, ev: Row, algorithms: Row[]): Row {
     })),
     skillsCovered: uniq(skills).slice(0, 6),
     projects: uniq(projects).slice(0, 5),
-    buildsOn: uniq(buildsOn).slice(0, 5),
+    buildsOn: buildsOn.slice(0, 5),
     otherTopicsBuiltOnIt: uniq(usedBy).slice(0, 5),
     usedTogetherWith: uniq(related).slice(0, 5),
     relatedGroupSize: num(ev.metrics?.clusterSize),
     foundationRank: rank("pagerank"),
     connectorRank: rank("betweenness"),
+    proofLedger: ctx.proof.items.map((i) => ({
+      id: i.id,
+      skill: i.capability,
+      class: i.class,
+      demonstrations: i.demonstrations,
+      practiceOnly: i.practiceOnly,
+      cited: i.citations.slice(0, 2).map(citationLabel).filter(Boolean),
+    })),
+    prerequisitePaths: ctx.paths.slice(0, 5).map((p) => ({
+      chain: p.sentence,
+      status: p.status,
+      strength: p.strength,
+      weakestLink: p.weakest,
+      reasons: p.reasons.slice(0, 2),
+    })),
+    confidenceDetail: {
+      level: conf.effective,
+      storedByAssessment: conf.stated,
+      strengths: conf.strengths.slice(0, 3),
+      limits: conf.limits.slice(0, 3),
+    },
     limitations: limitations.slice(0, 4),
   };
 }
 
 /** Always-available story. Shown instantly and used when the model is down. */
-function plainStory(f: Row): PlainStory {
-  const skills = f.skillsCovered as string[];
-  const buildsOn = f.buildsOn as string[];
+function plainStory(f: Row, ctx: ProofContext): PlainStory {
   const usedBy = f.otherTopicsBuiltOnIt as string[];
   const related = f.usedTogetherWith as string[];
   const projects = f.projects as string[];
   const examples = f.examples as Array<{ title: string; project: string }>;
   const work = num(f.realWorkLinked);
+  const { proof, paths, confidence } = ctx;
 
   const built =
     f.authenticity === "Genuine implementation"
@@ -1910,10 +2480,35 @@ function plainStory(f: Row): PlainStory {
     ? `${work} piece${work === 1 ? "" : "s"} of real work ${work === 1 ? "is" : "are"} linked to this topic${examples[0] ? `, for example “${examples[0].title}”` : ""}.`
     : "No piece of real work is linked to this topic yet.";
 
+  const skillsText = proof.items.length
+    ? `Of ${plural(proof.items.length, "linked skill")}: ${proof.counts.observed} seen in your code, ${proof.counts.inferred} inferred from the topic rating, ${proof.counts.association} only linked in the topic map.`
+    : "No wider skill is linked to this topic yet.";
+
   const fit: string[] = [];
-  if (buildsOn.length) fit.push(`It builds on ${joinList(buildsOn)}.`);
+  const direct = paths.filter((p) => p.hops === 1);
+  if (direct.length)
+    fit.push(
+      `It really builds on ${joinList(direct.map((p) => p.steps[1].name))}.`,
+    );
   if (usedBy.length) fit.push(`${joinList(usedBy)} build on it.`);
-  if (related.length) fit.push(`It is often used with ${joinList(related)}.`);
+  if (related.length)
+    fit.push(
+      `It is often used with ${joinList(related)} (an association, not a prerequisite).`,
+    );
+
+  const demonstrated = paths.filter((p) => p.status === "demonstrated").length;
+  const weak = paths.filter((p) => p.status === "weak").length;
+  const unverified = paths.filter((p) => p.status === "unverified").length;
+  const prerequisiteSummary = paths.length
+    ? `${plural(paths.length, "foundation path")}: ${demonstrated} backed by your code, ${weak} shallow, ${unverified} not assessed.${paths[0].weakest && paths[0].status !== "demonstrated" ? ` Weakest link: ${paths[0].weakest}.` : ""}`
+    : "No foundation path is recorded for this topic.";
+
+  const confidenceNote = `Confidence is ${confidence.effective}. ${[
+    confidence.strengths[0],
+    confidence.limits[0],
+  ]
+    .filter(Boolean)
+    .join(". But ")}.`.replace(/\.\.$/, ".");
 
   const files = num(f.filesChecked);
   const projectCount = num(f.projectsInvolved);
@@ -1923,12 +2518,7 @@ function plainStory(f: Row): PlainStory {
     summary: `Pathway checked ${files} file${files === 1 ? "" : "s"} across ${f.changesChecked} change${num(f.changesChecked) === 1 ? "" : "s"} in ${projectCount} project${projectCount === 1 ? "" : "s"} and rated your ${f.topic} skill as ${String(f.level).toLowerCase()}. ${built}`,
     steps: [
       { title: "What we found", text: found },
-      {
-        title: "Skills it covers",
-        text: skills.length
-          ? `This topic is part of ${joinList(skills)}.`
-          : "No wider skill is linked to this topic yet.",
-      },
+      { title: "Skills it covers", text: skillsText },
       {
         title: "Where it fits",
         text: fit.length
@@ -1951,6 +2541,11 @@ function plainStory(f: Row): PlainStory {
       `Show me the work behind ${f.topic}`,
       `What does ${f.topic} build on?`,
     ],
+    proof: proof.items,
+    prerequisitePaths: paths,
+    prerequisiteSummary,
+    confidence,
+    confidenceNote,
   };
 }
 
@@ -1960,6 +2555,13 @@ async function buildGraphPayload(d: Dossier, slug: string) {
   const graph = await getGraphForDeveloper(d.developerId);
   const ev = await readTopicGraphEvidence(graph, d.developerId, slug);
   if (!ev) return null;
+  const detail = await readTopicDepthDetail(graph, d.developerId, slug);
+  const ctx = await proofContext(
+    d,
+    card,
+    (detail ?? {}) as unknown as Row,
+    ev as unknown as Row,
+  );
 
   const posOf = (pick: (c: TopicCard) => number | null) => {
     const ranked = d.cards
@@ -2037,12 +2639,17 @@ async function buildGraphPayload(d: Dossier, slug: string) {
     ...ev,
     topic: mini(card),
     algorithms,
+    proof: ctx.proof.items,
+    proofCounts: ctx.proof.counts,
+    topicCitations: ctx.proof.topicCitations,
+    prerequisitePaths: ctx.paths,
+    confidence: ctx.confidence,
     score: {
       score: card.score,
       level: card.level,
       baseline: card.baselineScore,
       adjustment: card.scoreDelta,
-      confidence: card.confidence,
+      confidence: ctx.confidence.effective,
       authenticity: card.authenticity,
       evidence: card.evidence,
       graphSupport: {
@@ -2052,8 +2659,8 @@ async function buildGraphPayload(d: Dossier, slug: string) {
       },
     },
   };
-  const facts = plainFacts(card, base as unknown as Row, algorithms);
-  return { ...base, plain: { facts, story: plainStory(facts) } };
+  const facts = plainFacts(card, base as unknown as Row, algorithms, ctx);
+  return { ...base, plain: { facts, story: plainStory(facts, ctx) } };
 }
 
 // ============================================================
@@ -2365,6 +2972,8 @@ topicsRouter.get(
           .status(404)
           .json({ error: `No assessment for topic "${slug}".` });
 
+      const ctx = await proofContext(d, card, detail as unknown as Row);
+
       const nextLevel = DEPTH_LEVELS[card.levelRank + 1] ?? null;
       const evidenceByKind: Record<string, typeof detail.evidence> = {
         code: [],
@@ -2386,10 +2995,16 @@ topicsRouter.get(
 
       // What is NOT established, built only from stored fields. Never invented.
       const limitations: string[] = [...detail.gaps];
-      if (card.confidence === "low")
+      if (ctx.confidence.effective === "low")
         limitations.push(
-          "Confidence is low: little evidence sits behind this level.",
+          "Confidence is low: little or narrow evidence sits behind this level.",
         );
+      else if (ctx.confidence.effective !== card.confidence)
+        limitations.push(
+          `Confidence is shown as ${ctx.confidence.effective}: the stored value (${card.confidence}) is higher than the current evidence supports.`,
+        );
+      for (const lim of ctx.confidence.limits.slice(0, 2))
+        limitations.push(`Evidence is thin on: ${lim}.`);
       if (card.authenticity !== "genuine_implementation")
         limitations.push(
           `Authenticity is "${AUTHENTICITY_META[card.authenticity].label.toLowerCase()}", so this is not shown as something the developer built.`,
@@ -2400,12 +3015,21 @@ topicsRouter.get(
         );
       if (card.evidence.commits <= 1 && card.evidence.files > 0)
         limitations.push("Only one commit touches this topic.");
-      if (
-        detail.capabilityPaths.length > 0 &&
-        detail.capabilityPaths.every((p) => p.demonstrations === 0)
-      )
+      if (ctx.proof.counts.inferred > 0)
         limitations.push(
-          "Mapped capabilities have no demonstrations for this developer; a mapping is taxonomy, not proof.",
+          `${plural(ctx.proof.counts.inferred, "linked skill")} ${ctx.proof.counts.inferred === 1 ? "is" : "are"} only inferred from the topic rating; no example was matched.`,
+        );
+      if (ctx.proof.counts.association > 0)
+        limitations.push(
+          `${plural(ctx.proof.counts.association, "linked skill")} ${ctx.proof.counts.association === 1 ? "is" : "are"} linked in the taxonomy only, not seen in your code.`,
+        );
+      for (const p of ctx.paths
+        .filter((x) => x.status !== "demonstrated")
+        .slice(0, 2))
+        limitations.push(
+          p.status === "unverified"
+            ? `Foundation path "${p.sentence}" has a foundation with no assessment (${p.weakest}).`
+            : `Foundation path "${p.sentence}" rests on a shallow foundation (${p.weakest}).`,
         );
       for (const p of detail.learning?.prerequisites ?? []) {
         if (p.hops === 1 && p.edge.strength === "required" && !p.met)
@@ -2415,15 +3039,24 @@ topicsRouter.get(
       }
 
       return res.json({
-        topic: card,
+        topic: {
+          ...card,
+          confidence: ctx.confidence.effective,
+          statedConfidence: card.confidence,
+        },
         verdict: detail.summary.verdict,
         rationale: detail.rationale,
         strengths: detail.strengths,
         gaps: detail.gaps,
-        limitations: uniq(limitations).slice(0, 8),
+        limitations: uniq(limitations).slice(0, 10),
         implementations: detail.implementations,
         safeguards: detail.safeguards,
         capabilityPaths: detail.capabilityPaths,
+        proof: ctx.proof.items,
+        proofCounts: ctx.proof.counts,
+        topicCitations: ctx.proof.topicCitations,
+        prerequisitePaths: ctx.paths,
+        confidence: ctx.confidence,
         approaches: [...detail.approaches].sort(
           (a, b) =>
             Number(b.isPrimary) - Number(a.isPrimary) ||
@@ -2558,6 +3191,9 @@ topicsRouter.get(
 /**
  * The agent: rewrites the graph facts as a plain-English explanation.
  * Facts are rebuilt on the server (never trusted from the client).
+ * The proof classes, citations, prerequisite paths and confidence level are
+ * always the server's deterministic values; the model only supplies wording,
+ * and only for entries that are already "observed".
  * Falls back to the deterministic story if the model is unavailable.
  */
 topicsRouter.post(
@@ -2577,18 +3213,36 @@ topicsRouter.post(
           .json({ error: `No assessment for topic "${slug}".` });
 
       const facts = payload.plain.facts;
-      let story: PlainStory = payload.plain.story;
+      const base: PlainStory = payload.plain.story;
+      let story: PlainStory = base;
       let source: "llm" | "graph" = "graph";
       try {
         const llm = createDepthLlmFromEnv();
-        const cacheKey = `${d.developerId}:${slug}:${cardScore(d, slug)}:${JSON.stringify(facts).length}`;
+        const cacheKey = `${d.developerId}:${slug}:${cardScore(d, slug)}:${base.confidence.effective}:${JSON.stringify(facts).length}`;
         const out = await explainTopicEvidence(llm, facts, cacheKey);
         if (out) {
           story = {
-            ...out,
-            followups: out.followups.length
-              ? out.followups
-              : payload.plain.story.followups,
+            ...base,
+            headline: out.headline,
+            summary: out.summary,
+            steps: out.steps,
+            meaning: out.meaning,
+            caveat: out.caveat || base.caveat,
+            followups: out.followups.length ? out.followups : base.followups,
+            prerequisiteSummary:
+              out.prerequisiteSummary || base.prerequisiteSummary,
+            confidenceNote: out.confidenceNote || base.confidenceNote,
+            proof: base.proof.map((item) => {
+              if (item.class !== "observed") return item;
+              const w = out.items.find((x) => x.id === item.id);
+              return w
+                ? {
+                    ...item,
+                    demonstrates: w.demonstrates || item.demonstrates,
+                    matters: w.matters || item.matters,
+                  }
+                : item;
+            }),
           };
           source = "llm";
         }
