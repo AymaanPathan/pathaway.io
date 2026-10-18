@@ -66,8 +66,7 @@ The Topic Graph answers four questions that a list of tutorials cannot:
 14. [Setup instructions](#-setup-instructions)
 15. [Troubleshooting](#%EF%B8%8F-troubleshooting)
 16. [Limitations](#-limitations)
-17. [Roadmap](#%EF%B8%8F-roadmap)
-18. [Design principles](#-design-principles)
+17. [Design principles](#-design-principles)
 
 ---
 
