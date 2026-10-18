@@ -88,6 +88,7 @@ flowchart LR
 ---
 
 ## 🏙️ 3D Skill City
+
 <img width="1535" height="690" alt="graph" src="https://github.com/user-attachments/assets/cd872edd-baf8-4a9e-ba09-f69bd23cdd55" />
 
 
@@ -396,8 +397,8 @@ flowchart TD
 ```
 
 ### Mission Agent guarantees
-<img width="1525" height="692" alt="mission-1" src="https://github.com/user-attachments/assets/46fc1b66-30c0-41ec-bcea-6289377d7fa6" />
 
+<img width="1525" height="692" alt="mission-1" src="https://github.com/user-attachments/assets/46fc1b66-30c0-41ec-bcea-6289377d7fa6" />
 
 - **At most 5 files**, all implementation; `modifyPaths` includes the start file
 - **Exactly 3 acceptance criteria**, each an observable test case the platform runs
@@ -434,8 +435,6 @@ Before the agent may claim "your code lacks X", Pathway checks `package.json` de
 
 ## 🧰 Chat agent tools
 
-
-
 16 typed tools, each declaring `name`, `description`, `whenToUse`, the FalkorDB `features` it uses, and a parameter schema. That one declaration feeds the **planner**, the **argument validator** (`parseToolArgs` clamps numbers, enforces enums, drops unknown keys), and the **UI**.
 
 | Tool | Graph capability |
@@ -469,10 +468,10 @@ Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun
 |---|---|
 | Graph database | **FalkorDB** (Docker), Cypher, built-in graph algorithms |
 | Backend | Node.js, TypeScript (ESM) |
-| AI | LLM agents with validator and repair loops |
+| AI | LLM agents (Groq, Cerebras, NVIDIA) with validator and repair loops |
 | Frontend | **React**, **React Three Fiber** + drei (3D Skill City) |
 | API | Express (REST + SSE) |
-| Verification | Sandboxed, platform-generated tests |
+| Verification | Platform-generated tests run in a Daytona sandbox |
 | Infra | Docker |
 
 ---
@@ -483,8 +482,9 @@ Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun
 
 - **Node.js** 20+ and **npm** (or pnpm / yarn)
 - **Docker** (for FalkorDB)
-- A **GitHub token** (to read commit history)
-- An **LLM API key** (the Mission Agent will not run without one)
+- A **GitHub OAuth app** and a **personal access token** (sign-in and commit history)
+- At least one **LLM API key** (Groq, Cerebras, or NVIDIA); the Mission Agent will not run without one
+- A **Daytona API key** (evaluation sandbox for mission tests)
 
 ### 1. Clone
 
@@ -573,26 +573,50 @@ cp .env.example .env
 ```
 
 ```env
-# FalkorDB
-FALKORDB_HOST=localhost
-FALKORDB_PORT=6379
-FALKORDB_GRAPH=pathway
+# --- GitHub ---
+GITHUB_PERSONAL_ACCESS_TOKEN=ghp_xxx
+GITHUB_CLIENT_ID=your_oauth_client_id
+GITHUB_CLIENT_SECRET=your_oauth_client_secret
+GITHUB_OAUTH_CALLBACK_URL=http://localhost:4000/auth/github/callback
+GITHUB_EXCLUDE_REPOS=            # optional: repositories to skip during analysis
 
-# GitHub
-GITHUB_TOKEN=ghp_xxx
+# --- Auth and URLs ---
+SESSION_JWT_SECRET=change_me_to_a_long_random_string
+FRONTEND_URL=http://localhost:5173
 
-# LLM
-LLM_API_KEY=sk-xxx
-LLM_TIMEOUT_MS=30000
+# --- FalkorDB ---
+FALKORDB_URL=redis://localhost:6379
+# with a password: redis://:yourpassword@localhost:6379
 
-# Optional: log every successful mission query (failures always log)
-MISSION_DEBUG=0
+# --- LLM providers ---
+GROQ_API_KEY=gsk_xxx
+GROQ_MODEL=your_groq_model
+CEREBRAS_API_KEY=csk_xxx
+NVIDIA_API_KEY=nvapi_xxx
 
-# Server
-PORT=4000
+# --- Evaluation sandbox ---
+DAYTONA_API_KEY=your_daytona_key
+
+# --- Depth Analyzer LLM throttling ---
+DEPTH_LLM_CONCURRENCY=2          # parallel LLM calls
+DEPTH_LLM_TPM=60000              # tokens-per-minute budget
+DEPTH_LLM_RETRIES=1              # retries per failed call
+DEPTH_LLM_BREAKER=6              # consecutive failures before the circuit breaker opens
 ```
 
-> Variable names are placeholders: match them to your `.env.example`. `LLM_TIMEOUT_MS` and `MISSION_DEBUG` are read by the Mission Agent and graph layer.
+| Variable | Purpose |
+|---|---|
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_OAUTH_CALLBACK_URL` | GitHub OAuth app used for sign-in. Create one at **GitHub, Settings, Developer settings, OAuth Apps** and set its callback URL to match. |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | Token used to read commit history and repositories |
+| `GITHUB_EXCLUDE_REPOS` | Optional list of repositories to leave out of the analysis |
+| `SESSION_JWT_SECRET` | Secret used to sign session tokens |
+| `FRONTEND_URL` | Frontend origin (CORS and OAuth redirects) |
+| `FALKORDB_URL` | Connection URL for FalkorDB |
+| `GROQ_API_KEY`, `GROQ_MODEL`, `CEREBRAS_API_KEY`, `NVIDIA_API_KEY` | LLM providers for the agents |
+| `DAYTONA_API_KEY` | Daytona sandbox where the platform runs its generated tests |
+| `DEPTH_LLM_*` | Rate limiting and failure handling for the Depth Analyzer's LLM calls |
+
+Optional: `LLM_TIMEOUT_MS` (Mission Agent timeout, default `30000`) and `MISSION_DEBUG=1` (log every successful mission query; failures always log).
 
 ### 4. Install and run the backend
 
@@ -627,6 +651,7 @@ npm install three @react-three/fiber @react-three/drei
 6. Watch the graph grow and the celebration screen appear
 
 <img width="862" height="491" alt="goal-2" src="https://github.com/user-attachments/assets/edc45e77-ac63-4654-b8b1-20f2e0796935" />
+
 ---
 
 ## 🛠️ Troubleshooting
@@ -636,7 +661,7 @@ npm install three @react-three/fiber @react-three/drei
 | `ECONNREFUSED 6379` | FalkorDB is not running: `docker ps`, then `docker start falkordb` |
 | Empty foundation ranking | No `BUILDS_ON` edges yet: re-run the analysis so metrics refresh |
 | Communities show only "Standalone" | Not enough `RELATED_TOPIC` links; the tool falls back to `Topic.cluster_id` |
-| `llm_unavailable` on mission | Set `LLM_API_KEY`; Pathway will not invent a mission without an LLM |
+| `llm_unavailable` on mission | Set your LLM API keys (`GROQ_API_KEY`, `CEREBRAS_API_KEY`, `NVIDIA_API_KEY`); Pathway will not invent a mission without an LLM |
 | `generation_failed` | All 3 repair attempts were rejected: read the rejection notes in the logs |
 | "N of M rows matched nothing" in logs | A `MATCH` in a batch write found no node; check that parent nodes were written first |
 | Port 3000 already in use | Remap the FalkorDB Browser with `-p 3001:3000` |
