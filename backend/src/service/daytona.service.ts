@@ -1,4 +1,5 @@
 import { builtinModules } from "node:module";
+import { createHmac, randomBytes } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -23,79 +24,139 @@ const PORT = 4100;
 const BOOT_TRIES_BACKEND = 45;
 // frontend boot includes `next build`, which can take minutes on one CPU
 const BOOT_TRIES_FRONTEND = 180;
+/** Hard wall-clock cap for everything that runs inside one sandbox (cleanup excluded). */
+const OVERALL_BUDGET_S = 1500;
+const DELETE_TRIES = 3;
+
+const MAX_HEAL = 3;
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+const RESERVED_ENV = /^(PATH|HOME|SHELL|NODE_OPTIONS|PORT|CI)$/;
+
+/* ------------------------------------------------------------------ */
+/* explicit, test-only authentication                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Authentication for HTTP missions is configured EXPLICITLY by the caller.
+ * Nothing in the developer's code is patched, wrapped or guessed at: the real
+ * auth middleware always runs. The mission test authenticates like a real client.
+ *
+ *  - "none": default. No credentials are provided; protected routes return 401
+ *    and that is reported as a test failure.
+ *  - "env":  the caller supplies exact env vars for the server and/or the test.
+ *  - "jwt":  the runner mints a short-lived HS256 token with a per-run secret.
+ *    The server receives the secret under `secretEnv`; the test receives the
+ *    token (MISSION_AUTH_TOKEN) and the header value (MISSION_AUTH_HEADER).
+ *
+ * Credentials exist only inside the disposable sandbox, are never passed to
+ * install / dev-test steps, and are redacted from every log.
+ */
+export type TestAuthSetup =
+  | { kind: "none" }
+  | {
+      kind: "env";
+      serverEnv?: Record<string, string>;
+      testEnv?: Record<string, string>;
+    }
+  | {
+      kind: "jwt";
+      /** env var the server reads its signing secret from, e.g. JWT_SECRET */
+      secretEnv: string;
+      /** defaults to a random per-run secret */
+      secret?: string;
+      /** least privilege by default: no role is granted unless you pass one */
+      claims?: Record<string, unknown>;
+      /** env var the test reads the token from. Default MISSION_AUTH_TOKEN */
+      tokenEnv?: string;
+      /** default 3600 */
+      expiresInS?: number;
+    };
+
+export interface BuiltTestAuth {
+  serverEnv: Record<string, string>;
+  testEnv: Record<string, string>;
+  /** names only, never values */
+  description: string;
+}
+
+function checkEnvMap(
+  map: Record<string, string> | undefined,
+  where: string,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(map ?? {})) {
+    if (!ENV_NAME.test(k) || RESERVED_ENV.test(k))
+      throw new MissionError(`Invalid test auth env name "${k}" (${where}).`);
+    out[k] = String(v);
+  }
+  return out;
+}
+
+const b64u = (value: Buffer | string) =>
+  Buffer.from(value).toString("base64url");
+
+export function signHs256Jwt(
+  claims: Record<string, unknown>,
+  secret: string,
+  nowS = Math.floor(Date.now() / 1000),
+  ttlS = 3600,
+): string {
+  const header = { alg: "HS256", typ: "JWT" };
+  const payload = { iat: nowS, exp: nowS + ttlS, ...claims };
+  const data = `${b64u(JSON.stringify(header))}.${b64u(JSON.stringify(payload))}`;
+  const signature = createHmac("sha256", secret)
+    .update(data)
+    .digest("base64url");
+  return `${data}.${signature}`;
+}
+
+export function buildTestAuth(spec?: TestAuthSetup): BuiltTestAuth {
+  if (!spec || spec.kind === "none")
+    return {
+      serverEnv: {},
+      testEnv: {},
+      description: "none (real auth, no credentials)",
+    };
+
+  if (spec.kind === "env") {
+    const serverEnv = checkEnvMap(spec.serverEnv, "serverEnv");
+    const testEnv = checkEnvMap(spec.testEnv, "testEnv");
+    return {
+      serverEnv,
+      testEnv,
+      description: `env (server: ${Object.keys(serverEnv).join(",") || "-"}; test: ${Object.keys(testEnv).join(",") || "-"})`,
+    };
+  }
+
+  const [secretEnv] = Object.keys(
+    checkEnvMap({ [spec.secretEnv]: "x" }, "secretEnv"),
+  );
+  const tokenEnv = spec.tokenEnv ?? "MISSION_AUTH_TOKEN";
+  checkEnvMap({ [tokenEnv]: "x" }, "tokenEnv");
+  const secret = spec.secret || randomBytes(32).toString("hex");
+  const ttl =
+    Number.isFinite(spec.expiresInS) && (spec.expiresInS as number) > 0
+      ? Math.floor(spec.expiresInS as number)
+      : 3600;
+  const token = signHs256Jwt(
+    spec.claims ?? { sub: "pathway-test-user" },
+    secret,
+    Math.floor(Date.now() / 1000),
+    ttl,
+  );
+  return {
+    serverEnv: { [secretEnv]: secret },
+    testEnv: { [tokenEnv]: token, MISSION_AUTH_HEADER: `Bearer ${token}` },
+    description: `jwt (server secret: ${secretEnv}; test token: ${tokenEnv})`,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* constants                                                           */
+/* ------------------------------------------------------------------ */
 
 // Sandboxes report the HOST cpu count while the container has a small memory
 // limit. This preload makes Node see a single CPU so build workers are not OOM-killed.
-const AUTH_BYPASS_PATH = "/tmp/pathway-mission-auth-bypass.cjs";
-
-/**
- * Test-only preload used only for HTTP missions unrelated to auth. It replaces
- * identifiable auth guards with a tiny identity middleware while leaving rate
- * limiters, validation, business logic and all other middleware intact.
- */
-const AUTH_BYPASS_JS = String.raw`const Module = require("node:module");
-const originalLoad = Module._load;
-const patched = new WeakSet();
-const authName = /auth|authenticate|authori[sz]|verify.?token|jwt|passport|require.?login|is.?logged.?in|protect.?route|permission.?check|ensure.?auth/i;
-const authBody = /authorization|bearer\s|jwt\s*\.\s*verify|req\s*\.\s*(?:user|auth)|isAuthenticated|unauthorized|not authenticated|invalid token/i;
-function isAuthGuard(fn) {
-  if (typeof fn !== "function") return false;
-  const name = fn.name || "";
-  if (authName.test(name)) return true;
-  if (/^(?:anonymous|middleware|bound )/i.test(name)) {
-    try { return authBody.test(Function.prototype.toString.call(fn).slice(0, 1800)); } catch {}
-  }
-  return false;
-}
-function bypass(req, res, next) {
-  if (req) {
-    if (!req.user) req.user = { id: "pathway-test-user", userId: "pathway-test-user", role: "admin" };
-    if (!req.auth) req.auth = { userId: "pathway-test-user", role: "admin" };
-    if (typeof req.isAuthenticated !== "function") req.isAuthenticated = () => true;
-  }
-  return next();
-}
-function replace(value) {
-  if (Array.isArray(value)) return value.map(replace);
-  return isAuthGuard(value) ? bypass : value;
-}
-function patchContainer(container) {
-  if (!container || (typeof container !== "object" && typeof container !== "function") || patched.has(container)) return container;
-  patched.add(container);
-  for (const method of ["use", "get", "post", "put", "patch", "delete", "options", "head", "all"]) {
-    if (typeof container[method] !== "function") continue;
-    const original = container[method];
-    try {
-      container[method] = function (...args) {
-        const mapped = args.map(replace);
-        return original.apply(this, mapped);
-      };
-    } catch {}
-  }
-  if (typeof container.route === "function") {
-    const originalRoute = container.route;
-    try {
-      container.route = function (...args) { return patchContainer(originalRoute.apply(this, args)); };
-    } catch {}
-  }
-  return container;
-}
-function wrapExpress(express) {
-  if (typeof express !== "function" || express.__pathwayAuthBypassWrapped) return express;
-  function wrappedExpress(...args) { return patchContainer(express(...args)); }
-  Object.setPrototypeOf(wrappedExpress, express);
-  Object.assign(wrappedExpress, express);
-  wrappedExpress.Router = function (...args) { return patchContainer(express.Router(...args)); };
-  wrappedExpress.__pathwayAuthBypassWrapped = true;
-  return wrappedExpress;
-}
-Module._load = function (request, parent, isMain) {
-  const loaded = originalLoad.call(this, request, parent, isMain);
-  if (request === "express") return wrapExpress(loaded);
-  return loaded;
-};
-`;
-
 const LIMIT_CPUS_JS = `const os = require("os");
 const real = os.cpus;
 os.cpus = () => real.call(os).slice(0, 1);
@@ -111,8 +172,6 @@ const SERVER_TUNING = [
   `export NEXT_TELEMETRY_DISABLED=1`,
   `export NODE_OPTIONS="\${NODE_OPTIONS:-} --require ${LIMIT_CPUS_PATH} --max-old-space-size=$HEAP"`,
 ].join("; ");
-const MAX_HEAL = 3;
-const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
 const NPM_ENV: Record<string, string> = {
   npm_config_fetch_retries: "5",
@@ -141,11 +200,35 @@ const MODULE_RUNNER_CONFIG = `import { defineConfig } from "vitest/config";
 export default defineConfig({ test: { include: ["__mission__/mission.test.ts"], testTimeout: 20000, hookTimeout: 20000, environment: "node" } });
 `;
 
+/* ------------------------------------------------------------------ */
+/* result types                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ *  none            the mission test ran to completion and exited 0
+ *  tests_failed    the mission test ran and reported failures (a real test failure)
+ *  project         the developer's project could not install / boot / compile
+ *  timeout         a step exceeded its time budget (the code may hang)
+ *  infrastructure  OUR environment failed (sandbox API, network, disk, memory, runner)
+ *
+ * Only "infrastructure" should be retried without the developer changing anything,
+ * and it must never be counted as a failed mission attempt.
+ */
+export type FailureClass =
+  | "none"
+  | "tests_failed"
+  | "project"
+  | "timeout"
+  | "infrastructure";
+
 export type SandboxResult = {
   failedAt?: "install" | "extras" | "server";
   timedOut: boolean;
   /** true when the failure looks like OUR environment / network, not the developer's code */
   infra: boolean;
+  failureClass: FailureClass;
+  /** why the failure was classified as infrastructure; "" otherwise */
+  infraReason: string;
   installExit: number;
   testExit: number | null;
   log: string;
@@ -153,6 +236,8 @@ export type SandboxResult = {
   /** the developer's own test command, run in their project */
   devTests: { ran: boolean; exit: number | null; out: string };
   durationMs: number;
+  /** Mutated after the sandbox is torn down; check `deleted` before trusting the sandbox is gone. */
+  cleanup: { deleted: boolean; attempts: number; error: string };
 };
 
 export type StepReporter = (
@@ -162,6 +247,9 @@ export type StepReporter = (
   command?: string,
 ) => void;
 
+/** The only parts of the Daytona client this module uses. Injectable for tests. */
+export type SandboxClient = Pick<Daytona, "create" | "delete">;
+
 let client: Daytona | null = null;
 const daytona = () => (client ??= new Daytona());
 
@@ -170,30 +258,72 @@ const secs = (ms: number) => (ms / 1000).toFixed(1);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type Sandbox = Awaited<ReturnType<Daytona["create"]>>;
-type Step = { exitCode: number; out: string; timedOut: boolean; ms: number };
+type Step = {
+  exitCode: number;
+  out: string;
+  timedOut: boolean;
+  ms: number;
+  /** the sandbox API call itself threw: nothing ran, so this is never the developer's fault */
+  sandboxError: boolean;
+};
+type StepOpts = {
+  /** also enforce the timeout INSIDE the sandbox so the process is killed, not just abandoned */
+  enforce?: boolean;
+  /** cleanup commands must run even when the overall budget is spent */
+  ignoreDeadline?: boolean;
+};
 type Log = (m: string) => void;
+
+const deadlines = new WeakMap<object, number>();
 
 async function step(
   sandbox: Sandbox,
   command: string,
   cwd: string,
   timeoutS: number,
+  opts: StepOpts = {},
 ): Promise<Step> {
   const started = Date.now();
+  const deadline = deadlines.get(sandbox);
+  if (deadline !== undefined && !opts.ignoreDeadline) {
+    const left = Math.floor((deadline - started) / 1000);
+    if (left <= 0)
+      return {
+        exitCode: -1,
+        out: "overall sandbox time budget exhausted",
+        timedOut: true,
+        ms: 0,
+        sandboxError: false,
+      };
+    timeoutS = Math.min(timeoutS, left);
+  }
+
+  const inner = `(${command}) 2>&1`;
+  // `timeout` fires 6s before the API timeout, so the process tree is killed
+  // by the sandbox and the API timeout is only a backstop.
+  const innerLimit = Math.max(1, timeoutS - 6);
+  const body = opts.enforce
+    ? `if command -v timeout >/dev/null 2>&1; then timeout -k 5 ${innerLimit} bash -c ${shq(inner)}; else bash -c ${shq(inner)}; fi`
+    : inner;
+
   try {
     const r = await sandbox.process.executeCommand(
-      `(${command}) 2>&1`,
+      body,
       cwd,
       undefined,
       timeoutS,
     );
     const exitCode = typeof r.exitCode === "number" ? r.exitCode : -1;
     const ms = Date.now() - started;
+    const threshold = opts.enforce ? timeoutS - 8 : timeoutS - 2;
     return {
       exitCode,
       out: String(r.result ?? ""),
-      timedOut: exitCode !== 0 && ms >= (timeoutS - 2) * 1000,
+      timedOut:
+        (opts.enforce === true && exitCode === 124) ||
+        (exitCode !== 0 && ms >= threshold * 1000),
       ms,
+      sandboxError: false,
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -202,6 +332,7 @@ async function step(
       out: msg,
       timedOut: /time(d)?\s?out/i.test(msg),
       ms: Date.now() - started,
+      sandboxError: true,
     };
   }
 }
@@ -241,6 +372,62 @@ const TREE_CMD =
   "find . -maxdepth 3 -not -path '*/node_modules*' -not -path '*/.git/*' -not -name '.git' | sort | head -120";
 
 /* ------------------------------------------------------------------ */
+/* failure classification                                              */
+/* ------------------------------------------------------------------ */
+
+// Errors that mean "npm itself or the network failed", not "your package.json is wrong".
+const NPM_FLAKY =
+  /Exit handler never called|ECONNRESET|ETIMEDOUT|ESOCKETTIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|ERR_SOCKET|Killed|ENOMEM|network/i;
+
+// Resource exhaustion in the sandbox itself. Deliberately narrow: a test that
+// cannot reach 127.0.0.1:5432 is the project's problem, not ours.
+const RESOURCE_INFRA =
+  /ENOSPC|No space left on device|ENOMEM|Cannot allocate memory|heap out of memory|JavaScript heap|\bKilled\b/i;
+
+type Classified = {
+  failureClass: FailureClass;
+  infra: boolean;
+  infraReason: string;
+  timedOut: boolean;
+};
+
+const classified = (
+  failureClass: FailureClass,
+  infraReason = "",
+  timedOut = false,
+): Classified => ({
+  failureClass,
+  infra: failureClass === "infrastructure",
+  infraReason: failureClass === "infrastructure" ? infraReason : "",
+  timedOut,
+});
+
+/** Decides what a finished mission-test run means. */
+export function classifyTestRun(
+  test: Pick<Step, "exitCode" | "out" | "timedOut" | "sandboxError">,
+  resultsRaw: string | null,
+): Classified {
+  if (test.sandboxError)
+    return classified(
+      "infrastructure",
+      `sandbox command channel failed: ${test.out.slice(0, 200)}`,
+    );
+  if (test.timedOut) return classified("timeout", "", true);
+  if (test.exitCode === 0) {
+    return resultsRaw && resultsRaw.trim()
+      ? classified("none")
+      : classified(
+          "infrastructure",
+          "tests exited 0 but the runner wrote no results file",
+        );
+  }
+  if (resultsRaw && resultsRaw.trim()) return classified("tests_failed");
+  if (RESOURCE_INFRA.test(test.out))
+    return classified("infrastructure", "sandbox ran out of memory or disk");
+  return classified("project");
+}
+
+/* ------------------------------------------------------------------ */
 /* dependency install: retry ladder                                    */
 /* ------------------------------------------------------------------ */
 
@@ -251,10 +438,6 @@ const INSTALL_SYS_CMD = [
   "(df -h /tmp 2>&1 | tail -1) || true",
   `echo "cgroup memory limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"`,
 ].join("; ");
-
-// Errors that mean "npm itself or the network failed", not "your package.json is wrong".
-const NPM_FLAKY =
-  /Exit handler never called|ECONNRESET|ETIMEDOUT|ESOCKETTIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|ERR_SOCKET|Killed|ENOMEM|network/i;
 
 type InstallAttempt = { label: string; cmd: string };
 
@@ -306,7 +489,13 @@ async function installDependencies(
   log += block("install: environment", "node/npm/cpu/memory", sys.out);
 
   const ladder = installLadder(plan);
-  let last: Step = { exitCode: -1, out: "", timedOut: false, ms: 0 };
+  let last: Step = {
+    exitCode: -1,
+    out: "",
+    timedOut: false,
+    ms: 0,
+    sandboxError: false,
+  };
 
   for (let i = 0; i < ladder.length; i++) {
     const remaining = INSTALL_BUDGET_S - (Date.now() - started) / 1000;
@@ -326,6 +515,7 @@ async function installDependencies(
       `${npmExports()}; ${attempt.cmd}`,
       cwd,
       timeoutS,
+      { enforce: true },
     );
     dlog(
       `install: attempt ${i + 1} exit=${last.exitCode} in ${secs(last.ms)}s${last.timedOut ? " TIMED_OUT" : ""}`,
@@ -350,7 +540,7 @@ async function installDependencies(
       continue;
     }
 
-    if (!NPM_FLAKY.test(last.out)) {
+    if (!last.sandboxError && !NPM_FLAKY.test(last.out)) {
       dlog(
         "install: failed for a NON-flaky reason (bad package.json / lockfile / version). Not retrying.",
       );
@@ -364,7 +554,7 @@ async function installDependencies(
   return {
     exitCode: last.exitCode === 0 ? 1 : last.exitCode,
     timedOut: last.timedOut,
-    flaky: NPM_FLAKY.test(last.out),
+    flaky: last.sandboxError || NPM_FLAKY.test(last.out),
     ms: Date.now() - started,
     log,
   };
@@ -475,7 +665,6 @@ function reachable(
 const BUILTINS = new Set(builtinModules);
 const SECRETISH =
   /(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE|CREDENTIAL|CLIENT_ID)/i;
-const RESERVED_ENV = /^(PATH|HOME|SHELL|NODE_OPTIONS|PORT|CI)$/;
 const LOCAL_HOST = /^(127\.0\.0\.1|localhost|0\.0\.0\.0|\[?::1\]?)$/;
 const DUMMY_PG = "postgres://postgres:postgres@127.0.0.1:5432/mission";
 const DUMMY_MYSQL = "mysql://mission:mission@127.0.0.1:3306/mission";
@@ -1416,6 +1605,7 @@ async function stopServer(sb: Sandbox, cwd: string) {
     `PID=$(cat /tmp/server.pid 2>/dev/null); if [ -n "$PID" ]; then kill -TERM -- -$PID 2>/dev/null; kill -TERM $PID 2>/dev/null; pkill -P $PID 2>/dev/null; sleep 1; kill -KILL -- -$PID 2>/dev/null; fi; true`,
     cwd,
     15,
+    { ignoreDeadline: true },
   );
 }
 
@@ -1491,6 +1681,44 @@ async function startServer(
 }
 
 /* ------------------------------------------------------------------ */
+/* cleanup                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Stops the server, then deletes the sandbox with retries. Never throws.
+ * A sandbox that cannot be deleted is reported loudly (it costs money and
+ * holds the developer's code) and surfaced through `cleanup` on the result.
+ */
+async function destroySandbox(
+  sandboxClient: SandboxClient,
+  sandbox: Sandbox,
+  dlog: Log,
+  cleanup: SandboxResult["cleanup"],
+): Promise<void> {
+  await stopServer(sandbox, "/tmp").catch(() => {});
+  const id = (sandbox as unknown as { id?: string }).id ?? "unknown";
+  for (let attempt = 1; attempt <= DELETE_TRIES; attempt++) {
+    cleanup.attempts = attempt;
+    try {
+      await sandboxClient.delete(sandbox);
+      cleanup.deleted = true;
+      cleanup.error = "";
+      dlog(`sandbox deleted (attempt ${attempt})`);
+      return;
+    } catch (e) {
+      cleanup.error = e instanceof Error ? e.message : String(e);
+      dlog(
+        `sandbox delete attempt ${attempt}/${DELETE_TRIES} failed: ${cleanup.error}`,
+      );
+      if (attempt < DELETE_TRIES) await sleep(1000 * attempt);
+    }
+  }
+  const message = `SANDBOX LEAK: could not delete sandbox ${id} after ${DELETE_TRIES} attempts (${cleanup.error}). Remove it manually.`;
+  dlog(message);
+  console.error(`[sandbox] ${message}`);
+}
+
+/* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -1498,52 +1726,79 @@ export async function runInSandbox(opts: {
   plan: ExecutionPlan;
   tarball: Buffer;
   testContent: string;
-  /** Mission wording is used to avoid bypassing middleware when auth itself is under test. */
+  /**
+   * @deprecated Ignored. Auth is no longer inferred from mission wording; pass
+   * `testAuth` explicitly when the mission's tests need credentials.
+   */
   missionText?: string;
+  /** Explicit, test-only credentials for HTTP missions. Default: none (real auth, no credentials). */
+  testAuth?: TestAuthSetup;
   /** resolved env (user-provided + generated). Values are redacted from the log. */
   env: Record<string, string>;
   onStep: StepReporter;
+  /** Test seam. Production callers leave this unset. */
+  daytona?: SandboxClient;
 }): Promise<SandboxResult> {
-  const { plan, tarball, testContent, env, onStep, missionText = "" } = opts;
-  if (!process.env.DAYTONA_API_KEY)
+  const { plan, tarball, testContent, env, onStep } = opts;
+  if (!process.env.DAYTONA_API_KEY && !opts.daytona)
     throw new MissionError(
       "The test sandbox is not configured on the server (DAYTONA_API_KEY is missing).",
     );
 
+  // Validate credentials BEFORE any sandbox exists, so a bad config can never leak one.
+  const auth = buildTestAuth(opts.testAuth);
+  const redactionEnv: Record<string, string> = {
+    ...env,
+    ...auth.serverEnv,
+    ...auth.testEnv,
+  };
+
   const started = Date.now();
-  const d = daytona();
+  const d: SandboxClient = opts.daytona ?? daytona();
   const isHttp = plan.mode === "http";
 
   const diag: string[] = [];
   const dlog: Log = (m) => {
-    const line = `[+${secs(Date.now() - started)}s] ${redact(m, env)}`;
+    const line = `[+${secs(Date.now() - started)}s] ${redact(m, redactionEnv)}`;
     diag.push(line);
     console.log(`[sandbox] ${line}`);
   };
   const diagBlock = () => `── sandbox diagnostics\n${diag.join("\n")}\n\n`;
+  const clean = (s: string) => redact(s, redactionEnv);
 
   let log = "";
   const noDev = { ran: false, exit: null as number | null, out: "" };
+  // Same object is returned in every result and mutated by destroySandbox().
+  const cleanup: SandboxResult["cleanup"] = {
+    deleted: false,
+    attempts: 0,
+    error: "",
+  };
   const finish = (
-    r: Omit<SandboxResult, "log" | "durationMs">,
+    r: Omit<SandboxResult, "log" | "durationMs" | "cleanup">,
   ): SandboxResult => ({
     ...r,
-    log: redact(diagBlock() + log, env).slice(-LOG_CAP),
+    log: redact(diagBlock() + log, redactionEnv).slice(-LOG_CAP),
     durationMs: Date.now() - started,
+    cleanup,
   });
   const bail = (
     failedAt: SandboxResult["failedAt"],
     o: {
       timedOut?: boolean;
       installExit?: number;
-      infra?: boolean;
+      failureClass: FailureClass;
+      infraReason?: string;
       dev?: SandboxResult["devTests"];
-    } = {},
+    },
   ): SandboxResult =>
     finish({
       failedAt,
       timedOut: o.timedOut ?? false,
-      infra: o.infra ?? false,
+      infra: o.failureClass === "infrastructure",
+      failureClass: o.failureClass,
+      infraReason:
+        o.failureClass === "infrastructure" ? (o.infraReason ?? "") : "",
       installExit: o.installExit ?? 0,
       testExit: null,
       resultsRaw: null,
@@ -1558,6 +1813,9 @@ export async function runInSandbox(opts: {
   dlog(`plan: dev tests=${plan.projectTestCommand ?? "(no test script)"}`);
   // keys only: values may be secrets
   dlog(`mission env keys: ${Object.keys(env).sort().join(", ") || "(none)"}`);
+  dlog(`test auth: ${auth.description}`);
+  if (!isHttp && opts.testAuth && opts.testAuth.kind !== "none")
+    dlog("test auth: ignored, module-mode missions do not start a server");
   dlog(`tarball: ${(tarball.length / 1024 / 1024).toFixed(1)} MB`);
 
   onStep(
@@ -1577,7 +1835,10 @@ export async function runInSandbox(opts: {
       `Could not create the Daytona sandbox: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
-  dlog("sandbox created");
+  deadlines.set(sandbox, started + OVERALL_BUDGET_S * 1000);
+  dlog(
+    `sandbox created (${(sandbox as unknown as { id?: string }).id ?? "no id"}); overall budget ${OVERALL_BUDGET_S}s`,
+  );
 
   try {
     const home = (await sandbox.getWorkDir()) || "/home/daytona";
@@ -1622,22 +1883,21 @@ export async function runInSandbox(opts: {
           ? "Installing took too long and was stopped."
           : `The installer exited with code ${install.exitCode}. See the output below.`,
       );
+      const infra = install.flaky || install.timedOut;
       return bail("install", {
         timedOut: install.timedOut,
         installExit: install.exitCode,
-        infra: install.flaky || install.timedOut,
+        failureClass: infra ? "infrastructure" : "project",
+        infraReason: install.timedOut
+          ? "dependency install exceeded its time budget (network or registry stall)"
+          : "npm or the network failed while installing",
       });
     }
     onStep("install", "done", `Installed in ${secs(install.ms)}s.`);
 
-    const setup = makeSetup(
-      sandbox,
-      projectDir,
-      { ...plan.bootEnv, ...env },
-      plan,
-      dlog,
-    );
+    // Install-time and dev-test steps never see the test credentials.
     const bootEnv: Record<string, string> = { ...plan.bootEnv, ...env };
+    const setup = makeSetup(sandbox, projectDir, { ...bootEnv }, plan, dlog);
 
     // ---- test runner ----
     if (isHttp) {
@@ -1680,6 +1940,7 @@ export async function runInSandbox(opts: {
         `${npmExports()}; ${RUNNER_INSTALL}`,
         runnerDir,
         180,
+        { enforce: true },
       );
       dlog(`runner install exit=${runner.exitCode} in ${secs(runner.ms)}s`);
       log += block("install test runner", RUNNER_INSTALL, runner.out);
@@ -1688,7 +1949,9 @@ export async function runInSandbox(opts: {
         return bail("extras", {
           timedOut: runner.timedOut,
           installExit: runner.exitCode,
-          infra: true,
+          failureClass: "infrastructure",
+          infraReason:
+            "the isolated test runner (vitest) could not be installed",
         });
       }
       onStep("extras", "done", `Installed in ${secs(runner.ms)}s.`);
@@ -1716,6 +1979,7 @@ export async function runInSandbox(opts: {
           `${npmExports()}; ${cmd}`,
           projectDir,
           180,
+          { enforce: true },
         );
         dlog(`vitest install exit=${r.exitCode} in ${secs(r.ms)}s`);
         log += block(
@@ -1725,10 +1989,13 @@ export async function runInSandbox(opts: {
         );
         if (r.exitCode !== 0) {
           onStep("extras", "failed", "Could not install vitest.");
+          const infra = r.sandboxError || r.timedOut || NPM_FLAKY.test(r.out);
           return bail("extras", {
             timedOut: r.timedOut,
             installExit: r.exitCode,
-            infra: NPM_FLAKY.test(r.out),
+            failureClass: infra ? "infrastructure" : "project",
+            infraReason:
+              "vitest could not be installed (npm or network failure)",
           });
         }
       }
@@ -1751,8 +2018,13 @@ export async function runInSandbox(opts: {
         wrap(bootEnv, `${npmExports()}; ${plan.projectTestCommand}`),
         projectDir,
         DEV_TEST_TIMEOUT_S,
+        { enforce: true },
       );
-      dev = { ran: true, exit: r.exitCode, out: lastLines(r.out, 120) };
+      dev = {
+        ran: true,
+        exit: r.exitCode,
+        out: clean(lastLines(r.out, 120)),
+      };
       dlog(`dev tests exit=${r.exitCode} in ${secs(r.ms)}s`);
       log += block(
         "your tests",
@@ -1799,7 +2071,7 @@ export async function runInSandbox(opts: {
       try {
         const raw = (await sandbox.fs.downloadFile(path)).toString("utf8");
         dlog(`results file read (${raw.length} chars)`);
-        return raw;
+        return clean(raw);
       } catch {
         dlog(`results file NOT found at ${path}`);
         return null;
@@ -1830,11 +2102,17 @@ export async function runInSandbox(opts: {
         ),
         projectDir,
         TEST_TIMEOUT_S,
+        { enforce: true },
       );
       dlog(
         `tests exit=${test.exitCode} timedOut=${test.timedOut} in ${secs(test.ms)}s`,
       );
       log += block("run tests", plan.testCommand, test.out);
+      const resultsRaw = await readResults(`${projectDir}/${plan.resultsFile}`);
+      const verdict = classifyTestRun(test, resultsRaw);
+      dlog(
+        `test run classified as ${verdict.failureClass}${verdict.infraReason ? `: ${verdict.infraReason}` : ""}`,
+      );
       onStep(
         "test",
         test.timedOut ? "failed" : "done",
@@ -1843,11 +2121,13 @@ export async function runInSandbox(opts: {
           : `Test run finished in ${secs(test.ms)}s.`,
       );
       return finish({
-        timedOut: test.timedOut,
-        infra: false,
+        timedOut: verdict.timedOut,
+        infra: verdict.infra,
+        failureClass: verdict.failureClass,
+        infraReason: verdict.infraReason,
         installExit: install.exitCode,
         testExit: test.exitCode,
-        resultsRaw: await readResults(`${projectDir}/${plan.resultsFile}`),
+        resultsRaw,
         devTests: dev,
       });
     }
@@ -1859,7 +2139,7 @@ export async function runInSandbox(opts: {
         "failed",
         "Could not tell how to start your server. Add a `dev` or `start` script to package.json.",
       );
-      return bail("server", { dev });
+      return bail("server", { dev, failureClass: "project" });
     }
 
     const bootTries =
@@ -1868,22 +2148,6 @@ export async function runInSandbox(opts: {
       Buffer.from(LIMIT_CPUS_JS, "utf8"),
       LIMIT_CPUS_PATH,
     );
-    const authIsMission =
-      /\b(auth|authenticat(?:e|ion)|authori[sz](?:e|ation)|oauth|\bjwt\b|\b(?:bearer|access|refresh)\s+token\b|\bpermission(?:s)?\b|\baccess control\b|\bsession(?:s)?\b|\blogin\b|\blogout\b|\bcredential(?:s)?\b|\bidentity\b)/i.test(
-        missionText,
-      );
-    const bypassUnrelatedAuth = plan.track === "backend" && !authIsMission;
-    if (bypassUnrelatedAuth) {
-      await sandbox.fs.uploadFile(
-        Buffer.from(AUTH_BYPASS_JS, "utf8"),
-        AUTH_BYPASS_PATH,
-      );
-      dlog(
-        "test-only auth bypass enabled for unrelated HTTP mission; identifiable auth guards only",
-      );
-    } else if (authIsMission) {
-      dlog("auth-related mission detected; auth middleware bypass is disabled");
-    }
 
     onStep(
       "server",
@@ -1900,6 +2164,7 @@ export async function runInSandbox(opts: {
       port: null,
       died: false,
     };
+    let lastTail = "";
 
     for (let attempt = 0; attempt <= MAX_HEAL; attempt++) {
       onStep(
@@ -1911,21 +2176,15 @@ export async function runInSandbox(opts: {
         plan.startCommand,
       );
       dlog(`boot attempt ${attempt + 1}/${MAX_HEAL + 1}`);
-      // The application is started only inside this disposable sandbox. For
-      // unrelated missions, a preload bypasses identifiable auth guards only;
-      // auth-related missions keep the original middleware untouched. Preserve
-      // an explicit NODE_ENV supplied by the project/environment.
-      const existingNodeOptions = bootEnv.NODE_OPTIONS?.trim();
+      // The developer's middleware is never modified. Explicit test credentials
+      // (if any) are added to the server environment only. An explicit NODE_ENV
+      // supplied by the project/environment is preserved.
       const serverEnv = {
         ...bootEnv,
         NODE_ENV:
           bootEnv.NODE_ENV ??
           (plan.track === "frontend" ? "production" : "test"),
-        ...(bypassUnrelatedAuth
-          ? {
-              NODE_OPTIONS: `${existingNodeOptions ? `${existingNodeOptions} ` : ""}--require=${AUTH_BYPASS_PATH}`,
-            }
-          : {}),
+        ...auth.serverEnv,
       };
       srv = await startServer(
         sandbox,
@@ -1938,6 +2197,7 @@ export async function runInSandbox(opts: {
       const tail = (
         await step(sandbox, "tail -n 200 /tmp/server.log", projectDir, 10)
       ).out;
+      lastTail = tail;
 
       if (srv.port) {
         log += block("server output", plan.startCommand, lastLines(tail, 80));
@@ -1978,7 +2238,13 @@ export async function runInSandbox(opts: {
           ? "Your server crashed while starting. See the server output below."
           : `Your server did not answer on any port within ${bootTries}s. See the server output below.`,
       );
-      return bail("server", { dev });
+      const resource = RESOURCE_INFRA.test(lastTail);
+      return bail("server", {
+        dev,
+        failureClass: resource ? "infrastructure" : "project",
+        infraReason:
+          "the sandbox ran out of memory or disk while booting the server",
+      });
     }
     onStep("server", "done", `Your server is answering on port ${srv.port}.`);
 
@@ -1988,8 +2254,10 @@ export async function runInSandbox(opts: {
       `Running the mission's test file against http://127.0.0.1:${srv.port}.`,
       plan.testCommand,
     );
+    // The test authenticates like a real client using the explicit test credentials.
     const testEnv = {
       ...env,
+      ...auth.testEnv,
       MISSION_BASE_URL: `http://127.0.0.1:${srv.port}`,
     };
     // Run with the repository as Vitest's root so the test's relative imports
@@ -2006,6 +2274,7 @@ export async function runInSandbox(opts: {
       `${exportsOf(testEnv)}; ${httpTestCommand}`,
       runnerDir,
       TEST_TIMEOUT_S,
+      { enforce: true },
     );
     dlog(
       `tests exit=${test.exitCode} timedOut=${test.timedOut} in ${secs(test.ms)}s`,
@@ -2016,6 +2285,11 @@ export async function runInSandbox(opts: {
       "tail /tmp/server.log",
       (await step(sandbox, "tail -n 40 /tmp/server.log", projectDir, 10)).out,
     );
+    const resultsRaw = await readResults(resultsPath);
+    const verdict = classifyTestRun(test, resultsRaw);
+    dlog(
+      `test run classified as ${verdict.failureClass}${verdict.infraReason ? `: ${verdict.infraReason}` : ""}`,
+    );
     onStep(
       "test",
       test.timedOut ? "failed" : "done",
@@ -2025,15 +2299,16 @@ export async function runInSandbox(opts: {
     );
 
     return finish({
-      timedOut: test.timedOut,
-      infra: false,
+      timedOut: verdict.timedOut,
+      infra: verdict.infra,
+      failureClass: verdict.failureClass,
+      infraReason: verdict.infraReason,
       installExit: install.exitCode,
       testExit: test.exitCode,
-      resultsRaw: await readResults(resultsPath),
+      resultsRaw,
       devTests: dev,
     });
   } finally {
-    await d.delete(sandbox).catch(() => {});
-    dlog("sandbox deleted");
+    await destroySandbox(d, sandbox, dlog, cleanup);
   }
 }

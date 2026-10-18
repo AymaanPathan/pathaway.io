@@ -17,6 +17,7 @@ import {
   startEvaluation,
   submitRunEnv,
 } from "../evaluations/mission-evaluation.service.js";
+import { retractMissionEvidence } from "../learning/mission-retraction.js";
 import { githubInspector } from "../service/mission-repo.service.js";
 import { getGithubToken } from "../auth/github-oauth.js";
 import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
@@ -48,6 +49,18 @@ function getDeveloperId(req: Request): string | null {
 
   if (raw === undefined || raw === null || raw === "") return null;
   return String(raw).trim();
+}
+
+/**
+ * The client polls a run many times. Graph learning must be logged and the
+ * topics cache dropped once per run, not once per poll.
+ */
+const learningReported = new Set<string>();
+function markLearningReported(runId: string): boolean {
+  if (learningReported.has(runId)) return false;
+  if (learningReported.size > 500) learningReported.clear();
+  learningReported.add(runId);
+  return true;
 }
 
 const STATUS_HTTP: Record<string, number> = {
@@ -361,17 +374,49 @@ export function missionRoutes(deps: MissionDeps): Router {
         res.status(404).json({ error: "run not found" });
         return;
       }
-      if (run.learning) {
+
+      // Only once the run is finished, and only once per run.
+      if (
+        run.learning &&
+        (run.status === "done" || run.status === "error") &&
+        markLearningReported(run.runId)
+      ) {
+        const l = run.learning;
+        const pipeline = l.learning;
+        const gu = l.graphUpdate;
+
         log(rid, "evaluation graph learning", {
-          status: run.learning.evidenceStatus,
-          accepted: run.learning.learning?.accepted ?? 0,
-          experiencesUpdated: run.learning.learning?.experiencesUpdated ?? 0,
-          capabilityRollupsUpdated:
-            run.learning.learning?.capabilityRollupsUpdated ?? 0,
+          evidenceStatus: l.evidenceStatus,
+          verified: l.verification.verified,
+          graphUpdate: gu
+            ? {
+                status: gu.status,
+                failedStage: gu.failedStage,
+                attempts: gu.attempts,
+                stagesCompleted: gu.stagesCompleted,
+                lastError: gu.lastError,
+              }
+            : null,
+          accepted: pipeline?.accepted ?? 0,
+          skippedExisting: pipeline?.skippedExisting ?? 0,
+          repairedExisting: pipeline?.repairedExisting ?? 0,
+          experiencesUpdated: pipeline?.experiencesUpdated ?? 0,
+          capabilityRollupsUpdated: pipeline?.capabilityRollupsUpdated ?? 0,
         });
+
+        if (l.evidenceStatus === "graph_update_failed")
+          log(rid, "evaluation passed but graph update FAILED (retryable)", {
+            missionId: String(req.params.id),
+            failedStage: gu?.failedStage ?? null,
+          });
+
         // verified work changed the graph: drop the cached topics dossier so
         // the topics and goal views read the new evidence immediately
-        if ((run.learning.learning?.accepted ?? 0) > 0)
+        if (
+          l.evidenceStatus === "updated" ||
+          (pipeline?.accepted ?? 0) > 0 ||
+          (pipeline?.repairedExisting ?? 0) > 0
+        )
           onTopicsChanged(developerId);
       }
       res.json({ run });
@@ -443,7 +488,28 @@ export function missionRoutes(deps: MissionDeps): Router {
       const ok = await abandonMission(deps, developerId, missionId);
 
       log(rid, `abandon missionId=${missionId} ok=${ok}`);
-      res.status(ok ? 200 : 409).json({ ok });
+
+      if (!ok) {
+        res.status(409).json({ ok });
+        return;
+      }
+
+      // Abandoned work must not keep counting as capability evidence.
+      // A retraction failure is logged but does not undo the abandon.
+      try {
+        const retraction = await retractMissionEvidence({
+          graph: deps.graph,
+          developerId,
+          missionId,
+          reason: "mission abandoned",
+        });
+        log(rid, "abandon retraction", retraction);
+        onTopicsChanged(developerId);
+      } catch (error) {
+        log(rid, "abandon retraction FAILED", error);
+      }
+
+      res.status(200).json({ ok });
     }),
   );
 

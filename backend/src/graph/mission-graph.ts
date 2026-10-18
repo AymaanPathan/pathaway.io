@@ -657,6 +657,7 @@ const MISSION_COLS = `
   coalesce(m.started_at, "") AS started_at,
   coalesce(m.submitted_head, "") AS submitted_head,
   coalesce(m.completed_at, "") AS completed_at
+  coalesce(m.verification_state, "assigned") AS verification_state
 `;
 
 function rowToMission(r: Row): StoredMission | null {
@@ -677,6 +678,7 @@ function rowToMission(r: Row): StoredMission | null {
     nextMoveId: str(r.next_move_id),
     moveVersion: str(r.move_version),
     status: (str(r.status) || "proposed") as MissionStatus,
+    verificationState: str(r.verification_state) || "assigned",
     capabilityId: str(r.capability_id) || null,
     focusSlug: str(r.focus_slug) || null,
     spec,

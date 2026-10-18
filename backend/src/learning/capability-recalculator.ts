@@ -4,11 +4,14 @@ import {
   type Demonstration,
 } from "../graph/developer-knowledge-graph.js";
 
-/** Recompute roll-ups from all stored demonstrations, not just this sync batch. */
-export async function recalculateCapabilities(
+/** HAS_CAPABILITY edges written by this module are tagged so stale ones can be pruned safely. */
+export const ROLLUP_EDGE_OWNER = "learning-rollup";
+
+/** Every active demonstration for the developer, in the shape the roll-up needs. */
+export async function loadRollupInputs(
   graph: Graph,
   developerId: string,
-): Promise<number> {
+): Promise<Demonstration[]> {
   const result = await graph.query(
     `
     MATCH (:Developer {id:$developer_id})-[:DEMONSTRATED]->(x:Demonstration)-[:OF_CAPABILITY]->(c:Capability)
@@ -17,7 +20,7 @@ export async function recalculateCapabilities(
       x.commit_sha AS commitSha, x.created_at AS createdAt`,
     { params: { developer_id: developerId } },
   );
-  const demos = ((result.data ?? []) as any[]).map((row) => ({
+  return ((result.data ?? []) as any[]).map((row) => ({
     id: String(row.id ?? ""),
     capabilityId: String(row.capabilityId ?? ""),
     technique: String(row.technique ?? ""),
@@ -26,6 +29,17 @@ export async function recalculateCapabilities(
     commitSha: String(row.commitSha ?? ""),
     createdAt: String(row.createdAt ?? ""),
   })) as Demonstration[];
+}
+
+/**
+ * Recompute roll-ups from all stored demonstrations, not just this sync batch,
+ * then remove roll-up edges whose capability no longer has any supporting evidence.
+ */
+export async function recalculateCapabilities(
+  graph: Graph,
+  developerId: string,
+): Promise<number> {
+  const demos = await loadRollupInputs(graph, developerId);
   const rollups = rollUpDemonstrations(demos);
   const updatedAt = new Date().toISOString();
   for (const item of rollups) {
@@ -38,7 +52,7 @@ export async function recalculateCapabilities(
           r.repo_count=$repo_count, r.technique_count=$technique_count,
           r.active_days=$active_days, r.first_seen=$first_seen,
           r.last_seen=$last_seen, r.techniques_json=$techniques_json,
-          r.updated_at=$updated_at
+          r.derived_by=$owner, r.updated_at=$updated_at
       RETURN c.id AS id`,
       {
         params: {
@@ -55,10 +69,27 @@ export async function recalculateCapabilities(
           first_seen: item.firstSeen,
           last_seen: item.lastSeen,
           techniques_json: item.techniquesJson,
+          owner: ROLLUP_EDGE_OWNER,
           updated_at: updatedAt,
         },
       },
     );
   }
+
+  // Retraction: drop roll-up edges (and only roll-up edges) with no remaining evidence.
+  await graph.query(
+    `
+    MATCH (d:Developer {id:$developer_id})-[r:HAS_CAPABILITY]->(c:Capability)
+    WHERE (r.derived_by = $owner OR r.techniques_json IS NOT NULL)
+      AND NOT c.id IN $keep
+    DELETE r`,
+    {
+      params: {
+        developer_id: developerId,
+        owner: ROLLUP_EDGE_OWNER,
+        keep: rollups.map((item) => item.capabilityId),
+      },
+    },
+  );
   return rollups.length;
 }
