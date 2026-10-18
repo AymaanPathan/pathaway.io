@@ -1,4 +1,4 @@
-<img width="1535" height="735" alt="falkordb" src="https://github.com/user-attachments/assets/09edfabe-58dd-487a-800a-ca584c4ed50d" /><img width="1535" height="735" alt="falkordb" src="https://github.com/user-attachments/assets/e7dc2e4b-b437-4df7-8491-e08736ad072f" /><div align="center">
+
 
 <img width="1100" height="662" alt="home" src="https://github.com/user-attachments/assets/7a8091a1-aa06-4dcf-8e66-222a07510e0f" />
 
