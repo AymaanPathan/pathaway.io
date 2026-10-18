@@ -235,10 +235,12 @@ type Outcome = {
   summary: string;
 };
 
-type MissionLearningResult = {
-  evaluationStored: boolean;
-  evidenceStatus: "updated" | "not_verified" | "no_evidence" | "repository_missing";
-  learning: LearningPipelineResult | null;
+type GraphUpdateState = {
+  status: "running" | "completed" | "failed";
+  stagesCompleted: string[];
+  failedStage: string | null;
+  attempts: number;
+  lastError: string;
 };
 
 type LearningPipelineResult = {
@@ -246,9 +248,23 @@ type LearningPipelineResult = {
   reviewed: number;
   accepted: number;
   skippedExisting: number;
+  repairedExisting?: number;
   rejected: Array<{ demonstrationId: string; reason: string }>;
   experiencesUpdated: number;
   capabilityRollupsUpdated: number;
+};
+
+type MissionLearningResult = {
+  evaluationStored: boolean;
+  verification?: { verified: boolean; reasons: string[] };
+  evidenceStatus:
+    | "updated"
+    | "not_verified"
+    | "no_evidence"
+    | "repository_missing"
+    | "graph_update_failed";
+  learning: LearningPipelineResult | null;
+  graphUpdate?: GraphUpdateState | null;
 };
 
 type RunView = {
@@ -380,13 +396,17 @@ details[open] > summary::before{content:"▾ ";}
 .pm-pop{animation:pm-pop .45s ease-out both}
 @keyframes pm-reveal{0%{transform:translateX(-6px);opacity:0}100%{transform:none;opacity:1}}
 .pm-reveal{animation:pm-reveal .35s ease-out both}
-@keyframes pm-graph-draw{to{stroke-dashoffset:0}}
-@keyframes pm-graph-node{0%{opacity:0;transform:translateY(12px) scale(.94)}70%{transform:translateY(-2px) scale(1.01)}100%{opacity:1;transform:translateY(0) scale(1)}}
-@keyframes pm-graph-pulse{0%,100%{filter:drop-shadow(0 0 0 rgba(109,231,174,0))}50%{filter:drop-shadow(0 0 12px rgba(109,231,174,.55))}}
-.pm-graph-edge{stroke-dasharray:9 8;stroke-dashoffset:180;animation:pm-graph-draw 1.15s cubic-bezier(.22,.8,.25,1) forwards}
-.pm-graph-node{opacity:0;animation:pm-graph-node .55s cubic-bezier(.2,.8,.2,1) forwards}
-.pm-graph-glow{animation:pm-graph-pulse 2.4s ease-in-out infinite}
-@media (prefers-reduced-motion: reduce){.pm-pop,.pm-reveal,.pm-graph-edge,.pm-graph-node,.pm-graph-glow{animation:none!important;opacity:1;stroke-dashoffset:0}}
+@keyframes gr-backdrop{from{opacity:0}to{opacity:1}}
+@keyframes gr-draw{to{stroke-dashoffset:0}}
+@keyframes gr-node{0%{opacity:0;transform:scale(.6)}65%{opacity:1;transform:scale(1.06)}100%{opacity:1;transform:scale(1)}}
+@keyframes gr-rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes gr-ring{0%{transform:scale(1);opacity:.7}100%{transform:scale(1.9);opacity:0}}
+.gr-backdrop{animation:gr-backdrop .25s ease-out both}
+.gr-edge{stroke-dasharray:1;stroke-dashoffset:1;animation:gr-draw .55s ease-out forwards}
+.gr-node{opacity:0;transform-box:fill-box;transform-origin:center;animation:gr-node .45s cubic-bezier(.2,1.3,.4,1) forwards}
+.gr-rise{opacity:0;animation:gr-rise .45s ease-out forwards}
+.gr-ring{transform-box:fill-box;transform-origin:center;animation:gr-ring 1.4s ease-out 2}
+@media (prefers-reduced-motion: reduce){.pm-pop,.pm-reveal,.gr-backdrop,.gr-edge,.gr-node,.gr-rise,.gr-ring{animation:none!important;opacity:1;stroke-dashoffset:0}}
 `;
 
 /* ---------- helpers ---------- */
@@ -1512,7 +1532,40 @@ function ResultPanel({ run, spec }: { run: RunView; spec: Spec }) {
   );
 }
 
-/** Full-screen explanation of how a passing mission feeds Pathway's existing graph. */
+/* ---------- post-mission graph reveal (Overview theme) ---------- */
+
+const GRAPH_STAGES: Array<{ id: string; label: string; note: string }> = [
+  {
+    id: "audit_stored",
+    label: "Evaluation stored",
+    note: "Verdict, results and changed files saved on the mission.",
+  },
+  {
+    id: "evidence_written",
+    label: "Code evidence written",
+    note: "Commit, file changes and detected demonstrations saved.",
+  },
+  {
+    id: "relationships_reconciled",
+    label: "Relationships linked",
+    note: "Demonstrations tied to capability, file, repository and this mission.",
+  },
+  {
+    id: "aggregates_rebuilt",
+    label: "Aggregates rebuilt",
+    note: "Experiences and capability rollups recomputed from verified evidence.",
+  },
+];
+
+const STATUS_HEADLINE: Record<string, string> = {
+  updated: "Your graph just learned from this mission",
+  no_evidence: "Mission passed. No new code evidence was found.",
+  not_verified: "Mission passed, but it was not promoted as evidence.",
+  repository_missing: "Mission passed. The repository link needs attention.",
+  graph_update_failed: "Mission passed. The graph update failed.",
+};
+
+/** Full-screen explanation of how a passing mission feeds Pathway's graph. Overview theme. */
 function GraphUpdateReveal({
   mission,
   run,
@@ -1522,160 +1575,513 @@ function GraphUpdateReveal({
   run: RunView;
   onClose: () => void;
 }) {
-  const learning = run.learning;
-  const result = learning?.learning;
-  const updated = learning?.evidenceStatus === "updated";
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const learning = run.learning ?? null;
+  const result = learning?.learning ?? null;
+  const gu = learning?.graphUpdate ?? null;
+  const status = learning?.evidenceStatus ?? "";
+  const updated = status === "updated";
+  const failed = status === "graph_update_failed";
+  const verified = learning?.verification?.verified ?? null;
+  const reasons = learning?.verification?.reasons ?? [];
+  const headline =
+    STATUS_HEADLINE[status] ?? "Mission passed. Graph status is unavailable.";
+  const doneStages = new Set(gu?.stagesCompleted ?? []);
+
+  useEffect(() => {
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [onClose]);
+
+  /* nodes light up only when the backend reports real writes */
+  const lit = updated || (result?.accepted ?? 0) > 0;
   const nodes = [
-    { x: 70, y: 170, title: "Developer", sub: "existing identity", kind: "source" },
-    { x: 255, y: 90, title: "Commit", sub: short(run.headSha || run.head || "verified"), kind: "commit" },
-    { x: 440, y: 170, title: "FileChange", sub: `${result?.detected ?? 0} detected`, kind: "file" },
-    { x: 625, y: 90, title: "Demonstration", sub: `${result?.accepted ?? 0} accepted`, kind: "demo" },
-    { x: 810, y: 170, title: "Experience", sub: `${result?.experiencesUpdated ?? 0} updated`, kind: "experience" },
-    { x: 995, y: 90, title: "Capability", sub: `${result?.capabilityRollupsUpdated ?? 0} rollups`, kind: "capability" },
+    { x: 80, y: 120, title: "Developer", sub: "you", fill: "#fff" },
+    {
+      x: 240,
+      y: 60,
+      title: "Commit",
+      sub: short(run.headSha || run.head || "pushed"),
+      fill: doneStages.has("evidence_written") ? LIGHT_GREEN : "#fff",
+    },
+    {
+      x: 400,
+      y: 120,
+      title: "FileChange",
+      sub: `${result?.detected ?? 0} detected`,
+      fill: doneStages.has("evidence_written") ? LIGHT_GREEN : "#fff",
+    },
+    {
+      x: 560,
+      y: 60,
+      title: "Demonstration",
+      sub: `${result?.accepted ?? 0} accepted`,
+      fill: lit ? YELLOW : "#fff",
+    },
+    {
+      x: 720,
+      y: 120,
+      title: "Experience",
+      sub: `${result?.experiencesUpdated ?? 0} updated`,
+      fill: doneStages.has("aggregates_rebuilt") ? LIGHT_GREEN : "#fff",
+    },
+    {
+      x: 880,
+      y: 60,
+      title: "Capability",
+      sub: `${result?.capabilityRollupsUpdated ?? 0} rollups`,
+      fill: doneStages.has("aggregates_rebuilt") ? GREEN : "#fff",
+    },
   ];
-  const edgePairs = [[120, 145, 210, 105], [300, 105, 395, 145], [485, 145, 580, 105], [670, 105, 765, 145], [855, 145, 950, 105]];
-  const headline = updated
-    ? "Your graph is learning from this mission"
-    : learning?.evidenceStatus === "no_evidence"
-      ? "Mission passed. No new code evidence was extracted."
-      : learning?.evidenceStatus === "repository_missing"
-        ? "Mission passed. The repository link needs attention."
-        : learning?.evidenceStatus === "not_verified"
-          ? "Mission passed. Graph evidence was not promoted."
-          : "Mission passed. Graph update status is unavailable.";
-  const description = updated
-    ? "The verified commit is connected to code-level changes. Accepted demonstrations feed experience aggregates and capability rollups, enriching the same developer graph Pathway uses for future recommendations."
-    : "The evaluation succeeded, but the response does not confirm a complete knowledge-graph update. This view separates the mission result from evidence that was actually persisted.";
-  const statusLabel = updated ? "GRAPH UPDATED" : "EVALUATION PASSED";
+  const NW = 124;
+  const NH = 58;
+
+  const tiles = [
+    {
+      label: "Detected",
+      value: result ? String(result.detected) : "–",
+      note: "code changes with learnable patterns",
+    },
+    {
+      label: "Accepted",
+      value: result ? String(result.accepted) : "–",
+      note: result
+        ? `${result.reviewed} reviewed · ${result.skippedExisting} already known`
+        : "no learning result returned",
+    },
+    {
+      label: "Experiences",
+      value: result ? String(result.experiencesUpdated) : "–",
+      note: "rebuilt from verified evidence",
+    },
+    {
+      label: "Capabilities",
+      value: result ? String(result.capabilityRollupsUpdated) : "–",
+      note: "rollups recalculated",
+    },
+  ];
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="Mission complete: knowledge graph update"
-      className="fixed inset-0 z-[100] overflow-y-auto" style={{ background: "#090d14", color: "#edf4f7" }}>
-      <div className="mx-auto flex min-h-screen w-full max-w-[1500px] flex-col px-4 py-5 sm:px-7 sm:py-7">
-        <header className="flex items-start justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl"
-              style={{ background: updated ? "#173b30" : "#303044", border: "1px solid #39544f" }}>
-              {updated ? <Sparkles size={22} color="#78e5b1" /> : <Check size={22} color="#f5c542" />}
-            </div>
-            <div>
-              <p className="text-[11px] font-bold uppercase tracking-[.22em]" style={{ color: "#93a8b4" }}>
-                pathway.io · mission lifecycle
+    <div
+      className="gr-backdrop fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-5"
+      style={{ backgroundColor: "rgba(16,18,16,.62)" }}
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="gr-title"
+        onClick={(e) => e.stopPropagation()}
+        className="max-h-[94vh] w-full max-w-[1040px] overflow-y-auto rounded-2xl"
+        style={{
+          ...border,
+          backgroundColor: PAPER,
+          boxShadow: shadow(6),
+          fontFamily: BODY,
+          color: INK,
+        }}
+      >
+        {/* header */}
+        <div
+          className="flex items-center justify-between gap-3 px-5 py-3"
+          style={{
+            borderBottom: `2px solid ${INK}`,
+            backgroundColor: failed ? SOFT_CORAL : updated ? YELLOW : CREAM,
+          }}
+        >
+          <div className="flex min-w-0 items-center gap-3">
+            <span
+              style={{ ...border, backgroundColor: "#fff" }}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
+            >
+              {updated ? <Sparkles size={20} /> : <Check size={20} />}
+            </span>
+            <div className="min-w-0">
+              <p
+                className="text-[10px] font-bold uppercase tracking-[0.18em]"
+                style={{ fontFamily: MONO, color: MUTED }}
+              >
+                pathway.io · mission complete
               </p>
-              <h1 className="mt-1 text-xl font-bold sm:text-2xl" style={{ fontFamily: DISPLAY }}>{headline}</h1>
+              <h2
+                id="gr-title"
+                style={{ fontFamily: DISPLAY }}
+                className="text-[20px] font-bold leading-tight sm:text-[24px]"
+              >
+                {headline}
+              </h2>
             </div>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close graph animation"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-white/20 text-white/80 transition hover:bg-white/10">
-            <X size={18} />
+          <button
+            ref={closeRef}
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            style={border}
+            className="pm-btn shrink-0 rounded-full bg-white p-1.5"
+          >
+            <X size={16} />
           </button>
-        </header>
-
-        <div className="mt-5 flex flex-wrap items-center gap-2">
-          <span className="rounded-full px-3 py-1 text-[10px] font-bold tracking-[.16em]"
-            style={{ background: updated ? "#173b30" : "#302b1d", color: updated ? "#8ef0bd" : "#f5d979", border: "1px solid #3a514c" }}>
-            {statusLabel}
-          </span>
-          <span className="rounded-full border border-white/15 px-3 py-1 text-[11px]" style={{ color: "#a9b8c2" }}>{mission.spec.title}</span>
-          {run.headSha && <span className="rounded-full border border-white/15 px-3 py-1 text-[11px]" style={{ color: "#a9b8c2", fontFamily: MONO }}>commit {short(run.headSha)}</span>}
         </div>
 
-        <p className="mt-4 max-w-4xl text-sm leading-relaxed sm:text-[15px]" style={{ color: "#aab9c4" }}>{description}</p>
+        <div className="space-y-4 p-4 sm:p-5">
+          {/* chips */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Chip fill={LIGHT_GREEN}>
+              {run.outcome?.results.filter((r) => r.met).length ?? 0} of{" "}
+              {run.outcome?.results.length ?? 0} test cases passed
+            </Chip>
+            <Chip fill="#fff">{mission.spec.title}</Chip>
+            {run.headSha && (
+              <Chip fill="#fff" mono>
+                commit {short(run.headSha)}
+              </Chip>
+            )}
+            {verified === true && <Chip fill={LIGHT_GREEN}>verified</Chip>}
+            {verified === false && (
+              <Chip fill={SOFT_CORAL}>not promoted as evidence</Chip>
+            )}
+          </div>
 
-        <section className="mt-6 flex-1 rounded-3xl border p-3 sm:p-5 lg:p-7"
-          style={{ borderColor: "#253440", background: "radial-gradient(ellipse at 50% 45%, #14232b 0%, #0d141d 58%, #0a0f16 100%)" }}>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="text-xs font-bold uppercase tracking-[.18em]" style={{ color: "#7f9aab" }}>Evidence propagation</p>
-              <p className="mt-1 text-sm" style={{ color: "#c4d0d7" }}>From your verified code change to the capability model</p>
+          {/* graph */}
+          <section
+            style={{ ...border, backgroundColor: "#fff", boxShadow: shadow(3) }}
+            className="rounded-2xl p-4"
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h3
+                style={{ fontFamily: DISPLAY }}
+                className="text-[17px] font-bold"
+              >
+                Where your evidence went
+              </h3>
+              <span
+                className="text-[12px] font-semibold"
+                style={{ color: MUTED }}
+              >
+                {lit
+                  ? "Highlighted nodes were written by the backend."
+                  : "Nothing was promoted, so no node is highlighted."}
+              </span>
             </div>
-            <span className="flex items-center gap-2 text-[11px]" style={{ color: updated ? "#7ce5b1" : "#e8d18a" }}>
-              <span className="h-2 w-2 rounded-full" style={{ background: updated ? "#68e3a7" : "#e8c75e" }} />
-              {updated ? "Accepted evidence path" : "Illustrative graph path"}
-            </span>
-          </div>
+            <div className="mt-2 overflow-x-auto">
+              <svg
+                viewBox="0 0 960 190"
+                role="img"
+                aria-label="Developer to commit, file changes, demonstration, experience and capability"
+                className="mx-auto h-auto w-full min-w-[720px]"
+              >
+                <defs>
+                  <pattern
+                    id="gr-grid"
+                    width="32"
+                    height="32"
+                    patternUnits="userSpaceOnUse"
+                  >
+                    <circle cx="1" cy="1" r="1" fill={INK} opacity=".1" />
+                  </pattern>
+                  <marker
+                    id="gr-arrow"
+                    viewBox="0 0 10 10"
+                    refX="9"
+                    refY="5"
+                    markerWidth="6"
+                    markerHeight="6"
+                    orient="auto-start-reverse"
+                  >
+                    <path d="M0,0 L10,5 L0,10 z" fill={INK} />
+                  </marker>
+                </defs>
+                <rect width="960" height="190" fill="url(#gr-grid)" />
+                {nodes.slice(0, -1).map((a, i) => {
+                  const b = nodes[i + 1];
+                  const x1 = a.x + NW / 2;
+                  const x2 = b.x - NW / 2 - 4;
+                  return (
+                    <line
+                      key={i}
+                      x1={x1}
+                      y1={a.y}
+                      x2={x2}
+                      y2={b.y}
+                      pathLength={1}
+                      stroke={INK}
+                      strokeWidth={2.5}
+                      strokeLinecap="round"
+                      markerEnd="url(#gr-arrow)"
+                      className="gr-edge"
+                      style={{ animationDelay: `${300 + i * 220}ms` }}
+                    />
+                  );
+                })}
+                {nodes.map((n, i) => (
+                  <g
+                    key={n.title}
+                    className="gr-node"
+                    style={{ animationDelay: `${150 + i * 220}ms` }}
+                  >
+                    {n.fill !== "#fff" && (
+                      <rect
+                        x={n.x - NW / 2}
+                        y={n.y - NH / 2}
+                        width={NW}
+                        height={NH}
+                        rx={14}
+                        fill="none"
+                        stroke={n.fill === GREEN ? GREEN : YELLOW}
+                        strokeWidth={3}
+                        className="gr-ring"
+                        style={{ animationDelay: `${600 + i * 220}ms` }}
+                      />
+                    )}
+                    <rect
+                      x={n.x - NW / 2}
+                      y={n.y - NH / 2}
+                      width={NW}
+                      height={NH}
+                      rx={14}
+                      fill={n.fill}
+                      stroke={INK}
+                      strokeWidth={2.5}
+                    />
+                    <text
+                      x={n.x}
+                      y={n.y - 3}
+                      textAnchor="middle"
+                      fontSize="13"
+                      fontWeight={700}
+                      fill={n.fill === GREEN ? "#fff" : INK}
+                      style={{ fontFamily: DISPLAY }}
+                    >
+                      {n.title}
+                    </text>
+                    <text
+                      x={n.x}
+                      y={n.y + 14}
+                      textAnchor="middle"
+                      fontSize="10.5"
+                      fontWeight={600}
+                      fill={n.fill === GREEN ? "#fff" : MUTED}
+                      style={{ fontFamily: MONO }}
+                    >
+                      {n.sub}
+                    </text>
+                  </g>
+                ))}
+                {[
+                  ["IDENTITY", 80],
+                  ["SOURCE", 240],
+                  ["CODE", 400],
+                  ["PROOF", 560],
+                  ["AGGREGATE", 720],
+                  ["GROWTH", 880],
+                ].map(([t, x]) => (
+                  <text
+                    key={t}
+                    x={x as number}
+                    y={178}
+                    textAnchor="middle"
+                    fontSize="10"
+                    fontWeight={700}
+                    fill={MUTED}
+                    style={{ fontFamily: MONO, letterSpacing: "0.12em" }}
+                  >
+                    {t}
+                  </text>
+                ))}
+              </svg>
+            </div>
+          </section>
 
-          <div className="mt-5 hidden lg:block">
-            <svg viewBox="0 0 1065 260" role="img" aria-label="Animated knowledge graph from developer to commit, file changes, demonstrations, experience, and capability" className="h-auto w-full overflow-visible">
-              <defs>
-                <linearGradient id="pm-edge-gradient" x1="0%" x2="100%">
-                  <stop offset="0%" stopColor="#4f9f91" /><stop offset="100%" stopColor={updated ? "#7be7b1" : "#e5c766"} />
-                </linearGradient>
-              </defs>
-              {edgePairs.map(([x1, y1, x2, y2], i) => (
-                <g key={i}>
-                  <path d={`M ${x1} ${y1} C ${x1 + 25} ${y1 - 8}, ${x2 - 25} ${y2 + 8}, ${x2} ${y2}`}
-                    fill="none" stroke="#29424b" strokeWidth="7" strokeLinecap="round" />
-                  <path d={`M ${x1} ${y1} C ${x1 + 25} ${y1 - 8}, ${x2 - 25} ${y2 + 8}, ${x2} ${y2}`}
-                    fill="none" stroke="url(#pm-edge-gradient)" strokeWidth="2.5" strokeLinecap="round"
-                    className="pm-graph-edge" style={{ animationDelay: `${i * 180}ms` }} />
-                  <circle r="4" fill={updated ? "#83efb7" : "#f5d879"}>
-                    <animateMotion dur={`${2.4 + i * 0.15}s`} repeatCount="indefinite" begin={`${i * 0.2}s`}
-                      path={`M ${x1} ${y1} C ${x1 + 25} ${y1 - 8}, ${x2 - 25} ${y2 + 8}, ${x2} ${y2}`} />
-                  </circle>
-                </g>
-              ))}
-              {nodes.map((node, i) => (
-                <g key={node.kind} className="pm-graph-node" style={{ animationDelay: `${0.18 + i * 0.23}s` }}>
-                  <rect x={node.x - 63} y={node.y - 37} width="126" height="74" rx="15"
-                    fill={i === 5 && updated ? "#163c30" : "#111e28"}
-                    stroke={i === 5 && updated ? "#79e7b0" : "#3b5662"} strokeWidth={i === 5 && updated ? "2" : "1.2"} />
-                  <circle cx={node.x - 45} cy={node.y - 17} r="4" fill={updated ? "#79e7b0" : "#e5c766"} />
-                  <text x={node.x} y={node.y + 2} fill="#f1f6f8" textAnchor="middle" fontSize="12" fontWeight="700">{node.title}</text>
-                  <text x={node.x} y={node.y + 19} fill="#91a8b4" textAnchor="middle" fontSize="9.5">{node.sub}</text>
-                </g>
-              ))}
-              <text x="70" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">IDENTITY</text>
-              <text x="255" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">SOURCE</text>
-              <text x="440" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">CODE PROVENANCE</text>
-              <text x="625" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">CAPABILITY EVIDENCE</text>
-              <text x="810" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">AGGREGATION</text>
-              <text x="995" y="235" fill="#6f8996" textAnchor="middle" fontSize="10">GROWTH MODEL</text>
-            </svg>
-          </div>
+          <div className="grid gap-4 lg:grid-cols-[1.1fr_1fr]">
+            {/* stages */}
+            <section
+              style={{ ...border, backgroundColor: "#fff" }}
+              className="rounded-2xl p-4"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h3
+                  style={{ fontFamily: DISPLAY }}
+                  className="text-[16px] font-bold"
+                >
+                  Graph update, stage by stage
+                </h3>
+                {gu && (
+                  <Chip
+                    fill={
+                      gu.status === "completed"
+                        ? LIGHT_GREEN
+                        : gu.status === "failed"
+                          ? SOFT_CORAL
+                          : CREAM
+                    }
+                  >
+                    {gu.status}
+                    {gu.attempts > 1 ? ` · attempt ${gu.attempts}` : ""}
+                  </Chip>
+                )}
+              </div>
+              <ol className="mt-3 space-y-2.5">
+                {GRAPH_STAGES.map((s, i) => {
+                  const ok = doneStages.has(s.id);
+                  const bad = gu?.failedStage === s.id && !ok;
+                  const skipped = !ok && !bad && !updated && !failed;
+                  return (
+                    <li
+                      key={s.id}
+                      className="gr-rise flex items-start gap-2.5"
+                      style={{
+                        animationDelay: `${400 + i * 160}ms`,
+                        opacity: skipped ? 0.5 : undefined,
+                      }}
+                    >
+                      <span
+                        className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold"
+                        style={{
+                          ...border,
+                          backgroundColor: ok
+                            ? LIGHT_GREEN
+                            : bad
+                              ? SOFT_CORAL
+                              : "#fff",
+                          color: ok ? GREEN : bad ? RED : MUTED,
+                        }}
+                      >
+                        {ok ? "✓" : bad ? "✕" : "–"}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-[13px] font-bold leading-snug">
+                          {s.label}
+                        </p>
+                        <p
+                          className="text-[12px] leading-snug"
+                          style={{ color: MUTED }}
+                        >
+                          {s.note}
+                        </p>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+              {failed && (
+                <p
+                  role="alert"
+                  style={{ ...border, backgroundColor: SOFT_CORAL }}
+                  className="mt-3 rounded-lg px-3 py-2 text-[12.5px] leading-snug"
+                >
+                  <b>
+                    Failed at{" "}
+                    {gu?.failedStage
+                      ? pretty(gu.failedStage)
+                      : "an unknown stage"}
+                    .
+                  </b>{" "}
+                  Your mission result is saved. Evaluating the same push again
+                  retries only the graph update.
+                  {gu?.lastError ? ` (${gu.lastError.slice(0, 160)})` : ""}
+                </p>
+              )}
+            </section>
 
-          <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:hidden">
-            {nodes.map((node, i) => (
-              <div key={node.kind} className="pm-graph-node rounded-2xl border p-4"
-                style={{ animationDelay: `${0.15 + i * 0.18}s`, borderColor: "#334a55", background: "#111e28" }}>
-                <div className="flex items-center gap-2">
-                  <span className="h-2.5 w-2.5 rounded-full" style={{ background: updated ? "#79e7b0" : "#e5c766" }} />
-                  <span className="font-semibold">{node.title}</span>
+            {/* numbers */}
+            <section className="grid grid-cols-2 gap-3">
+              {tiles.map((t, i) => (
+                <div
+                  key={t.label}
+                  className="gr-rise rounded-2xl p-3.5"
+                  style={{
+                    ...border,
+                    backgroundColor: "#fff",
+                    boxShadow: shadow(2),
+                    animationDelay: `${500 + i * 120}ms`,
+                  }}
+                >
+                  <div
+                    className="text-[10.5px] font-bold uppercase tracking-wider"
+                    style={{ color: MUTED }}
+                  >
+                    {t.label}
+                  </div>
+                  <div
+                    className="mt-1 text-[28px] font-bold leading-none"
+                    style={{
+                      fontFamily: DISPLAY,
+                      color: updated && t.value !== "–" ? GREEN : INK,
+                    }}
+                  >
+                    {t.value}
+                  </div>
+                  <div
+                    className="mt-1.5 text-[11.5px] leading-snug"
+                    style={{ color: MUTED }}
+                  >
+                    {t.note}
+                  </div>
                 </div>
-                <p className="mt-1 pl-[18px] text-xs" style={{ color: "#91a8b4" }}>{node.sub}</p>
-                {i < nodes.length - 1 && <div className="mt-3 flex items-center gap-1 text-[10px]" style={{ color: "#7ce5b1" }}><ArrowRight size={12} /> connected to next stage</div>}
-              </div>
-            ))}
+              ))}
+            </section>
           </div>
 
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {[
-              { label: "Evaluation audit", value: learning?.evaluationStored ? "Stored" : "Not confirmed", note: "Mission result + changed files" },
-              { label: "Accepted demonstrations", value: result ? String(result.accepted) : "—", note: result ? `${result.reviewed} reviewed · ${result.skippedExisting} already known` : "Learning result not returned" },
-              { label: "Experience aggregates", value: result ? String(result.experiencesUpdated) : "—", note: "Updated from accepted evidence" },
-              { label: "Capability rollups", value: result ? String(result.capabilityRollupsUpdated) : "—", note: "Recalculated capability summaries" },
-            ].map((stat) => (
-              <div key={stat.label} className="rounded-2xl border p-4" style={{ borderColor: "#2b414b", background: "#101a23" }}>
-                <p className="text-[10px] font-bold uppercase tracking-[.14em]" style={{ color: "#7f9aab" }}>{stat.label}</p>
-                <p className="mt-2 text-2xl font-bold" style={{ fontFamily: DISPLAY, color: updated ? "#8aefba" : "#f0d47a" }}>{stat.value}</p>
-                <p className="mt-1 text-[11px] leading-snug" style={{ color: "#91a8b4" }}>{stat.note}</p>
-              </div>
-            ))}
-          </div>
-        </section>
+          {verified === false && reasons.length > 0 && (
+            <section
+              style={{ ...border, backgroundColor: CREAM }}
+              className="rounded-2xl p-4"
+            >
+              <h3
+                style={{ fontFamily: DISPLAY }}
+                className="text-[15px] font-bold"
+              >
+                Why it was not promoted
+              </h3>
+              <ul className="mt-1.5 list-disc space-y-1 pl-5 text-[13px] leading-snug">
+                {reasons.map((r) => (
+                  <li key={r}>{r}</li>
+                ))}
+              </ul>
+            </section>
+          )}
 
-        <footer className="mt-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-          <p className="max-w-2xl text-xs leading-relaxed" style={{ color: "#8499a5" }}>
-            {updated
-              ? `${result?.accepted ?? 0} new demonstration(s) accepted; ${result?.rejected.length ?? 0} rejected; ${result?.capabilityRollupsUpdated ?? 0} capability rollup(s) recalculated. These are backend-reported counts.`
-              : "The animation explains the graph pipeline. It does not treat a passing test result alone as proof that learning evidence was written."}
-          </p>
-          <button type="button" onClick={onClose}
-            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-full px-6 py-3 text-sm font-bold transition hover:brightness-110"
-            style={{ background: "#f5c542", color: "#11140f" }}>
-            Continue to mission results <ArrowRight size={16} />
-          </button>
-        </footer>
+          {/* footer */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p
+              className="max-w-xl text-[12px] leading-snug"
+              style={{ color: MUTED }}
+            >
+              {updated
+                ? `${result?.accepted ?? 0} accepted, ${result?.rejected.length ?? 0} rejected, ${result?.capabilityRollupsUpdated ?? 0} capability rollup(s) recalculated. These are backend-reported counts.`
+                : "A passing test run alone is never treated as proof. Only verified evidence reaches your capability model."}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Link
+                to={GOAL_ROUTE}
+                style={border}
+                className="pm-btn inline-flex items-center rounded-full bg-white px-5 py-2.5 text-[13px] font-bold"
+              >
+                Back to goal
+              </Link>
+              <button
+                type="button"
+                onClick={onClose}
+                style={{
+                  ...border,
+                  backgroundColor: YELLOW,
+                  boxShadow: shadow(3),
+                }}
+                className="pm-btn inline-flex items-center justify-center gap-2 rounded-full px-5 py-2.5 text-[13px] font-bold"
+              >
+                See mission results <ArrowRight size={15} />
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1913,7 +2319,8 @@ export default function MissionPage() {
 
   /* Show the graph reveal once when a completed run arrives, including after reload. */
   useEffect(() => {
-    if (!runId || runStatus !== "done" || run?.outcome?.verdict !== "completed") return;
+    if (!runId || runStatus !== "done" || run?.outcome?.verdict !== "completed")
+      return;
     if (celebratedRun.current === runId) return;
     celebratedRun.current = runId;
     setShowGraphReveal(true);
@@ -3002,17 +3409,28 @@ export default function MissionPage() {
 
                       {run.status === "done" &&
                         run.outcome?.verdict === "completed" && (
-                          <Link
-                            to={GOAL_ROUTE}
-                            style={{
-                              ...border,
-                              backgroundColor: YELLOW,
-                              boxShadow: shadow(3),
-                            }}
-                            className="pm-btn pm-pop inline-block rounded-full px-5 py-2 text-[14px] font-bold"
-                          >
-                            Back to your goal
-                          </Link>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setShowGraphReveal(true)}
+                              style={{ ...border, backgroundColor: "#fff" }}
+                              className="pm-btn inline-flex items-center gap-1.5 rounded-full px-5 py-2 text-[14px] font-bold"
+                            >
+                              <Sparkles size={14} aria-hidden />
+                              See what changed in your graph
+                            </button>
+                            <Link
+                              to={GOAL_ROUTE}
+                              style={{
+                                ...border,
+                                backgroundColor: YELLOW,
+                                boxShadow: shadow(3),
+                              }}
+                              className="pm-btn pm-pop inline-block rounded-full px-5 py-2 text-[14px] font-bold"
+                            >
+                              Back to your goal
+                            </Link>
+                          </div>
                         )}
                     </>
                   )}
