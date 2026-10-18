@@ -270,6 +270,8 @@ interface PlannedCall {
   args: Row;
   why?: string;
   dependsOn?: string;
+  /** old tool name this call stands in for, used to avoid duplicate follow-ups */
+  as?: string;
 }
 
 interface AgentRun extends ToolRun {
@@ -501,8 +503,8 @@ function resolveCalls(
 
   if (!out.length && skipped.length) {
     out.push({
-      tool: "search_topics",
-      args: { query: skipped[0].term },
+      tool: "skill_overview",
+      args: { view: "search", query: skipped[0].term },
       why: `"${skipped[0].term}" isn't a topic name, so I searched your graph for related topics instead.`,
     });
   }
@@ -597,8 +599,8 @@ const fmtProf = (p: Proficiency): string =>
 const PLAN_SYSTEM = `You are the router of Pathway's topic assistant. A developer asks about THEIR OWN skill graph (topics, depth levels, foundations, gaps, relations). You choose which graph tools to run. You never answer from memory.
 
 RULES
-1. Choose 1 to 3 tools from "tools" that best answer the question. Prefer fewer. Never repeat a tool. A second round of tools is chosen automatically from what the first round finds, so do not try to chain tools yourself.
-2. Pass only arguments listed in the tool's "params". Topic arguments MUST be a slug copied from "topics". If the user names a technology that is not in "topics" (for example "JavaScript" or "CSS"), pick the closest matching topics from the list, or use search_topics with the user's words. Never invent a topic.
+1. Choose 1 to 3 tools from "tools" that best answer the question. Prefer fewer. Never repeat a tool with the same arguments. A second round of tools is chosen automatically from what the first round finds, so do not try to chain tools yourself.
+2. Pass only arguments listed in the tool's "params". Topic arguments MUST be a slug copied from "topics". If the user names a technology that is not in "topics" (for example "JavaScript" or "CSS"), pick the closest matching topics from the list, or use skill_overview with view=search and the user's words. Never invent a topic.
 3. If the user says "this topic", "it" or "that one" and "selectedTopic" is set, use selectedTopic.
 4. Use the conversation "history" to resolve follow-ups such as "and what about its gaps?".
 5. For each call add "why": one short sentence (max 18 words) saying what this tool will tell the developer.
@@ -710,6 +712,7 @@ function mentionedTopics(message: string, topics: DevTopic[]): string[] {
     .sort((a, b) => a.at - b.at)
     .map((x) => x.slug);
 }
+
 function routeByRules(
   message: string,
   topics: DevTopic[],
@@ -720,59 +723,66 @@ function routeByRules(
   const m = mentionedTopics(message, topics);
   const calls: PlannedCall[] = [];
   const push = (tool: string, args: Row = {}) => {
-    if (!calls.some((c) => c.tool === tool)) calls.push({ tool, args });
+    const key = `${tool}:${args.view ?? ""}`;
+    if (!calls.some((c) => `${c.tool}:${c.args.view ?? ""}` === key))
+      calls.push({ tool, args });
   };
   const asksHops = has(/\bhops?\b|how far|distance|separat/);
 
   if (m.length >= 2 && has(/compare|versus|\bvs\b|difference|stronger/))
-    push("compare_topics", { topics: m.slice(0, 3).join(", ") });
+    push("topic_deep_dive", { topics: m.slice(0, 3).join(", ") });
   else if (
     m.length >= 2 &&
-    (asksHops || has(/connect|path|between|relat|link|route|lead/))
+    (asksHops || has(/connect|path|between|relat|link|route|lead|build on/))
   )
-    push("connect_topics", { from: m[0], to: m[1] });
+    push("topic_connections", { from: m[0], to: m[1] });
   else if (
     m.length &&
     has(
       /path to|roadmap to|how (do|can) i (get|learn|reach)|prerequisite|prereq|before i/,
     )
   )
-    push("learning_path_to_topic", { topic: m[0] });
+    push("gap_analysis", { view: "path", topic: m[0] });
   else if (
     (m.length || selected) &&
     has(
-      /around|neighbou?r|surround|depends|dependenc|multi.?hop|unlock|what builds/,
+      /around|neighbou?r|surround|depends|dependenc|multi.?hop|unlock|what builds|build on/,
     )
   )
-    push("explore_neighborhood", { topic: m[0] ?? selected });
+    push("topic_connections", { from: m[0] ?? selected });
 
-  if (has(/gap|weak|missing|lack|improve|shallow|worst|hold(ing)? me/))
-    push("find_gaps");
+  if (
+    has(/gap|weak|missing|lack|improve|shallow|worst|hold(ing)? me|fix first/)
+  )
+    push("gap_analysis", { view: "gaps" });
   if (
     has(/next|learn|roadmap|should i|frontier|focus|grow/) &&
-    !calls.some((c) => c.tool === "learning_path_to_topic")
+    !calls.some((c) => c.args.view === "path")
   )
-    push("recommend_next_topics");
+    push("gap_analysis", { view: "next" });
   if (has(/foundation|core|fundamental|base skills|depend on/))
-    push("rank_foundations");
-  if (has(/bridge|transfer|cross|connector/)) push("find_bridges");
-  if (has(/communit|cluster|group|areas?|theme/)) push("knowledge_communities");
+    push("graph_structure", { view: "foundations" });
+  if (has(/bridge|transfer|cross|connector/))
+    push("graph_structure", { view: "bridges" });
+  if (has(/communit|cluster|group|areas?|theme/))
+    push("graph_structure", { view: "communities" });
   if (has(/isolat|island|disconnect|orphan|component/))
-    push("connectivity_check");
+    push("graph_structure", { view: "connectivity" });
   if (has(/built|boilerplate|genuine|authentic|trust|confidence|real\b/))
-    push("audit_authenticity");
+    push("skill_overview", { view: "authenticity" });
   if (has(/recent|lately|latest|stale|rusty|quiet|working on/))
-    push("recent_activity");
+    push("skill_overview", { view: "recent" });
   if (has(/strong|best|deep|good at|expert|top skill/))
-    push("strongest_topics");
+    push("skill_overview", { view: "strongest" });
   if (
     has(
       /summary|overview|about me|profile|how many (topics|skills|domains)|who am i/,
     )
   )
-    push("profile_overview");
+    push("skill_overview", { view: "overview" });
   if (!calls.length && has(/search|find|which topics|do i have|related/))
-    push("search_topics", {
+    push("skill_overview", {
+      view: "search",
       query:
         message
           .replace(
@@ -783,10 +793,10 @@ function routeByRules(
     });
 
   if (!calls.length) {
-    if (m.length) push("explain_topic", { topic: m[0] });
+    if (m.length) push("topic_deep_dive", { topic: m[0] });
     else if (selected && has(/\b(this|it|that)\b/))
-      push("explain_topic", { topic: selected });
-    else push("profile_overview");
+      push("topic_deep_dive", { topic: selected });
+    else push("skill_overview", { view: "overview" });
   }
   return calls.slice(0, 3);
 }
@@ -807,12 +817,14 @@ function isMiss(r: ToolRun): boolean {
       NOT_FOUND.test(`${b.title ?? ""} ${b.text ?? ""}`),
   );
 }
+
+const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
+
 const fixHops = (s: string): string =>
   s.replace(
     /\b(\d+) hop\(s\)/gi,
     (_, n) => `${n} ${n === "1" ? "hop" : "hops"}`,
   );
-const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
 /** Caveats that must travel with a result so the answer never over-claims. */
 function limitationsOf(r: ToolRun): string[] {
@@ -845,6 +857,10 @@ function statusOf(r: AgentRun): StepStatus {
   if (r.degraded?.length) return "partial";
   return "success";
 }
+
+/** The underlying tool a result came from (the five public tools wrap the old ones). */
+const toolOf = (r: AgentRun): string =>
+  String(((r.result?.facts ?? {}) as Row).sourceTool ?? r.tool);
 
 async function executePlan(
   ctx: ReturnType<typeof createToolContext>,
@@ -996,12 +1012,13 @@ function rankedGaps(f: Row, topics: DevTopic[]): RankedGap[] {
  */
 function planFollowUps(runs: AgentRun[], topics: DevTopic[]): PlannedCall[] {
   const out: PlannedCall[] = [];
-  const ran = new Set(runs.map((r) => r.tool));
+  const ran = new Set(runs.map((r) => toolOf(r)));
   const add = (c: PlannedCall) => {
     if (
       out.length < 2 &&
-      !ran.has(c.tool) &&
-      !out.some((x) => x.tool === c.tool)
+      c.as &&
+      !ran.has(c.as) &&
+      !out.some((x) => x.as === c.as)
     )
       out.push(c);
   };
@@ -1010,35 +1027,37 @@ function planFollowUps(runs: AgentRun[], topics: DevTopic[]): PlannedCall[] {
     if (!r.ok || r.miss || r.skipped || !r.result) continue;
     const f = (r.result.facts ?? {}) as Row;
 
-    if (r.tool === "find_gaps") {
+    if (toolOf(r) === "find_gaps") {
       const top = rankedGaps(f, topics)[0];
       const upper = top?.top.slug ?? null;
       if (top && upper) {
         add({
-          tool: "explain_topic",
+          tool: "topic_deep_dive",
+          as: "explain_topic",
           args: { topic: upper },
-          why: `Find_gaps flagged ${top.top.name} as resting on a weak foundation; checking how it was rated and on what evidence.`,
-          dependsOn: "find_gaps",
+          why: `The gap analysis flagged ${top.top.name} as resting on a weak foundation; checking how it was rated and on what evidence.`,
+          dependsOn: r.tool,
         });
         add({
-          tool: "learning_path_to_topic",
-          args: { topic: upper },
+          tool: "gap_analysis",
+          as: "learning_path_to_topic",
+          args: { view: "path", topic: upper },
           why: `Showing which prerequisites of ${top.top.name} are still weak or unassessed.`,
-          dependsOn: "find_gaps",
+          dependsOn: r.tool,
         });
       }
     }
 
-    if (r.tool === "recommend_next_topics") {
+    if (toolOf(r) === "recommend_next_topics") {
       const n = Array.isArray(f.learnNext) ? f.learnNext[0] : null;
-      if (n?.topic) {
+      if (n?.topic)
         add({
-          tool: "learning_path_to_topic",
-          args: { topic: String(n.topic) },
+          tool: "gap_analysis",
+          as: "learning_path_to_topic",
+          args: { view: "path", topic: String(n.topic) },
           why: `Checking the prerequisite chain for ${n.topic}, the top recommendation.`,
-          dependsOn: "recommend_next_topics",
+          dependsOn: r.tool,
         });
-      }
     }
   }
   return out;
@@ -1175,7 +1194,7 @@ function buildInvestigation(runs: AgentRun[], topics: DevTopic[]) {
 
     if ((status === "success" || status === "partial") && r.result) {
       const f = (r.result.facts ?? {}) as Row;
-      const gaps = r.tool === "find_gaps" ? rankedGaps(f, topics) : [];
+      const gaps = toolOf(r) === "find_gaps" ? rankedGaps(f, topics) : [];
 
       if (gaps.length) {
         /* one canonical finding per gap; the tool-level summary is not repeated */
@@ -1209,10 +1228,6 @@ function buildInvestigation(runs: AgentRun[], topics: DevTopic[]) {
           if (unassessed)
             limitations.push(
               "The foundation has not been assessed; this is missing evidence, not proven weakness.",
-            );
-          if (!direct)
-            limitations.push(
-              `Intermediate topics on this ${x.hops}-hop path are not listed by the graph tool; only the two endpoints are shown.`,
             );
           if (x.top.prof.source === "heuristic")
             limitations.push(
@@ -1261,28 +1276,42 @@ function buildInvestigation(runs: AgentRun[], topics: DevTopic[]) {
             pathId,
           });
 
+          /* full chain when the tool returned it, so intermediate topics are shown */
+          const chain: string[] =
+            Array.isArray(x.g.chain) && x.g.chain.length >= 2
+              ? x.g.chain.map(String)
+              : [x.top.name, x.fo.name];
+          const chainNodes: PathNode[] = chain.map((n, ci) => {
+            if (ci === 0)
+              return {
+                slug: x.top.slug,
+                name: x.top.name,
+                proficiency: x.top.prof,
+              };
+            if (ci === chain.length - 1)
+              return {
+                slug: x.fo.slug,
+                name: x.fo.name,
+                proficiency: x.fo.prof,
+              };
+            const p = profOf(topics, n);
+            return { slug: p.slug, name: p.name, proficiency: p.prof };
+          });
           gapPaths.push({
             id: pathId,
             tool: r.tool,
             findingId: id,
-            nodes: [x.top.name, x.fo.name],
-            relationships: [
-              direct ? "BUILDS_ON" : `BUILDS_ON (${x.hops} hops)`,
-            ],
-            steps: [
-              { slug: x.top.slug, name: x.top.name, proficiency: x.top.prof },
-              { slug: x.fo.slug, name: x.fo.name, proficiency: x.fo.prof },
-            ],
-            edges: [
-              {
-                from: x.top.name,
-                to: x.fo.name,
-                type: "BUILDS_ON",
-                label: "builds on",
-                relation: direct ? "direct" : "multi_hop",
-                hops: x.hops,
-              },
-            ],
+            nodes: chainNodes.map((n) => n.name),
+            relationships: chainNodes.slice(0, -1).map(() => "BUILDS_ON"),
+            steps: chainNodes,
+            edges: chainNodes.slice(0, -1).map((n, ei) => ({
+              from: n.name,
+              to: chainNodes[ei + 1]!.name,
+              type: "BUILDS_ON",
+              label: "builds on",
+              relation: "direct" as const,
+              hops: 1,
+            })),
             meaning: `${x.top.name} is ${fmtProf(x.top.prof)}, but the topic it builds on is ${fmtProf(x.fo.prof)}.`,
           });
         });
@@ -1365,7 +1394,10 @@ function buildGraphPaths(
     const blocks = (r.result.blocks ?? []) as any[];
     const findingId = mainByTool.get(r.tool) ?? null;
 
-    if (r.tool === "connect_topics") {
+    if (
+      r.tool === "topic_connections" &&
+      blocks.some((b) => b.type === "path")
+    ) {
       const pathBlock = blocks.find((b) => b.type === "path");
       const st: any[] = pathBlock?.steps ?? [];
       if (st.length >= 2) {
@@ -1384,7 +1416,7 @@ function buildGraphPaths(
             return {
               from: nodes[i].name,
               to: nodes[i + 1].name,
-              type: raw.toUpperCase().replace(/\s+/g, "_"),
+              type: String(x.type ?? raw.toUpperCase().replace(/\s+/g, "_")),
               label: raw,
               relation: "direct" as const,
               hops: 1,
@@ -1395,7 +1427,7 @@ function buildGraphPaths(
       }
     }
 
-    if (r.tool === "explain_topic" && Array.isArray(f.buildsOn)) {
+    if (toolOf(r) === "explain_topic" && Array.isArray(f.buildsOn)) {
       for (const b of f.buildsOn.slice(0, 3)) {
         const raw = String(b);
         /* "Rate-limit handling (2 hops)" -> 2. No suffix means 1. */
@@ -1426,7 +1458,7 @@ function buildGraphPaths(
       }
     }
 
-    if (r.tool === "learning_path_to_topic") {
+    if (toolOf(r) === "learning_path_to_topic") {
       const rm = blocks.find((b) => b.type === "roadmap");
       const st: any[] = rm?.steps ?? [];
       if (st.length >= 2) {
@@ -1471,7 +1503,7 @@ function buildNextActions(
     if (!r.ok || r.miss || r.skipped || !r.result) continue;
     const f = (r.result.facts ?? {}) as Row;
 
-    if (r.tool === "find_gaps") {
+    if (toolOf(r) === "find_gaps") {
       const x = rankedGaps(f, topics)[0];
       const fid =
         findings.find((q) => q.tool === r.tool && q.priority?.rank === 1)?.id ??
@@ -1510,7 +1542,7 @@ function buildNextActions(
         });
     }
 
-    if (r.tool === "recommend_next_topics") {
+    if (toolOf(r) === "recommend_next_topics") {
       const n = Array.isArray(f.learnNext) ? f.learnNext[0] : null;
       if (n)
         push({
@@ -1523,7 +1555,7 @@ function buildNextActions(
         });
     }
 
-    if (r.tool === "audit_authenticity") {
+    if (toolOf(r) === "audit_authenticity") {
       const q = Array.isArray(f.questionable) ? f.questionable[0] : null;
       if (q)
         push({
@@ -1581,7 +1613,8 @@ function buildInsight(
 
 const COMPOSE_SYSTEM = `You write the chat reply for Pathway's topic assistant. The interface already shows tables, rankings, lists, evidence and graph paths built from the tool results, so DO NOT repeat every item.
 Write 2 to 4 plain sentences that interpret the result for the developer: the key takeaway, one notable detail, and one concrete next step. Name in plain words which graph analysis produced the key finding (for example "the betweenness ranking" or "the BUILDS_ON traversal"). Use ONLY the supplied facts. Never invent topics, levels, numbers or relationships. Address the developer as "you". No markdown, no bullet lists, no headings.
-Keep four ideas apart PageRank and betweenness describe the shared topic map, never the developer's code or skill. Never say one topic is "more skilled" or "equally skilled" than another, and never compare skill when proficiency is marked "estimate"; compare levels only as reported. and never use one word for two of them: proficiency (how deep the developer's skill is), confidence (how strong the evidence behind a rating is; low confidence means thin evidence, NOT wrong code), graph importance (how central a topic is, not a skill), gap priority (why one gap comes first). If a proficiency is marked "estimate", say it is an estimate. Hop language comes ONLY from the "relationships" list: use its labels exactly and never infer or count hops from any other fact. If a relationship is not listed, do not call it direct or multi-hop. Never write tool names like explain_topic; say "the topic explanation" instead.
+Keep four ideas apart and never use one word for two of them: proficiency (how deep the developer's skill is), confidence (how strong the evidence behind a rating is; low confidence means thin evidence, NOT wrong code), graph importance (how central a topic is in the shared map, not a skill), gap priority (why one gap comes first). PageRank and betweenness describe the shared topic map, never the developer's code or skill. Never say one topic is "more skilled" or "equally skilled" than another, and never compare skill when proficiency is marked "estimate"; compare levels only as reported. If a proficiency is marked "estimate", say it is an estimate.
+Hop language comes ONLY from the "relationships" list and from the "hops" and "prerequisite" facts: use their labels exactly and never infer or count hops from any other fact. If a relationship is not listed, do not call it direct or multi-hop. When a result lists a prerequisite chain, state it separately from the shortest path: the shortest path may be an association while the prerequisite chain has a different length, or may not exist. Never write tool names like explain_topic; say "the topic explanation" instead.
 Each result may carry "limitations". If a limitation affects the conclusion, state it plainly in one clause. Never turn a limitation into a claim: for example never say no gaps exist when a result says it could not be verified, and never call a topic weak when its foundation is merely unassessed.
 If the developer asked about something the graph has no topic for, say so plainly in one sentence and use the closest topics the tools did return.
 Also give:
@@ -1625,6 +1658,7 @@ const FOLLOWUPS: Record<string, string[]> = {
     "Where are my gaps?",
   ],
   connect_topics: ["What should I learn next?", "Where are my gaps?"],
+  topic_connections: ["Where are my gaps?", "What should I learn next?"],
   explore_neighborhood: ["Where are my gaps?", "What should I learn next?"],
   explain_topic: ["Where are my gaps?", "What builds on this topic?"],
   compare_topics: ["Where are my gaps?", "What should I learn next?"],
@@ -1651,29 +1685,37 @@ const DEFAULT_FOLLOWUPS = [
 function followupsFor(runs: AgentRun[]): string[] {
   const out: string[] = [];
   for (const r of runs)
-    for (const f of FOLLOWUPS[r.tool] ?? []) if (!out.includes(f)) out.push(f);
+    for (const f of FOLLOWUPS[toolOf(r)] ?? [])
+      if (!out.includes(f)) out.push(f);
   return (out.length ? out : DEFAULT_FOLLOWUPS).slice(0, 3);
 }
 
 const PREREQ_TYPES = new Set(["BUILDS_ON", "FOUNDATION_OF"]);
 
-/** Returns null when the prose makes a hop claim that no real path supports. */
-function sanitizeAnswer(answer: string, paths: GraphPath[]): string | null {
+/** Returns null when the prose makes a claim that no real path or fact supports. */
+function sanitizeAnswer(
+  answer: string,
+  paths: GraphPath[],
+  extraHops: number[] = [],
+): string | null {
   let out = answer;
   for (const t of ALL_TOOLS)
     out = out.split(t.name).join(t.title.toLowerCase());
+  out = out.replace(/\b[a-z]+(?:_[a-z]+)+\b/g, (w) => w.replace(/_/g, " "));
 
   const edges = paths.flatMap((p) => p.edges);
   const allowed = new Set<number>([
     ...edges.map((e) => e.hops),
     ...paths.map((p) => p.edges.length),
+    ...extraHops,
   ]);
   const hasDirect = edges.some(
     (e) => e.relation === "direct" && PREREQ_TYPES.has(e.type),
   );
   const hasMulti =
     edges.some((e) => e.relation === "multi_hop") ||
-    paths.some((p) => p.edges.length > 1);
+    paths.some((p) => p.edges.length > 1) ||
+    extraHops.some((n) => n > 1);
 
   if (/direct prerequisite/i.test(out) && !hasDirect) return null;
   if (/multi-?hop/i.test(out) && !hasMulti) return null;
@@ -1742,7 +1784,13 @@ async function compose(
     450,
   );
   const draft = asText(raw?.answer, 900);
-  const answer = draft ? sanitizeAnswer(draft, paths) : null;
+  const extraHops = usable.flatMap((r) => {
+    const f = (r.result?.facts ?? {}) as Row;
+    return [Number(f.hops), Number(f.prerequisite?.hops)].filter(
+      (n) => Number.isFinite(n) && n > 0,
+    );
+  });
+  const answer = draft ? sanitizeAnswer(draft, paths, extraHops) : null;
   if (!answer)
     return {
       answer: fallback,
@@ -1824,7 +1872,8 @@ export async function answerTopicQuestion(
     /summary|overview|about me|profile|how many (topics|skills|domains)|who am i/i;
   const vague =
     ruled.length === 1 &&
-    ruled[0].tool === "profile_overview" &&
+    ruled[0].tool === "skill_overview" &&
+    ruled[0].args.view === "overview" &&
     !OVERVIEW_RE.test(input.message);
   const planned = vague
     ? await planWithLlm(input.llm, input.message, history, selected, topics)
@@ -1873,7 +1922,7 @@ export async function answerTopicQuestion(
   const plannerMs = Date.now() - t0;
   console.log(`${LOG} plan`, {
     by: planned ? "llm" : "rules",
-    calls: calls.map((c) => c.tool),
+    calls: calls.map((c) => `${c.tool}${c.args.view ? `:${c.args.view}` : ""}`),
     skipped: skipped.map((s) => s.term),
   });
   emit?.({

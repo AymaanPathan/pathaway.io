@@ -36,6 +36,7 @@ import {
 } from "../compoenents/ChatBlock";
 import DepthProfile from "../compoenents/DepthProfile";
 import InsightAnswer from "../compoenents/InsightAnswer";
+import ResponsePanel from "../compoenents/ResponsePanel";
 /* ========================================================================== */
 /* DESIGN TOKENS (shared with the landing page)                               */
 /* ========================================================================== */
@@ -2247,7 +2248,7 @@ export default function OverviewPage() {
         </section>
 
         {/* 2. KNOWLEDGE GRAPH + SIDE PANEL */}
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px] xl:items-stretch">
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_560px] xl:items-stretch">
           <section
             className="min-w-0 overflow-hidden rounded-2xl"
             style={{ backgroundColor: PAPER, ...border, boxShadow: shadow(4) }}
@@ -2464,24 +2465,27 @@ export default function OverviewPage() {
                             {m.text}
                           </div>
                         ) : m.insight?.diagnosis && !m.pending ? (
-                          /* NEW: insight-first answer */
-                          <InsightAnswer
-                            m={m}
-                            onPick={pick}
-                            onFollow={(q) => void send(q)}
-                            onOpen={() => setStage(m)}
-                          />
+                          <ResponsePanel m={m}>
+                            <InsightAnswer
+                              m={m}
+                              onPick={pick}
+                              onFollow={(q) => void send(q)}
+                              onOpen={() => setStage(m)}
+                            />
+                          </ResponsePanel>
                         ) : m.blocks ||
                           m.pending ||
                           m.tools ||
                           m.local ||
                           m.followups ? (
-                          <AiMessage
-                            m={m}
-                            onPick={pick}
-                            onFollow={(q) => void send(q)}
-                            onOpen={() => setStage(m)}
-                          />
+                          <ResponsePanel m={m}>
+                            <AiMessage
+                              m={m}
+                              onPick={pick}
+                              onFollow={(q) => void send(q)}
+                              onOpen={() => setStage(m)}
+                            />
+                          </ResponsePanel>
                         ) : (
                           <div
                             className="w-full rounded-2xl px-3.5 py-3 text-[13px] leading-[1.65]"
