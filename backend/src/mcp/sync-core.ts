@@ -2571,12 +2571,7 @@ export class GithubSync {
 
     await this.storeFileChanges(allFileChanges);
 
-    await this.storeCommitEnrichment(
-      commitResults
-        .map((r) => r.enrichment)
-        .filter((e): e is CommitEnrichment => e !== null),
-    );
-
+    let learningOk = false;
     // Learn only from the file changes in this sync batch. Existing demonstration IDs
     // are skipped by the pipeline, preventing repeated LLM calls for overlap commits.
     try {
@@ -2615,11 +2610,20 @@ export class GithubSync {
         "learning_complete",
         learningResult as unknown as Record<string, unknown>,
       );
+      learningOk = true;
     } catch (error) {
       // Learning is an enrichment stage: a Cerebras outage must not invalidate a successful GitHub sync.
       const message = error instanceof Error ? error.message : String(error);
       console.error("[learning-pipeline] Failed after GitHub sync:", message);
       this.onProgress("learning_failed", { message });
+    }
+
+    if (learningOk) {
+      await this.storeCommitEnrichment(
+        commitResults
+          .map((r) => r.enrichment)
+          .filter((e): e is CommitEnrichment => e !== null),
+      );
     }
 
     const syncTimestamp = new Date().toISOString();
