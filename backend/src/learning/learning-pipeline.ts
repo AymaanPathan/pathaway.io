@@ -54,16 +54,23 @@ export interface LearningPipelineInput {
   expected?: { commitSha: string; repositoryId: string };
   /** Rebuild aggregates even when nothing was detected. Mission retries set this. */
   forceReconcile?: boolean;
-  /** Detector override. Defaults to Pathway's deterministic extractEvidence. */
+  /**
+   * LLM candidate discovery after the deterministic detectors.
+   * Defaults to on for source "mission", off otherwise.
+   */
+  discovery?: boolean;
+  /** Detector override. Defaults to deterministic extraction plus optional discovery. */
   extractor?: (
     fileChanges: LearningFileChange[],
     contextByCommit: Map<string, LearningContext>,
-  ) => Demonstration[];
+  ) => Demonstration[] | Promise<Demonstration[]>;
   /** Called after each stage completes so callers can persist progress. */
   onStage?: (stage: PipelineStage) => Promise<void>;
 }
 export interface LearningPipelineResult {
   detected: number;
+  /** Of `detected`, how many came from LLM discovery (before review). */
+  discovered: number;
   reviewed: number;
   accepted: number;
   /** Already-persisted, owned demonstrations. */
@@ -162,8 +169,29 @@ export async function runLearningPipeline(
   };
 
   const rejected: LearningPipelineResult["rejected"] = [];
-  const extract = input.extractor ?? extractEvidence;
-  const extracted = extract(input.fileChanges, input.contextByCommit);
+
+  // Deterministic detectors first, then (optionally) LLM discovery. Discovery
+  // only proposes claims; each one is rebuilt from the real added lines in
+  // extractEvidence, then goes through the same checks below as any detection.
+  const useDiscovery = input.discovery ?? input.source === "mission";
+  const extract =
+    input.extractor ??
+    ((changes: LearningFileChange[], contexts: Map<string, LearningContext>) =>
+      extractEvidence(changes, contexts, {
+        discovery: useDiscovery
+          ? {
+              reasoner: input.reasoner,
+              onSkip: (fileChangeId, reason) =>
+                console.log(
+                  `[learning] discovery skipped ${fileChangeId}: ${reason}`,
+                ),
+            }
+          : undefined,
+      }));
+  const extracted = await extract(input.fileChanges, input.contextByCommit);
+  const discovered = extracted.filter((d) =>
+    d.ruleId.startsWith("llm_discovery:"),
+  ).length;
 
   // Provenance: evidence must point at exactly the evaluated commit and repository.
   const detected: Demonstration[] = [];
@@ -187,6 +215,7 @@ export async function runLearningPipeline(
   if (!detected.length && !input.forceReconcile) {
     return {
       detected: extracted.length,
+      discovered,
       reviewed: 0,
       accepted: 0,
       skippedExisting: 0,
@@ -286,6 +315,7 @@ export async function runLearningPipeline(
 
   return {
     detected: extracted.length,
+    discovered,
     reviewed: candidates.length,
     accepted,
     skippedExisting: ownership.owned.size,

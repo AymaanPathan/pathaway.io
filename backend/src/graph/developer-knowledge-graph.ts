@@ -9,6 +9,12 @@ import {
 type AnyObject = Record<string, any>;
 export type ProgressFn = (stage: string, detail?: AnyObject) => void;
 
+export interface AddedLine {
+  // was: interface AddedLine
+  line: number;
+  text: string;
+}
+
 const LOG_PREFIX = "[overview-graph]";
 
 function positiveIntegerEnv(
@@ -1373,11 +1379,6 @@ export const SIGNAL_RULES: SignalRule[] = [
   },
 ];
 
-interface AddedLine {
-  line: number; // line number in the NEW version of the file
-  text: string;
-}
-
 export function parseAddedLines(patch: string): AddedLine[] {
   const out: AddedLine[] = [];
   let newLine = 0;
@@ -1415,6 +1416,16 @@ function dedent(lines: string[]): string {
     .map((l) => (/^\s*/.exec(l) as RegExpExecArray)[0].length);
   const min = indents.length ? Math.min(...indents) : 0;
   return lines.map((l) => l.slice(min)).join("\n");
+}
+
+/** Added lines of a non-test file, comments and blanks removed. Shared by the detectors and the LLM scout. */
+export function eligibleAddedLines(
+  fc: Pick<EvidenceInput, "path" | "patch">,
+): AddedLine[] {
+  if (!fc.patch || TEST_PATH.test(fc.path)) return [];
+  return parseAddedLines(fc.patch).filter(
+    (l) => l.text.trim().length > 0 && !COMMENT_LINE.test(l.text),
+  );
 }
 
 // ============================================================
@@ -1511,11 +1522,7 @@ export function extractDemonstrations(
   fc: EvidenceInput,
   ctx: EvidenceContext,
 ): Demonstration[] {
-  if (!fc.patch || TEST_PATH.test(fc.path)) return [];
-
-  const added = parseAddedLines(fc.patch).filter(
-    (l) => l.text.trim().length > 0 && !COMMENT_LINE.test(l.text),
-  );
+  const added = eligibleAddedLines(fc);
   if (added.length === 0) return [];
 
   const code = added.map((l) => l.text).join("\n");
@@ -1630,6 +1637,100 @@ export function extractDemonstrations(
   }
 
   return found;
+}
+
+
+// ------------------------------------------------------------
+// LLM-DISCOVERED DEMONSTRATIONS
+//
+// The model only proposes a claim. The Demonstration is rebuilt here from the
+// REAL added lines, so snippet, range, permalink, commit, repository and
+// FileChange come from stored data, never from model text.
+//   - capability must be an existing LEARNABLE capability
+//   - range must be valid, <= MAX_DISCOVERED_SPAN, and contain added lines
+//   - the quote must appear verbatim (whitespace-insensitive) in those lines
+//   - technique is the capability name (stable identity, no free text)
+//   - modifiers are empty and ruleId is "llm_discovery:<capability>", so these
+//     never satisfy a COMPLETION_CRITERIA safeguard (those need real rules)
+//   - depth is capped at "implementation", never "strong"
+// ------------------------------------------------------------
+
+export const LLM_RULE_PREFIX = "llm_discovery:";
+const MAX_DISCOVERED_SPAN = 40;
+const squash = (s: string): string => s.replace(/\s+/g, " ").trim();
+
+export interface DiscoveredClaimInput {
+  capabilityId: string;
+  startLine: number;
+  endLine: number;
+  quote: string;
+  depth?: string;
+  rationale?: string;
+}
+
+export function buildDiscoveredDemonstration(
+  fc: EvidenceInput,
+  ctx: EvidenceContext,
+  claim: DiscoveredClaimInput,
+): Demonstration | null {
+  const cap = CAPABILITY_BY_ID.get(claim.capabilityId);
+  if (!cap || cap.parentId === null) return null;
+
+  const range = validLineRange(claim.startLine, claim.endLine);
+  if (!range || range.end - range.start + 1 > MAX_DISCOVERED_SPAN) return null;
+
+  const lines = eligibleAddedLines(fc).filter(
+    (l) => l.line >= range.start && l.line <= range.end,
+  );
+  if (lines.length === 0) return null;
+
+  const quote = squash(claim.quote);
+  if (quote.length < 8) return null;
+  if (!squash(lines.map((l) => l.text).join("\n")).includes(quote)) return null;
+
+  const startLine = lines[0].line;
+  const endLine = lines[lines.length - 1].line;
+  let snippet = dedent(lines.map((l) => l.text)).trim();
+  if (snippet.length > MAX_SNIPPET_CHARS) {
+    snippet = `${snippet.slice(0, MAX_SNIPPET_CHARS)}\n…`;
+  }
+
+  const context = deriveContext(fc.path, ctx.commitMessage);
+  const rationale = squash(claim.rationale ?? "").slice(0, 200);
+
+  return {
+    id: `${fc.id}::llm:${cap.id}`,
+    ruleId: `${LLM_RULE_PREFIX}${cap.id}`,
+    capabilityId: cap.id,
+    technique: cap.name,
+    modifiers: [],
+    depth: claim.depth === "implementation" ? "implementation" : "usage",
+    summary: rationale ? `${cap.name} — ${rationale}` : cap.name,
+
+    fileChangeId: fc.id,
+    repositoryId: fc.repositoryId,
+    commitSha: fc.commitSha,
+    path: fc.path,
+    language: fc.language,
+    startLine,
+    endLine,
+    snippet,
+    permalink: buildPermalink(
+      ctx.repositoryFullName,
+      fc.commitSha,
+      fc.path,
+      startLine,
+      endLine,
+    ),
+
+    layerId: context.layerId,
+    layerName: context.layerName,
+    intent: context.intent,
+    commitSubject: context.subject,
+
+    usesSkillIds: [],
+    createdAt: fc.createdAt,
+  };
 }
 
 // ============================================================

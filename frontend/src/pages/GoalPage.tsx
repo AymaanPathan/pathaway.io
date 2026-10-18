@@ -1,11 +1,13 @@
 /* eslint-disable react-hooks/set-state-in-effect */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUp,
   ExternalLink,
+  RefreshCw,
   Rocket,
   Target,
 } from "lucide-react";
@@ -228,7 +230,6 @@ const lvl = (l: unknown): Level =>
     : "none";
 const trunc = (s: string, n: number) =>
   s.length > n ? `${s.slice(0, Math.max(1, n - 1))}…` : s;
-const pretty = (s: string) => s.replace(/[_-]+/g, " ");
 const pick = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
 function normOps(v: unknown): Op[] {
@@ -557,19 +558,153 @@ const KIND_FILL: Record<string, string> = {
   repository: "#fff",
 };
 
+// Same interaction language as the Overview page:
+//   .press  soft squeeze on click
+//   .hard   hard-shadow button that lifts on hover and sinks on click
+//   .lift   cards rise a little on hover
+//   .pw-reveal / .pw-in  scroll-in fade + slide
 const CSS = `
+* { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
+.press { transition: transform .12s ease, background-color .2s ease, opacity .2s ease; -webkit-tap-highlight-color: transparent; }
+.press:active:not(:disabled) { transform: translateY(1px) scale(.98); }
+.hard { box-shadow: 2px 2px 0 0 ${INK}; transition: transform .12s ease, box-shadow .12s ease, background-color .2s ease, opacity .2s ease; -webkit-tap-highlight-color: transparent; user-select: none; }
+.hard:hover:not(:disabled) { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 0 ${INK}; }
+.hard:active:not(:disabled) { transform: translate(2px,2px); box-shadow: 0 0 0 0 ${INK}; }
+.hard-lg { box-shadow: 3px 3px 0 0 ${INK}; transition: transform .12s ease, box-shadow .12s ease, background-color .2s ease, opacity .2s ease; -webkit-tap-highlight-color: transparent; user-select: none; }
+.hard-lg:hover:not(:disabled) { transform: translate(-2px,-2px); box-shadow: 5px 5px 0 0 ${INK}; }
+.hard-lg:active:not(:disabled) { transform: translate(3px,3px); box-shadow: 0 0 0 0 ${INK}; }
+.lift { transition: transform .18s ease; }
+.lift:hover { transform: translateY(-3px); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid ${INK}; outline-offset: 2px; }
+svg g:focus-visible { outline: 2px solid ${INK}; outline-offset: 2px; }
+.pw-code::-webkit-scrollbar { height: 10px; width: 10px; }
 @keyframes pw-rise { from { opacity:0; transform:translateY(14px) } to { opacity:1; transform:none } }
 .pw-rise { animation: pw-rise .5s ease-out both; }
+@keyframes pw-slide { from { opacity:0; transform:translateY(6px) } to { opacity:1; transform:none } }
+.pw-slide { animation: pw-slide .25s ease-out both; }
 @keyframes pw-pulse { 0%,100% { opacity:1 } 50% { opacity:.45 } }
 .pw-pulse { animation: pw-pulse 1.4s ease-in-out infinite; }
 @keyframes pw-dash { to { stroke-dashoffset: -24 } }
 .pw-flow { stroke-dasharray: 6 6; animation: pw-dash 1.2s linear infinite; }
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .pw-rise, .pw-pulse, .pw-flow { animation: none; } }
-.pw-btn:focus-visible { outline: 3px solid ${INK}; outline-offset: 2px; }
-.pw-btn:disabled { opacity: .5; cursor: not-allowed; }
-.pw-node { cursor: pointer; transition: opacity .2s ease; }
+@keyframes pw-stripe { to { background-position: 28px 0; } }
+.pw-reveal { opacity: 0; transform: translateY(18px); transition: opacity .5s ease, transform .5s ease; }
+.pw-reveal.pw-in { opacity: 1; transform: none; }
+.pw-node { cursor: pointer; transition: opacity .25s ease; }
+.pw-node .nm { transition: stroke-width .2s ease; }
+.pw-node:hover .nm, .pw-node:focus-visible .nm { stroke-width: 4.5px; }
+.pw-snode { transition: opacity .2s ease; }
+.pw-snode:hover rect.sn { stroke-width: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .pw-rise, .pw-slide, .pw-pulse, .pw-flow { animation: none; }
+  .pw-reveal { opacity: 1; transform: none; transition: none; }
+  .press, .hard, .hard-lg, .lift { transition: none; }
+}
 `;
+
+// ============================================================
+// MOTION HELPERS
+// ============================================================
+
+/** Fades and slides a block in the first time it scrolls into view. */
+function Reveal({
+  children,
+  delay = 0,
+  className = "",
+}: {
+  children: ReactNode;
+  delay?: number;
+  className?: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setShown(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setShown(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: "0px 0px -6% 0px", threshold: 0.04 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return (
+    <div
+      ref={ref}
+      className={`pw-reveal ${shown ? "pw-in" : ""} ${className}`}
+      style={{ transitionDelay: shown ? `${delay}ms` : "0ms" }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Thin reading-progress bar plus a back-to-top button. */
+function ScrollChrome() {
+  const bar = useRef<HTMLDivElement>(null);
+  const [showTop, setShowTop] = useState(false);
+  useEffect(() => {
+    const onScroll = () => {
+      const doc = document.documentElement;
+      const max = Math.max(1, doc.scrollHeight - window.innerHeight);
+      const p = Math.min(1, Math.max(0, window.scrollY / max));
+      if (bar.current) bar.current.style.transform = `scaleX(${p})`;
+      setShowTop(window.scrollY > 700);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", onScroll);
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, []);
+  return (
+    <>
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-[-2px] h-[3px]"
+      >
+        <div
+          ref={bar}
+          style={{
+            height: "100%",
+            backgroundColor: CORAL,
+            transformOrigin: "left",
+            transform: "scaleX(0)",
+            transition: "transform .1s linear",
+          }}
+        />
+      </div>
+      <button
+        type="button"
+        aria-label="Back to top"
+        onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+        style={{
+          ...border,
+          backgroundColor: YELLOW,
+          opacity: showTop ? 1 : 0,
+          pointerEvents: showTop ? "auto" : "none",
+          transform: showTop ? undefined : "translateY(10px)",
+        }}
+        className="hard fixed bottom-4 right-4 z-30 flex h-10 w-10 items-center justify-center rounded-full"
+      >
+        <ArrowUp size={16} aria-hidden />
+      </button>
+    </>
+  );
+}
 
 // ============================================================
 // SMALL PIECES
@@ -638,20 +773,24 @@ function Section({
   children: ReactNode;
 }) {
   return (
-    <section id={id} className="scroll-mt-20">
-      <Label>{eyebrow}</Label>
-      <h2
-        style={{ fontFamily: DISPLAY_FONT }}
-        className="mt-1 text-[26px] font-bold leading-tight sm:text-[30px]"
-      >
-        {title}
-      </h2>
-      {blurb && (
-        <p className="mt-1.5 max-w-[70ch] text-[13px] leading-relaxed text-neutral-600">
-          {blurb}
-        </p>
-      )}
-      <div className="mt-5">{children}</div>
+    <section id={id} className="scroll-mt-28">
+      <Reveal>
+        <Label>{eyebrow}</Label>
+        <h2
+          style={{ fontFamily: DISPLAY_FONT }}
+          className="mt-1 text-[26px] font-bold leading-tight sm:text-[30px]"
+        >
+          {title}
+        </h2>
+        {blurb && (
+          <p className="mt-1.5 max-w-[70ch] text-[13px] leading-relaxed text-neutral-600">
+            {blurb}
+          </p>
+        )}
+      </Reveal>
+      <Reveal delay={80} className="mt-5">
+        {children}
+      </Reveal>
     </section>
   );
 }
@@ -678,11 +817,17 @@ const NAV: Array<[string, string]> = [
  */
 function StartMission({ goal }: { goal: Goal }) {
   const navigate = useNavigate();
+  const [busy, setBusy] = useState(false);
   const goalId = goal.id;
   const ready = goal.saved && !!goalId;
   const go = () => {
-    if (!goalId) return;
-    navigate(`${MISSION_ROUTE}?goalId=${encodeURIComponent(goalId)}`);
+    if (!goalId || busy) return;
+    setBusy(true);
+    // a short beat so the click feels registered before the page changes
+    window.setTimeout(
+      () => navigate(`${MISSION_ROUTE}?goalId=${encodeURIComponent(goalId)}`),
+      220,
+    );
   };
   return (
     <div
@@ -705,11 +850,16 @@ function StartMission({ goal }: { goal: Goal }) {
       <button
         type="button"
         onClick={go}
-        disabled={!ready}
-        style={{ ...border, backgroundColor: "#fff", boxShadow: shadow(3) }}
-        className="pw-btn inline-flex shrink-0 items-center gap-2 rounded-full px-5 py-2 text-[14px] font-bold"
+        disabled={!ready || busy}
+        style={{ ...border, backgroundColor: "#fff" }}
+        className="hard-lg inline-flex shrink-0 items-center gap-2 rounded-full px-5 py-2 text-[14px] font-bold"
       >
-        <Rocket size={15} aria-hidden /> Start mission
+        {busy ? (
+          <RefreshCw size={15} className="animate-spin" aria-hidden />
+        ) : (
+          <Rocket size={15} aria-hidden />
+        )}
+        {busy ? "Opening mission…" : "Start mission"}
       </button>
     </div>
   );
@@ -750,7 +900,7 @@ function Hero({ goal, ex }: { goal: Goal; ex: Explanation }) {
       {goal.limitation && (
         <div
           style={{ ...border, backgroundColor: SOFT_CORAL }}
-          className="mt-4 rounded-2xl px-4 py-3"
+          className="pw-slide mt-4 rounded-2xl px-4 py-3"
         >
           <Label>Gap found in your code</Label>
           <p className="mt-1 text-[13px] leading-relaxed">
@@ -800,19 +950,53 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** Sticky section bar. Highlights the section you are reading and scrolls smoothly on click. */
 function SectionNav({ hasTrace }: { hasTrace: boolean }) {
+  const items = useMemo(
+    () => NAV.filter(([id]) => id !== "why" || hasTrace),
+    [hasTrace],
+  );
+  const [active, setActive] = useState("");
+
+  useEffect(() => {
+    const onScroll = () => {
+      let cur = "";
+      for (const [id] of items) {
+        const el = document.getElementById(id);
+        if (el && el.getBoundingClientRect().top <= 150) cur = id;
+      }
+      setActive(cur);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [items]);
+
   return (
-    <nav aria-label="Sections" className="flex flex-wrap gap-2">
-      {NAV.filter(([id]) => id !== "why" || hasTrace).map(([id, label]) => (
-        <a
-          key={id}
-          href={`#${id}`}
-          style={{ ...border, backgroundColor: "#fff" }}
-          className="pw-btn rounded-full px-3.5 py-1 text-[12px] font-semibold"
-        >
-          {label}
-        </a>
-      ))}
+    <nav
+      aria-label="Sections"
+      style={{ borderBottom: `1px solid ${LINE}`, backgroundColor: PAPER }}
+      className="sticky top-[52px] z-10 w-full overflow-x-auto"
+    >
+      <div className="mx-auto flex w-full max-w-[1100px] gap-2 px-4 py-2 sm:px-8">
+        {items.map(([id, label]) => {
+          const on = active === id;
+          return (
+            <a
+              key={id}
+              href={`#${id}`}
+              aria-current={on ? "true" : undefined}
+              style={{
+                ...border,
+                backgroundColor: on ? YELLOW : "#fff",
+              }}
+              className="press shrink-0 rounded-full px-3.5 py-1 text-[12px] font-semibold"
+            >
+              {label}
+            </a>
+          );
+        })}
+      </div>
     </nav>
   );
 }
@@ -833,35 +1017,37 @@ function Block({
   children: ReactNode;
 }) {
   return (
-    <div
-      style={{ ...border, backgroundColor: "#fff", boxShadow: shadow(3) }}
-      className="rounded-2xl p-4 sm:p-5"
-    >
-      <div className="flex items-center gap-2.5">
-        <span
-          style={{
-            ...border,
-            fontFamily: DISPLAY_FONT,
-            backgroundColor: YELLOW,
-          }}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[13px] font-bold"
-        >
-          {n}
-        </span>
-        <h3
-          style={{ fontFamily: DISPLAY_FONT }}
-          className="text-[19px] font-bold leading-tight"
-        >
-          {title}
-        </h3>
+    <Reveal>
+      <div
+        style={{ ...border, backgroundColor: "#fff", boxShadow: shadow(3) }}
+        className="rounded-2xl p-4 sm:p-5"
+      >
+        <div className="flex items-center gap-2.5">
+          <span
+            style={{
+              ...border,
+              fontFamily: DISPLAY_FONT,
+              backgroundColor: YELLOW,
+            }}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[13px] font-bold"
+          >
+            {n}
+          </span>
+          <h3
+            style={{ fontFamily: DISPLAY_FONT }}
+            className="text-[19px] font-bold leading-tight"
+          >
+            {title}
+          </h3>
+        </div>
+        {hint && (
+          <p className="mt-1.5 max-w-[75ch] text-[12.5px] leading-relaxed text-neutral-600">
+            {hint}
+          </p>
+        )}
+        <div className="mt-4">{children}</div>
       </div>
-      {hint && (
-        <p className="mt-1.5 max-w-[75ch] text-[12.5px] leading-relaxed text-neutral-600">
-          {hint}
-        </p>
-      )}
-      <div className="mt-4">{children}</div>
-    </div>
+    </Reveal>
   );
 }
 
@@ -877,11 +1063,14 @@ const ROLE_LABEL: Record<string, string> = {
   alternative: "Evidence behind an alternative",
 };
 
-function PathRow({ p }: { p: TPath }) {
+function PathRow({ p, index = 0 }: { p: TPath; index?: number }) {
   return (
     <li
-      style={{ border: `1.5px solid ${LINE}` }}
-      className="rounded-xl bg-white p-3"
+      style={{
+        border: `1.5px solid ${LINE}`,
+        animationDelay: `${index * 70}ms`,
+      }}
+      className="pw-slide lift rounded-xl bg-white p-3"
     >
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         <span
@@ -947,7 +1136,7 @@ function ThreeCols({ items }: { items: Array<[string, string, string]> }) {
         <div
           key={label}
           style={{ ...border, backgroundColor: fill }}
-          className="rounded-2xl p-3"
+          className="lift rounded-2xl p-3"
         >
           <Label>{label}</Label>
           <p className="mt-1 text-[13px] leading-relaxed">
@@ -986,13 +1175,11 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
               No graph path was recorded for this goal.
             </p>
           ) : (
-            <>
-              <ul className="space-y-2.5">
-                {[...reused, ...other].map((p) => (
-                  <PathRow key={`${p.role}-${p.evidenceId}`} p={p} />
-                ))}
-              </ul>
-            </>
+            <ul className="space-y-2.5">
+              {[...reused, ...other].map((p, i) => (
+                <PathRow key={`${p.role}-${p.evidenceId}`} p={p} index={i} />
+              ))}
+            </ul>
           )}
 
           {t.neighbours.length > 0 && (
@@ -1003,7 +1190,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
                   <li
                     key={n.slug}
                     style={{ border: `1.5px solid ${LINE}` }}
-                    className="rounded-xl px-3 py-1.5 text-[12px] leading-snug"
+                    className="lift rounded-xl px-3 py-1.5 text-[12px] leading-snug"
                   >
                     <div className="flex flex-wrap items-center gap-1.5">
                       <b>{n.name}</b>
@@ -1046,7 +1233,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
                   backgroundColor: fill,
                   borderStyle: label === "No evidence yet" ? "dashed" : "solid",
                 }}
-                className="rounded-2xl p-3"
+                className="lift rounded-2xl p-3"
               >
                 <Label>{label}</Label>
                 <p className="mt-1 text-[12.5px] leading-relaxed">
@@ -1073,7 +1260,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
                 <li
                   key={b.id}
                   style={{ border: `1.5px solid ${LINE}` }}
-                  className="rounded-xl p-3"
+                  className="lift rounded-xl p-3"
                 >
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span
@@ -1108,7 +1295,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
                         target="_blank"
                         rel="noreferrer"
                         aria-label={`Open ${b.id} on GitHub`}
-                        className="pw-btn shrink-0"
+                        className="press shrink-0 rounded-full p-1"
                       >
                         <ExternalLink size={14} aria-hidden />
                       </a>
@@ -1126,7 +1313,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
                         backgroundColor: PAPER,
                         border: `1.5px solid ${LINE}`,
                       }}
-                      className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg p-2.5 text-[11px] leading-snug"
+                      className="pw-code mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg p-2.5 text-[11px] leading-snug"
                     >
                       {b.excerpt}
                     </pre>
@@ -1175,7 +1362,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
         >
           <div
             style={{ ...border, backgroundColor: LIGHT_GREEN }}
-            className="rounded-2xl p-3.5"
+            className="lift rounded-2xl p-3.5"
           >
             <div className="flex flex-wrap items-center gap-1.5">
               <Chip fill={GREEN} color="#fff">
@@ -1204,7 +1391,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
               <li
                 key={i}
                 style={{ ...border, backgroundColor: "#fff" }}
-                className="rounded-2xl p-3.5"
+                className="lift rounded-2xl p-3.5"
               >
                 <div className="flex flex-wrap items-center gap-1.5">
                   <Chip>Alternative</Chip>
@@ -1257,7 +1444,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
           <div className="grid grid-cols-1 items-stretch gap-2 lg:grid-cols-[1fr_auto_1fr_auto_1fr]">
             <div
               style={{ ...border, backgroundColor: LIGHT_GREEN }}
-              className="rounded-2xl p-3"
+              className="lift rounded-2xl p-3"
             >
               <Label>Already exists</Label>
               <ul className="mt-1 list-disc space-y-1 pl-4 text-[12.5px] leading-snug">
@@ -1275,7 +1462,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
             />
             <div
               style={{ ...border, backgroundColor: YELLOW }}
-              className="rounded-2xl p-3"
+              className="lift rounded-2xl p-3"
             >
               <Label>Proposed change</Label>
               <p className="mt-1 text-[12.5px] leading-snug">
@@ -1289,7 +1476,7 @@ function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
             />
             <div
               style={{ ...border, backgroundColor: LAVENDER }}
-              className="rounded-2xl p-3"
+              className="lift rounded-2xl p-3"
             >
               <Label>Verified outcome</Label>
               <p className="mt-1 text-[12.5px] leading-snug">
@@ -1415,14 +1602,18 @@ function Reach({ goal, ex }: { goal: Goal; ex: Explanation }) {
     >
       <ol className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
         {stages.map((s, i) => (
-          <li key={s.title} className="relative">
+          <li
+            key={s.title}
+            className="pw-rise relative"
+            style={{ animationDelay: `${i * 70}ms` }}
+          >
             <div
               style={{
                 ...border,
                 backgroundColor: s.fill,
                 boxShadow: shadow(3),
               }}
-              className="h-full rounded-2xl p-3"
+              className="lift h-full rounded-2xl p-3"
             >
               <div className="flex items-center justify-between">
                 <span
@@ -1532,6 +1723,7 @@ function Reach({ goal, ex }: { goal: Goal; ex: Explanation }) {
                 width: `${(p.ms / total) * 100}%`,
                 backgroundColor: p.fill,
                 borderRight: p.ms ? `2px solid ${INK}` : undefined,
+                transition: "width .6s ease",
               }}
             />
           ))}
@@ -1553,460 +1745,6 @@ function Reach({ goal, ex }: { goal: Goal; ex: Explanation }) {
           ))}
         </div>
       </div>
-    </Section>
-  );
-}
-
-// ============================================================
-// 3. TOPIC GRAPH  (dependencies + relations around the goal)
-// ============================================================
-
-const VW = 920;
-const VH = 600;
-
-type Pt = { x: number; y: number };
-
-const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
-const nodeR = (t: TNode) =>
-  t.role === "seed"
-    ? 20 + clamp01(t.relevance) * 8
-    : 9 + clamp01(t.relevance) * 10;
-const labelOf = (t: TNode) => trunc(t.name, t.role === "seed" ? 24 : 20);
-const labelW = (t: TNode) =>
-  labelOf(t).length * (t.role === "seed" ? 6.7 : 6.1) + 12;
-
-// Seeds sit on an inner ring, everything else on outer rings, then a
-// box-collision pass pushes overlapping nodes (circle + label) apart.
-function layoutTopics(topics: TNode[], links: TLink[]): Map<string, Pt> {
-  const cx = VW / 2;
-  const cy = VH / 2;
-  const byDomain = (a: TNode, b: TNode) =>
-    a.domain.localeCompare(b.domain) || a.name.localeCompare(b.name);
-
-  const seeds = topics.filter((t) => t.role === "seed").sort(byDomain);
-  const rest = topics.filter((t) => t.role !== "seed");
-
-  const target = new Map<string, Pt>();
-  const seedAngle = new Map<string, number>();
-
-  const srx = seeds.length <= 1 ? 0 : Math.min(250, 90 + seeds.length * 22);
-  const sry = srx * 0.62;
-  seeds.forEach((t, i) => {
-    const ang = (i / seeds.length) * Math.PI * 2 - Math.PI / 2;
-    seedAngle.set(t.slug, ang);
-    target.set(t.slug, {
-      x: cx + srx * Math.cos(ang),
-      y: cy + sry * Math.sin(ang),
-    });
-  });
-
-  const RINGS: Array<[number, number]> = [
-    [360, 225],
-    [410, 250],
-    [430, 262],
-  ];
-  const ringOf = (t: TNode) => (t.role === "cluster" ? 2 : t.hops >= 2 ? 1 : 0);
-
-  const placed = new Set<string>();
-  for (let k = 0; k < RINGS.length; k++) {
-    const list = rest.filter((t) => ringOf(t) === k).sort(byDomain);
-    list.forEach((t, i) => {
-      // lean toward the seeds this topic links to, otherwise spread evenly
-      let sx = 0;
-      let sy = 0;
-      let found = 0;
-      for (const l of links) {
-        const other = l.a === t.slug ? l.b : l.b === t.slug ? l.a : "";
-        const a = other ? seedAngle.get(other) : undefined;
-        if (a !== undefined) {
-          sx += Math.cos(a);
-          sy += Math.sin(a);
-          found++;
-        }
-      }
-      const ang =
-        found > 0
-          ? Math.atan2(sy, sx)
-          : (i / Math.max(1, list.length)) * Math.PI * 2 +
-            k * 0.55 -
-            Math.PI / 2;
-      target.set(t.slug, {
-        x: cx + RINGS[k][0] * Math.cos(ang),
-        y: cy + RINGS[k][1] * Math.sin(ang),
-      });
-      placed.add(t.slug);
-    });
-  }
-
-  const items = topics.map((t, i) => {
-    const r = nodeR(t);
-    const tg = target.get(t.slug) ?? { x: cx, y: cy };
-    return {
-      slug: t.slug,
-      r,
-      w: Math.max(2 * r, labelW(t)) + 10,
-      h: 2 * r + 22,
-      tx: tg.x,
-      ty: tg.y,
-      x: tg.x + ((i % 3) - 1) * 0.5,
-      y: tg.y + ((i % 5) - 2) * 0.5,
-    };
-  });
-
-  const keepInside = () => {
-    for (const p of items) {
-      p.x = Math.min(VW - p.w / 2 - 4, Math.max(p.w / 2 + 4, p.x));
-      p.y = Math.min(VH - p.r - 22, Math.max(p.r + 6, p.y));
-    }
-  };
-
-  const separate = () => {
-    for (let i = 0; i < items.length; i++) {
-      for (let j = i + 1; j < items.length; j++) {
-        const a = items[i];
-        const b = items[j];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const ox = (a.w + b.w) / 2 - Math.abs(dx);
-        const oy = (a.h + b.h) / 2 - Math.abs(dy);
-        if (ox > 0 && oy > 0) {
-          if (ox < oy) {
-            const s = ((dx >= 0 ? 1 : -1) * ox) / 2;
-            a.x -= s;
-            b.x += s;
-          } else {
-            const s = ((dy >= 0 ? 1 : -1) * oy) / 2;
-            a.y -= s;
-            b.y += s;
-          }
-        }
-      }
-    }
-  };
-
-  for (let it = 0; it < 260; it++) {
-    for (const p of items) {
-      p.x += (p.tx - p.x) * 0.03;
-      p.y += (p.ty - p.y) * 0.03;
-    }
-    separate();
-    keepInside();
-  }
-  for (let it = 0; it < 60; it++) {
-    separate();
-    keepInside();
-  }
-
-  return new Map(items.map((p) => [p.slug, { x: p.x, y: p.y }]));
-}
-
-function TopicGraph({ ex }: { ex: Explanation }) {
-  const g = ex.graph;
-  const topics = useMemo(() => g?.topicNodes ?? [], [g]);
-  const links = useMemo(() => g?.links ?? [], [g]);
-  const [sel, setSel] = useState("");
-
-  const pos = useMemo(() => layoutTopics(topics, links), [topics, links]);
-  const byId = useMemo(() => new Map(topics.map((t) => [t.slug, t])), [topics]);
-
-  if (topics.length === 0) {
-    return (
-      <Section
-        id="topics"
-        eyebrow="Dependencies and relations"
-        title="Topic graph"
-      >
-        <p className="text-[13px] text-neutral-600">
-          This result has no topic data. Generate the goal again.
-        </p>
-      </Section>
-    );
-  }
-
-  const neighbours = new Set<string>();
-  if (sel)
-    for (const l of links) {
-      if (l.a === sel) neighbours.add(l.b);
-      if (l.b === sel) neighbours.add(l.a);
-    }
-  const selected = sel ? byId.get(sel) : undefined;
-  const selLinks = links.filter((l) => l.a === sel || l.b === sel);
-  const related = links.filter((l) => l.type === "RELATED_TOPIC").length;
-  const cluster = links.length - related;
-  const toggle = (slug: string) => setSel((c) => (c === slug ? "" : slug));
-
-  return (
-    <Section
-      id="topics"
-      eyebrow="Dependencies and relations"
-      title="Where the goal sits"
-      blurb="Seed topics (dashed coral ring) sit in the middle, related topics around them. Click a node or chip to see how it connects."
-    >
-      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11.5px]">
-        {(["deep", "proficient", "working", "surface", "none"] as Level[]).map(
-          (l) => (
-            <span key={l} className="inline-flex items-center gap-1.5">
-              <span
-                style={{
-                  width: 13,
-                  height: 13,
-                  borderRadius: 999,
-                  backgroundColor: LEVEL_META[l].fill,
-                  border: `2px ${l === "none" ? "dashed" : "solid"} ${INK}`,
-                }}
-              />
-              {LEVEL_META[l].label}
-            </span>
-          ),
-        )}
-        <span className="inline-flex items-center gap-1.5">
-          <svg width="26" height="8" aria-hidden>
-            <line x1="0" y1="4" x2="26" y2="4" stroke={INK} strokeWidth="2.5" />
-          </svg>
-          RELATED_TOPIC <b>{related}</b>
-        </span>
-        <span className="inline-flex items-center gap-1.5">
-          <svg width="26" height="8" aria-hidden>
-            <line
-              x1="0"
-              y1="4"
-              x2="26"
-              y2="4"
-              stroke="#9d998c"
-              strokeWidth="2"
-              strokeDasharray="5 4"
-            />
-          </svg>
-          SAME_CLUSTER <b>{cluster}</b>
-        </span>
-        <span className="text-neutral-500">
-          Size = PageRank closeness · dashed outline = not assessed
-        </span>
-      </div>
-
-      <div
-        style={{ ...border, backgroundColor: PAPER, boxShadow: shadow(4) }}
-        className="overflow-x-auto rounded-2xl"
-      >
-        <svg
-          viewBox={`0 0 ${VW} ${VH}`}
-          className="block h-auto w-full min-w-[640px]"
-          role="img"
-          aria-label="Topic graph around the goal"
-          onClick={() => setSel("")}
-        >
-          <defs>
-            <pattern
-              id="pw-dots"
-              width="22"
-              height="22"
-              patternUnits="userSpaceOnUse"
-            >
-              <circle cx="2" cy="2" r="1" fill="#cfcabd" />
-            </pattern>
-          </defs>
-          <rect width={VW} height={VH} fill="url(#pw-dots)" />
-
-          {[
-            [360, 225],
-            [410, 250],
-            [430, 262],
-          ].map(([rx, ry], k) => (
-            <ellipse
-              key={k}
-              cx={VW / 2}
-              cy={VH / 2}
-              rx={rx}
-              ry={ry}
-              fill="none"
-              stroke={LINE}
-              strokeWidth="1.5"
-              strokeDasharray="3 6"
-              opacity={k === 0 ? 1 : 0.5}
-            />
-          ))}
-
-          {/* edges */}
-          {links.map((l, i) => {
-            const a = pos.get(l.a);
-            const b = pos.get(l.b);
-            if (!a || !b) return null;
-            const hot = !sel || l.a === sel || l.b === sel;
-            const rel = l.type === "RELATED_TOPIC";
-            return (
-              <line
-                key={i}
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
-                stroke={rel ? INK : "#9d998c"}
-                strokeWidth={rel ? 1.4 + clamp01(l.weight) * 2.2 : 1.6}
-                strokeDasharray={rel ? undefined : "5 5"}
-                className={sel && hot && rel ? "pw-flow" : undefined}
-                opacity={hot ? 1 : 0.12}
-              />
-            );
-          })}
-
-          {/* nodes */}
-          {topics.map((t) => {
-            const p = pos.get(t.slug);
-            if (!p) return null;
-            const seed = t.role === "seed";
-            const r = nodeR(t);
-            const dim = !!sel && t.slug !== sel && !neighbours.has(t.slug);
-            const m = LEVEL_META[t.level];
-            return (
-              <g
-                key={t.slug}
-                className="pw-node"
-                opacity={dim ? 0.2 : 1}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  toggle(t.slug);
-                }}
-              >
-                <title>{t.name}</title>
-                {seed && (
-                  <circle
-                    cx={p.x}
-                    cy={p.y}
-                    r={r + 5}
-                    fill="none"
-                    stroke={CORAL}
-                    strokeWidth="2.5"
-                    strokeDasharray="5 4"
-                  />
-                )}
-                <circle
-                  cx={p.x}
-                  cy={p.y}
-                  r={r}
-                  fill={m.fill}
-                  stroke={INK}
-                  strokeWidth={t.slug === sel ? 4 : 2.5}
-                  strokeDasharray={t.assessed ? undefined : "4 3"}
-                />
-              </g>
-            );
-          })}
-
-          {/* labels drawn last so nodes never cover them */}
-          {topics.map((t) => {
-            const p = pos.get(t.slug);
-            if (!p) return null;
-            const seed = t.role === "seed";
-            const r = nodeR(t);
-            const lw = labelW(t);
-            const dim = !!sel && t.slug !== sel && !neighbours.has(t.slug);
-            return (
-              <g key={t.slug} opacity={dim ? 0.2 : 1} pointerEvents="none">
-                <rect
-                  x={p.x - lw / 2}
-                  y={p.y + r + 4}
-                  width={lw}
-                  height={seed ? 18 : 16}
-                  rx="5"
-                  fill={PAPER}
-                  opacity="0.92"
-                />
-                <text
-                  x={p.x}
-                  y={p.y + r + (seed ? 17 : 15.5)}
-                  textAnchor="middle"
-                  style={{
-                    fontFamily: BODY_FONT,
-                    fontSize: seed ? 12.5 : 11,
-                    fontWeight: 700,
-                    fill: INK,
-                  }}
-                >
-                  {labelOf(t)}
-                </text>
-              </g>
-            );
-          })}
-        </svg>
-      </div>
-
-      <div className="mt-3 flex flex-wrap gap-1.5">
-        {topics.map((t) => {
-          const m = LEVEL_META[t.level];
-          const on = t.slug === sel;
-          return (
-            <button
-              key={t.slug}
-              type="button"
-              aria-pressed={on}
-              onClick={() => toggle(t.slug)}
-              style={{
-                backgroundColor: m.fill,
-                color: m.color,
-                border: `${on ? 3 : 1.5}px ${t.assessed ? "solid" : "dashed"} ${INK}`,
-              }}
-              className="pw-btn rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold"
-            >
-              {t.role === "seed" ? "● " : ""}
-              {trunc(t.name, 36)}
-            </button>
-          );
-        })}
-      </div>
-
-      {selected && (
-        <div
-          style={{ ...border, backgroundColor: "#fff", boxShadow: shadow(3) }}
-          className="mt-3 rounded-2xl p-4"
-        >
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span
-              style={{ fontFamily: DISPLAY_FONT }}
-              className="mr-1 text-[18px] font-bold"
-            >
-              {selected.name}
-            </span>
-            <LevelChip level={selected.level} />
-            {selected.domain && <Chip fill={LAVENDER}>{selected.domain}</Chip>}
-            <Chip fill={CREAM}>{pretty(selected.role)}</Chip>
-            <Chip>{Math.round(selected.relevance * 100)}% closeness</Chip>
-            {selected.authenticity && (
-              <Chip>{pretty(selected.authenticity)}</Chip>
-            )}
-          </div>
-          {selLinks.length > 0 ? (
-            <ul className="mt-3 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-              {selLinks.slice(0, 8).map((l, i) => {
-                const other = byId.get(l.a === sel ? l.b : l.a);
-                return (
-                  <li
-                    key={i}
-                    style={{ border: `1.5px solid ${LINE}` }}
-                    className="rounded-xl px-3 py-1.5 text-[12px] leading-snug"
-                  >
-                    <b>{other?.name ?? "?"}</b>{" "}
-                    <span
-                      style={{ fontFamily: MONO }}
-                      className="text-[10.5px] text-neutral-500"
-                    >
-                      {l.type}
-                    </span>
-                    {l.reason && (
-                      <div className="text-neutral-600">
-                        {trunc(l.reason, 110)}
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <p className="mt-2 text-[12px] text-neutral-500">
-              No links to other topics in this run.
-            </p>
-          )}
-        </div>
-      )}
     </Section>
   );
 }
@@ -2283,8 +2021,14 @@ function SchemaDiagram({ ex, saved }: { ex: Explanation; saved: boolean }) {
           const c = count(n.kind);
           const used = n.write ? saved : true;
           return (
-            <g key={n.id} opacity={used ? 1 : 0.45}>
+            <g key={n.id} className="pw-snode" opacity={used ? 1 : 0.45}>
+              <title>
+                {n.label}
+                {n.write ? " (written by this run)" : " (read by this run)"}
+                {c > 0 ? `, ${c} pulled in` : ""}
+              </title>
               <rect
+                className="sn"
                 x={n.x - SW / 2}
                 y={n.y - SH / 2}
                 width={SW}
@@ -2426,6 +2170,7 @@ function RankBars({ ranking }: { ranking: CNode[] }) {
                   height: "100%",
                   backgroundColor: KIND_FILL[n.kind] ?? "#fff",
                   borderRight: `1.5px solid ${INK}`,
+                  transition: "width .6s ease",
                 }}
               />
             </div>
@@ -2582,16 +2327,17 @@ function Algos({ ex }: { ex: Explanation }) {
       blurb="Greyed-out steps were skipped for this goal."
     >
       <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-        {algos.map((a) => (
+        {algos.map((a, i) => (
           <li
             key={a.name}
+            className={`pw-rise ${a.used ? "lift" : ""} rounded-2xl p-3`}
             style={{
               ...border,
               backgroundColor: a.used ? a.fill : PAPER,
               boxShadow: a.used ? shadow(2) : undefined,
               opacity: a.used ? 1 : 0.55,
+              animationDelay: `${i * 60}ms`,
             }}
-            className="rounded-2xl p-3"
           >
             <div className="flex items-center justify-between gap-2">
               <span className="text-[13px] font-bold leading-tight">
@@ -2659,7 +2405,7 @@ function EvidenceAndRejected({ goal, ex }: { goal: Goal; ex: Explanation }) {
                 backgroundColor: "#fff",
                 boxShadow: shadow(2),
               }}
-              className="rounded-2xl p-3"
+              className="lift rounded-2xl p-3"
             >
               <div className="flex flex-wrap items-center gap-1.5">
                 <span
@@ -2694,7 +2440,7 @@ function EvidenceAndRejected({ goal, ex }: { goal: Goal; ex: Explanation }) {
                     target="_blank"
                     rel="noreferrer"
                     aria-label={`Open ${e.id} on GitHub`}
-                    className="pw-btn shrink-0"
+                    className="press shrink-0 rounded-full p-1"
                   >
                     <ExternalLink size={14} aria-hidden />
                   </a>
@@ -2719,7 +2465,7 @@ function EvidenceAndRejected({ goal, ex }: { goal: Goal; ex: Explanation }) {
               <li
                 key={i}
                 style={{ ...border, backgroundColor: "#fff" }}
-                className="rounded-2xl p-3"
+                className="lift rounded-2xl p-3"
               >
                 <p className="text-[13px] font-bold leading-snug">{a.option}</p>
                 <p className="mt-1 text-[12px] leading-snug text-neutral-600">
@@ -2746,7 +2492,7 @@ function BackLink({ label = "Back to overview" }: { label?: string }) {
     <Link
       to="/overview"
       style={{ ...border, backgroundColor: "#fff" }}
-      className="pw-btn inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-[13px] font-semibold"
+      className="hard inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-[13px] font-semibold"
     >
       <ArrowLeft size={14} aria-hidden /> {label}
     </Link>
@@ -2798,40 +2544,47 @@ export default function GoalPage() {
   const [result, setResult] = useState<Result | null>(null);
   const [loading, setLoading] = useState(true);
 
-    useEffect(() => {
-      const st = rec(location.state);
-      const fromState = st.result ?? st.goal;
-      if (fromState) {
-        const r = normalize(fromState);
-        if (r) {
-          store(fromState);
-          setResult(r);
-          setLoading(false);
-          return;
-        }
+  useEffect(() => {
+    const st = rec(location.state);
+    const fromState = st.result ?? st.goal;
+    if (fromState) {
+      const r = normalize(fromState);
+      if (r) {
+        store(fromState);
+        setResult(r);
+        setLoading(false);
+        return;
       }
-      setResult(readStored());
-      setLoading(false);
-    }, [location.state]);
+    }
+    setResult(readStored());
+    setLoading(false);
+  }, [location.state]);
 
-  const shell = (body: ReactNode) => (
+  const shell = (body: ReactNode, subnav?: ReactNode) => (
     <div
       style={{ fontFamily: BODY_FONT, color: INK, backgroundColor: PAPER }}
       className="min-h-screen w-full"
     >
       <style>{CSS}</style>
       <header
-        style={{ borderBottom: `2px solid ${INK}`, backgroundColor: PAPER }}
-        className="sticky top-0 z-20 flex w-full items-center justify-between px-4 py-2.5 sm:px-6"
+        style={{
+          borderBottom: `2px solid ${INK}`,
+          backgroundColor: "rgba(241,238,231,.96)",
+          backdropFilter: "blur(8px)",
+        }}
+        className="sticky top-0 z-20 flex h-[52px] w-full items-center justify-between px-4 sm:px-6"
       >
-        <span
+        <Link
+          to="/"
           style={{ fontFamily: DISPLAY_FONT }}
-          className="text-[18px] font-bold"
+          className="press text-[18px] font-bold"
         >
           pathway.io
-        </span>
+        </Link>
         <BackLink />
+        <ScrollChrome />
       </header>
+      {subnav}
       {body}
     </div>
   );
@@ -2885,13 +2638,9 @@ export default function GoalPage() {
   const { goal, ex } = result;
   return shell(
     <main className="mx-auto w-full max-w-[1100px] space-y-14 px-4 py-8 sm:px-8 lg:py-10">
-      <div className="space-y-4">
-        <Hero goal={goal} ex={ex} />
-        <SectionNav hasTrace={!!ex.trace} />
-      </div>
+      <Hero goal={goal} ex={ex} />
       <WhyThisGoal goal={goal} ex={ex} />
       <Reach goal={goal} ex={ex} />
-      <TopicGraph ex={ex} />
       <FalkorSection goal={goal} ex={ex} />
       <Algos ex={ex} />
       <EvidenceAndRejected goal={goal} ex={ex} />
@@ -2905,5 +2654,6 @@ export default function GoalPage() {
         <BackLink />
       </footer>
     </main>,
+    <SectionNav hasTrace={!!ex.trace} />,
   );
 }

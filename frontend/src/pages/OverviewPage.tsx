@@ -2304,20 +2304,6 @@ export default function OverviewPage() {
               >
                 Skill graph
               </Link>
-              <Link
-                to="/builds"
-                className="rounded-full px-3 py-1 text-[12px] font-bold text-neutral-500"
-                style={{ border: "2px solid transparent" }}
-              >
-                Builds
-              </Link>
-              <Link
-                to="/goal"
-                className="rounded-full px-3 py-1 text-[12px] font-bold text-neutral-500"
-                style={{ border: "2px solid transparent" }}
-              >
-                Goal
-              </Link>
             </nav>
           </div>
           <Btn
