@@ -9,10 +9,10 @@
 ![FalkorDB](https://img.shields.io/badge/Graph-FalkorDB-red)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
-![Three.js](https://img.shields.io/badge/React_Three_Fiber-3D-black?logo=threedotjs)
+![React Three Fiber](https://img.shields.io/badge/React_Three_Fiber-3D_Skill_City-black?logo=threedotjs)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
 
-[Demo](#) · [Blog post](#) · [Report a bug](../../issues)
+[🎬 Demo video](https://www.youtube.com/watch?v=Pc49zZzByUw) · [📝 Blog post](https://medium.com/@aymaanpathan5/pathway-we-turned-github-history-into-a-knowledge-graph-that-assigns-you-your-next-coding-mission-2c240a2bf45e) · [Report a bug](../../issues)
 
 </div>
 
@@ -35,16 +35,24 @@ When you complete a mission and the platform's tests pass, the verified code bec
 
 ---
 
+## 🎬 Demo and write-up
+
+- **Demo video:** [https://www.youtube.com/watch?v=Pc49zZzByUw](https://www.youtube.com/watch?v=Pc49zZzByUw)
+- **Blog post:** [How Pathway turns GitHub history into a knowledge graph](https://medium.com/@aymaanpathan5/pathway-we-turned-github-history-into-a-knowledge-graph-that-assigns-you-your-next-coding-mission-2c240a2bf45e)
+
+---
+
 ## 📑 Table of contents
 
 1. [Architecture](#-architecture)
-2. [Graph data model](#-graph-data-model)
-3. [Graph algorithms](#-graph-algorithms)
-4. [Agent pipeline](#-agent-pipeline)
-5. [Chat agent tools](#-chat-agent-tools)
-6. [Setup instructions](#-setup-instructions)
-7. [Explore the graph](#-explore-the-graph-yourself)
-8. [Troubleshooting](#-troubleshooting)
+2. [3D Skill City](#%EF%B8%8F-3d-skill-city)
+3. [Graph data model](#%EF%B8%8F-graph-data-model)
+4. [Graph algorithms](#-graph-algorithms)
+5. [Agent pipeline](#-agent-pipeline)
+6. [Chat agent tools](#-chat-agent-tools)
+7. [Setup instructions](#-setup-instructions)
+8. [Explore the graph](#-explore-the-graph-yourself)
+9. [Troubleshooting](#%EF%B8%8F-troubleshooting)
 
 ---
 
@@ -52,29 +60,75 @@ When you complete a mission and the platform's tests pass, the verified code bec
 
 ```mermaid
 flowchart LR
-    GH[(GitHub history)] --> DA[Depth Analyzer]
-    DA --> G[(FalkorDB<br/>Knowledge Graph)]
-    G --> GA[Goal Agent]
-    GA -->|Goal + NextMove| G
-    G --> MA[Mission Agent]
-    REPO[Repo inspection<br/>+ gap probe] --> MA
-    MA --> V{Validators}
-    V -->|rejected: retry up to 3x| MA
-    V -->|accepted| M[Mission]
-    M --> DEV[Developer writes<br/>implementation only]
-    DEV --> SB[Sandbox<br/>platform-written tests]
-    SB -->|pass| EV[Verified Demonstration]
-    EV --> G
-    G <--> CH[Chat Agent<br/>16 graph tools]
-    CH --> UI[React + Three Fiber UI]
-    G --> UI
+    GH[(GitHub history)] --> EV[(Evidence<br/>Commit / FileChange / Demonstration)]
+    EV --> DB[(FalkorDB)]
+
+    subgraph A[View 1: Skill graph - independent]
+        SK[Skill analysis<br/>rule-based signals on real code] --> SG[Skill + SkillCategory graph]
+        SG --> API1["GET /api/graph/summary<br/>GET /api/skills/:slug"] --> CITY["3D Skill City<br/>React Three Fiber"]
+    end
+
+    subgraph B[View 2: Topic graph + agents]
+        DA[Depth Analyzer] --> TG[Topic graph<br/>BUILDS_ON / RELATED_TOPIC]
+        TG --> GA[Goal Agent] --> MA[Mission Agent]
+        MA --> V{Validators}
+        V -->|rejected: retry up to 3x| MA
+        V -->|accepted| M[Mission] --> SB[Sandbox tests]
+        SB -->|pass| VE[Verified Demonstration]
+        TG <--> CH[Chat Agent<br/>16 graph tools]
+    end
+
+    DB --> SK
+    DB --> DA
+    VE --> DB
 ```
+
+> The two views are **independent consumers of the same evidence**. The 3D city reads only the Skill graph. The chat agent, goal agent and mission agent read only the Topic graph. Neither calls the other.
+
+---
+
+## 🏙️ 3D Skill City
+
+An interactive 3D view of the developer's skills, built with **React Three Fiber**. It is driven entirely by the **Skill graph** and has no connection to the chat agent or the Topic graph.
+
+```mermaid
+flowchart LR
+    HUB((Developer<br/>hub)) ---|bridge| B1[Building = SkillCategory]
+    HUB ---|bridge| B2[Building = SkillCategory]
+    B1 --> F1[Floor = Skill<br/>ranked by depthScore]
+    F1 --> D1[Furniture, sign, trend glyph,<br/>5-dot depth meter, activity bars]
+```
+
+| Visual | Graph data |
+|---|---|
+| **Hub** at the centre | The `Developer` |
+| **Building** on a ring around the hub | A `SkillCategory` (ring radius grows with the number of categories) |
+| **Floor** inside a building (top skills by score, capped) | A `Skill` via `(SkillCategory)-[:CONTAINS]->(Skill)` |
+| Floor order (highest on top) | `HAS_SKILL.depth_score`, then depth rank |
+| 5-dot depth meter | Skill level: `novice → familiar → proficient → advanced → expert` |
+| Trend badge on the sign (▲ rising, ▼ cooling, zz dormant) | `HAS_SKILL.trend` |
+| Bar chart on the monitor | Monthly activity (`activity[].count`, last 12 months) |
+| Package flying along a bridge | A category arriving while the graph regenerates (streamed over SSE) |
+| **Skill Insights panel** | Strongest, rising, cooling, thin evidence, and "learn next" (adjacent skills via `CO_OCCURS` / `implies`) |
+| **Skill Evidence panel** | The commits and files that prove a skill (`/api/skills/:slug`) |
+
+**Camera.** An overview shot of the whole city, and a "dollhouse" fly-to when a building is selected so every floor is visible. Orbit, pan and zoom via `OrbitControls`.
+
+**Endpoints used by the city**
+
+| Route | Purpose |
+|---|---|
+| `GET /api/graph/summary` | Categories, skills and insights for the city |
+| `GET /api/graph/regenerate` | Rebuilds the skill graph, streaming progress over SSE (`area_ready` per building) |
+| `GET /api/skills/:slug` | Skill detail with commit-level proof |
+| `GET /api/skills/graph`, `/insights`, `/taxonomy` | Skill graph, insights, and the skill taxonomy |
+| `GET /api/graph/debug-intelligence` | Counts of skills, capabilities, demonstrations, and relationships |
 
 ---
 
 ## 🕸️ Graph data model
 
-The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe. It has four connected layers:
+The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe. It has four connected layers for the agents, plus an independent Skill graph for the 3D city:
 
 ```mermaid
 flowchart TB
@@ -231,6 +285,28 @@ erDiagram
 - `explanation_json` stores a **trace of the real queries** that ran while loading the move (pattern, Cypher, params, row counts). Nothing is reconstructed afterwards.
 - A passing evaluation writes a new `(Developer)-[:DEMONSTRATED]->(Demonstration {source:"mission"})-[:OF_CAPABILITY]->(Capability)`. This is the **closed loop**: verified work becomes graph evidence.
 
+### Separate view: the Skill graph (powers the 3D city)
+
+Independent of the Topic graph. It is built from the same file-change evidence using rule-based signals (a definitive path such as `Dockerfile`, or a real import or API call in the added code, counts as strong evidence; a language-only match counts as weak).
+
+```mermaid
+erDiagram
+    Developer ||--o{ Skill : "HAS_SKILL (depth_score, level, trend, confidence, evidence_quality, commits_count, repos_count, recency_days)"
+    SkillCategory ||--o{ Skill : CONTAINS
+    Skill }o--o{ Skill : "CO_OCCURS"
+    Skill }o--o{ Repository : USED_IN
+```
+
+| Property on `HAS_SKILL` | Meaning |
+|---|---|
+| `depth_score` | 0 to 100 score, with an evidence-quality multiplier |
+| `level` | `novice`, `familiar`, `proficient`, `advanced`, `expert` |
+| `trend` | `rising`, `steady`, `cooling`, `dormant` |
+| `confidence` | `low`, `medium`, `high` |
+| `files_touched`, `strong_files`, `commits_count`, `repos_count`, `recency_days` | Evidence counts behind the score |
+
+The taxonomy also declares `implies` (Next.js implies React) and `related` skills, which feed the "learn next" suggestions.
+
 ### Indexes
 
 ```cypher
@@ -367,6 +443,8 @@ Before the agent may claim "your code lacks X", Pathway checks `package.json` de
 | `audit_authenticity` | Genuine vs. superficial usage |
 | `recent_activity` | `last_seen` reads: active vs. gone quiet |
 
+> The chat agent reads the **Topic graph** only. It does not drive or read the 3D Skill City.
+
 Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun` with the result, latency, and a plain-language `how[]` trail. Tools return structured UI blocks (`roadmap`, `ranking`, `groups`, `timeline`, `stats`, `callout`): the LLM narrates, the graph supplies the facts.
 
 ---
@@ -378,7 +456,8 @@ Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun
 | Graph database | **FalkorDB** (Docker), Cypher, built-in graph algorithms |
 | Backend | Node.js, TypeScript (ESM) |
 | AI | LLM agents with validator and repair loops |
-| Frontend | **React**, **Three.js via React Three Fiber** |
+| Frontend | **React**, **React Three Fiber** + drei (3D Skill City) |
+| API | Express (REST + SSE) |
 | Verification | Sandboxed, platform-generated tests |
 | Infra | Docker |
 
@@ -493,7 +572,7 @@ npm install
 npm run dev
 ```
 
-Frontend: **http://localhost:5173**. The 3D graph explorer uses `three`, `@react-three/fiber`, and `@react-three/drei`:
+Frontend: **http://localhost:5173**. The 3D Skill City uses `three`, `@react-three/fiber`, and `@react-three/drei`:
 
 ```bash
 npm install three @react-three/fiber @react-three/drei
