@@ -55,11 +55,57 @@ export interface RepoInspector {
 
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const errText = (e: unknown): string =>
+  e instanceof Error ? e.message : String(e);
+const encodePath = (p: string): string =>
+  p.split("/").map(encodeURIComponent).join("/");
+
+/** GitHub answered 401: the token is expired, revoked or malformed. Reconnecting GitHub fixes it. */
+export class GithubAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GithubAuthError";
+  }
+}
+
+/** Strips whitespace / an accidental "Bearer " prefix; empty -> undefined. */
+function cleanToken(raw: string | undefined | null): string | undefined {
+  const t = String(raw ?? "")
+    .trim()
+    .replace(/^bearer\s+/i, "")
+    .trim();
+  return t || undefined;
+}
+
+/** Cheap token probe (GET /user). "unknown" = network error / rate limit, do not treat as invalid. */
+export async function checkGithubToken(
+  rawToken: string,
+  apiBase = "https://api.github.com",
+): Promise<"valid" | "invalid" | "unknown"> {
+  const token = cleanToken(rawToken);
+  if (!token) return "invalid";
+  try {
+    const res = await fetch(`${apiBase}/user`, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "pathway-mission",
+      },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (res.status === 200) return "valid";
+    if (res.status === 401) return "invalid";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
 export function githubInspector(
   opts: { token?: string; timeoutMs?: number; apiBase?: string } = {},
 ): RepoInspector {
-  const token = opts.token ?? process.env.GITHUB_TOKEN;
+  const token = cleanToken(opts.token ?? process.env.GITHUB_TOKEN);
   const base = opts.apiBase ?? "https://api.github.com";
   const timeoutMs = opts.timeoutMs ?? 15_000;
 
@@ -104,7 +150,9 @@ export function githubInspector(
             : res.status === 403
               ? " (forbidden or rate limited)"
               : "";
-      throw new Error(`GitHub ${res.status} for ${path}${hint}`);
+      const message = `GitHub ${res.status} for ${path}${hint}`;
+      if (res.status === 401) throw new GithubAuthError(message);
+      throw new Error(message);
     }
     return JSON.parse(res.text) as T;
   }
@@ -119,80 +167,231 @@ export function githubInspector(
     return token;
   };
 
-  return {
-    async resolveHead(repo) {
-      checked(repo);
-      return withGithubMcp(requireToken(), ["search_repositories", "get_commit"], async (call) => {
-        const result = await searchRepositories(call, {
+  // ---- resolveHead: MCP first, REST fallback ------------------------------
+
+  async function resolveHeadViaMcp(
+    repo: string,
+  ): Promise<{ branch: string; sha: string }> {
+    const [owner, name] = repo.split("/") as [string, string];
+    return withGithubMcp(
+      requireToken(),
+      ["search_repositories", "get_commit"],
+      async (call) => {
+        const search = await searchRepositories(call, {
           query: `repo:${repo}`,
           perPage: 1,
           page: 1,
         });
-        const data = result.data;
-        const info = (Array.isArray(data) ? data[0] : data?.items?.[0]) as
-          | { default_branch?: string }
-          | undefined;
-        const branch = info?.default_branch ?? "main";
-        const commitResult = await getCommit(call, {
-          owner: repo.split("/")[0],
-          repo: repo.split("/")[1],
+        if (!search.ok)
+          throw new Error(search.text || "search_repositories failed");
+
+        const items: any[] = Array.isArray(search.data)
+          ? search.data
+          : Array.isArray(search.data?.items)
+            ? search.data.items
+            : [];
+        const info =
+          items.find(
+            (i) =>
+              String(i?.full_name ?? "").toLowerCase() === repo.toLowerCase(),
+          ) ?? items[0];
+        if (!info)
+          throw new Error(
+            `search_repositories returned no result for ${repo} (not visible to this token, or not indexed yet)`,
+          );
+
+        const branch = String(info.default_branch ?? info.defaultBranch ?? "");
+        if (!branch)
+          throw new Error(`default branch of ${repo} missing in search result`);
+
+        const commit = await getCommit(call, {
+          owner,
+          repo: name,
           sha: branch,
         });
-        const commit = commitResult.data as { sha?: string };
-        if (!commit?.sha) throw new Error(`GitHub MCP could not resolve ${repo}@${branch}`);
-        return { branch, sha: commit.sha };
-      });
-    },
+        if (!commit.ok)
+          throw new Error(
+            commit.text || `get_commit failed for ${repo}@${branch}`,
+          );
+        const sha = (commit.data as { sha?: unknown } | null)?.sha;
+        if (typeof sha !== "string" || !sha)
+          throw new Error(`get_commit returned no sha for ${repo}@${branch}`);
+        return { branch, sha };
+      },
+    );
+  }
 
-    async listFiles(repo, sha) {
-      checked(repo);
-      return withGithubMcp(requireToken(), ["get_file_contents"], async (call) => {
+  async function resolveHeadViaRest(
+    repo: string,
+  ): Promise<{ branch: string; sha: string }> {
+    const info = await getJson<{ default_branch?: string }>(`/repos/${repo}`);
+    const branch = info.default_branch;
+    if (!branch)
+      throw new Error(`GitHub did not report a default branch for ${repo}`);
+    const commit = await getJson<{ sha?: string }>(
+      `/repos/${repo}/commits/${encodeURIComponent(branch)}`,
+    );
+    if (!commit.sha)
+      throw new Error(`GitHub returned no commit for ${repo}@${branch}`);
+    return { branch, sha: commit.sha };
+  }
+
+  // ---- listFiles: one REST tree call, MCP directory walk as fallback ------
+
+  async function listFilesViaRest(
+    repo: string,
+    sha: string,
+  ): Promise<string[]> {
+    const tree = await getJson<{
+      truncated?: boolean;
+      tree?: Array<{ path: string; type: string }>;
+    }>(`/repos/${repo}/git/trees/${encodeURIComponent(sha)}?recursive=1`);
+    if (tree.truncated)
+      throw new Error(
+        "git tree was truncated by GitHub (repository too large)",
+      );
+    return (tree.tree ?? [])
+      .filter((t) => t.type === "blob")
+      .map((t) => t.path);
+  }
+
+  async function listFilesViaMcp(repo: string, sha: string): Promise<string[]> {
+    const [owner, name] = repo.split("/") as [string, string];
+    return withGithubMcp(
+      requireToken(),
+      ["get_file_contents"],
+      async (call) => {
         const files: string[] = [];
+        const SKIP = new Set(["node_modules", ".git", "dist", "build"]);
         const visit = async (path: string): Promise<void> => {
           const result = await getFileContents(call, {
-            owner: repo.split("/")[0],
-            repo: repo.split("/")[1],
+            owner,
+            repo: name,
             path,
             ref: sha,
           });
-          if (!result.ok) throw new Error(result.text || `GitHub MCP could not read ${path || repo}`);
-          const entries = Array.isArray(result.data)
-            ? result.data
-            : Array.isArray(result.data?.entries)
-              ? result.data.entries
+          if (!result.ok)
+            throw new Error(
+              result.text || `GitHub MCP could not read ${path || repo}`,
+            );
+          const data = result.data as any;
+          const entries: any[] = Array.isArray(data)
+            ? data
+            : Array.isArray(data?.entries)
+              ? data.entries
               : [];
           for (const entry of entries) {
             const entryPath = String(entry?.path ?? entry?.name ?? "");
             if (!entryPath) continue;
-            if (entry?.type === "directory" || entry?.type === "tree") {
-              await visit(entryPath);
-            } else if (entry?.type === "file" || entry?.type === "blob") {
+            const type = String(entry?.type ?? "");
+            if (type === "dir" || type === "directory" || type === "tree") {
+              if (!SKIP.has(entryPath.split("/").pop() ?? ""))
+                await visit(entryPath);
+            } else if (type === "file" || type === "blob") {
               files.push(entryPath);
             }
           }
         };
         await visit("");
         return files;
-      });
-    },
+      },
+    );
+  }
 
-    async readFile(repo, sha, path) {
-      checked(repo);
-      return withGithubMcp(requireToken(), ["get_file_contents"], async (call) => {
+  // ---- readFile: one REST call, MCP as fallback ---------------------------
+
+  async function readFileViaRest(
+    repo: string,
+    sha: string,
+    path: string,
+  ): Promise<string | null> {
+    const res = await get(
+      `/repos/${repo}/contents/${encodePath(path)}?ref=${encodeURIComponent(sha)}`,
+      "application/vnd.github.raw+json",
+    );
+    if (res.status === 404) return null;
+    if (res.status === 401)
+      throw new GithubAuthError(
+        `GitHub 401 reading ${path} (token invalid or expired)`,
+      );
+    if (res.status < 200 || res.status >= 300)
+      throw new Error(`GitHub ${res.status} reading ${path}`);
+    return res.text;
+  }
+
+  async function readFileViaMcp(
+    repo: string,
+    sha: string,
+    path: string,
+  ): Promise<string | null> {
+    const [owner, name] = repo.split("/") as [string, string];
+    return withGithubMcp(
+      requireToken(),
+      ["get_file_contents"],
+      async (call) => {
         const result = await getFileContents(call, {
-          owner: repo.split("/")[0],
-          repo: repo.split("/")[1],
+          owner,
+          repo: name,
           path,
           ref: sha,
         });
         if (!result.ok) return null;
-        const data = result.data as { content?: unknown } | string;
+        const data = result.data as { content?: unknown } | string | null;
         return typeof data === "string"
           ? data
           : typeof data?.content === "string"
             ? data.content
             : null;
-      });
+      },
+    );
+  }
+
+  return {
+    async resolveHead(repo) {
+      checked(repo);
+      let mcpError = "";
+      try {
+        return await resolveHeadViaMcp(repo);
+      } catch (error) {
+        mcpError = errText(error);
+        console.warn(
+          `[repo-inspector] MCP resolveHead failed for ${repo}: ${mcpError}`,
+        );
+      }
+      try {
+        return await resolveHeadViaRest(repo);
+      } catch (error) {
+        const message = `could not resolve ${repo} (MCP: ${mcpError}; REST: ${errText(error)})`;
+        if (error instanceof GithubAuthError)
+          throw new GithubAuthError(message);
+        throw new Error(message);
+      }
+    },
+
+    async listFiles(repo, sha) {
+      checked(repo);
+      try {
+        return await listFilesViaRest(repo, sha);
+      } catch (error) {
+        if (error instanceof GithubAuthError) throw error;
+        console.warn(
+          `[repo-inspector] REST listFiles failed for ${repo}@${sha.slice(0, 7)}: ${errText(error)}; walking via MCP`,
+        );
+        return listFilesViaMcp(repo, sha);
+      }
+    },
+
+    async readFile(repo, sha, path) {
+      checked(repo);
+      try {
+        return await readFileViaRest(repo, sha, path);
+      } catch (error) {
+        if (error instanceof GithubAuthError) throw error;
+        console.warn(
+          `[repo-inspector] REST readFile failed for ${path}: ${errText(error)}; trying MCP`,
+        );
+        return readFileViaMcp(repo, sha, path);
+      }
     },
 
     async compare(repo, baseRef, head) {
@@ -273,13 +472,24 @@ export function githubInspector(
     },
 
     async currentUser() {
-      return withGithubMcp(requireToken(), ["get_me"], async (call) => {
-        const result = await getMe(call);
-        const login = (result.data as { login?: unknown })?.login;
-        if (typeof login !== "string" || !login)
-          throw new Error("GitHub MCP did not return the current user");
-        return login;
-      });
+      try {
+        return await withGithubMcp(requireToken(), ["get_me"], async (call) => {
+          const result = await getMe(call);
+          if (!result.ok) throw new Error(result.text || "get_me failed");
+          const login = (result.data as { login?: unknown } | null)?.login;
+          if (typeof login !== "string" || !login)
+            throw new Error("GitHub MCP did not return the current user");
+          return login;
+        });
+      } catch (error) {
+        console.warn(
+          `[repo-inspector] MCP get_me failed: ${errText(error)}; using REST`,
+        );
+        const me = await getJson<{ login?: string }>("/user");
+        if (!me.login)
+          throw new Error("GitHub did not return the current user");
+        return me.login;
+      }
     },
 
     async forkRepo(repo) {

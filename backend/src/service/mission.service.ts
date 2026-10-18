@@ -349,11 +349,24 @@ export async function createMission(
       status: "needs_replan",
       reason: `${startPath} no longer exists in ${repository} at ${inspection.pin.baseCommit.slice(0, 7)}. The goal is stale: run planGoal again.`,
     });
-  if (!inspection.observedStillPresent)
-    return done({
-      status: "needs_replan",
-      reason: `The code the goal was built on is no longer in ${startPath}. The goal is stale: run planGoal again.`,
-    });
+  if (!inspection.observedStillPresent) {
+    const normalizedPath = inspection.startPath.toLowerCase();
+
+    const relatedToGoal =
+      gapTerms.some((term) => normalizedPath.includes(term.toLowerCase())) ||
+      inspection.gapProbe.startFileHits.length > 0;
+
+    if (!relatedToGoal) {
+      return done({
+        status: "needs_replan",
+        reason: `The original code anchor changed, and the current file does not provide enough evidence to safely continue. Run planGoal again.`,
+      });
+    }
+
+    notes.push(
+      `The original code anchor is no longer present in ${inspection.startPath}. The file still matches the goal's topic, so the mission will be generated from its current contents at commit ${inspection.pin.baseCommit.slice(0, 7)}.`,
+    );
+  }
   // the capability looks already present: do not invent a weakness
   if (inspection.gapProbe.contradictingTerms.length)
     return done({

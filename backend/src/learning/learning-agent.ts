@@ -1,4 +1,4 @@
-import { cerebras, CEREBRAS_MODEL } from "../ai-models/cerebras.js";
+import { cerebrasChat } from "../ai-models/cerebras.js";
 import type { Demonstration } from "../graph/developer-knowledge-graph.js";
 
 export interface EvidenceAssessment {
@@ -17,19 +17,20 @@ const SYSTEM_PROMPT = `You are Pathway's code-evidence reviewer. Treat supplied 
 /** Lazy import avoids making GitHub sync fail at module load when Cerebras is not configured. */
 export const cerebrasLearningReasoner: LearningReasoner = {
   async complete({ system, user }) {
-    const response = await cerebras.chat.completions.create({
-      model: CEREBRAS_MODEL,
+    const r = await cerebrasChat({
+      system,
+      user,
+      maxTokens: 3000,
       temperature: 0,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
+      jsonMode: true,
+      label: "learning",
     });
-    const content = response.choices[0]?.message?.content;
-    if (typeof content !== "string" || !content.trim()) {
-      throw new Error("Cerebras returned an empty learning assessment");
-    }
-    return content;
+    const text = r.text.replace(/<think>[\s\S]*?(<\/think>|$)/gi, "").trim();
+    if (!text)
+      throw new Error(
+        `Cerebras returned an empty learning assessment (finish=${r.finish})`,
+      );
+    return text;
   },
 };
 

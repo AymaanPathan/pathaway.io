@@ -1,13 +1,13 @@
 import { Router } from "express";
 import { getGraphForDeveloper } from "../db/falkordb.js";
 import {
-  cerebrasClient,
   planGoal,
   type GoalPlan,
   type LlmClient,
 } from "../agents/goal-agent.js";
 import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
 import { goalSetLocks } from "./route-context.js";
+import { gptOssNvidiaClient } from "../ai-models/gpt-oss-nvidia.js";
 
 export const goalRouter = Router();
 
@@ -20,7 +20,7 @@ let llmClient: LlmClient | null | undefined;
 function getLlm(): LlmClient | null {
   if (llmClient !== undefined) return llmClient;
   try {
-    llmClient = cerebrasClient();
+    llmClient = gptOssNvidiaClient();
   } catch (error) {
     console.warn(
       "[goal-route] LLM unavailable:",

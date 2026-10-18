@@ -902,12 +902,22 @@ export async function generateMissionTest(
         : `${user}\n\nYour previous file was rejected:\n${errors.map((e) => `- ${e}`).join("\n")}\n\nRe-trace the affected scenarios and return the corrected full file only.`;
     let raw: string;
     try {
-      raw = await ask(llm, system, prompt, 8000, false, timeoutMs);
+      raw = await ask(llm, system, prompt, 12000, false, timeoutMs);
     } catch (e) {
       errors = [
         `LLM call failed: ${e instanceof Error ? e.message : String(e)}`,
       ];
       break;
+    }
+    console.log(
+      `[mission-test] attempt ${attempt + 1}/3: model returned ${raw.length} chars`,
+      raw.length < 300 ? JSON.stringify(raw) : raw.slice(0, 200),
+    );
+    if (!raw.trim()) {
+      errors = [
+        "the model returned an empty answer (thinking may be using the whole token budget, or the request was rejected)",
+      ];
+      continue;
     }
     const code = extractTestCode(raw);
     const hard = validateTestCode(

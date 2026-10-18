@@ -371,6 +371,8 @@ async function runMissionEvaluation(
       source: "mission",
       missionId,
       evaluationId: evaluationIdFor(missionId, headSha),
+      verification,
+      expected: { commitSha: headSha, repositoryId },
       forceReconcile: true,
       buildId: `mission-learning:${missionId}:${headSha}`,
       onStage: async (stage) => {

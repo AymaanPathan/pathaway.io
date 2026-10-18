@@ -482,6 +482,7 @@ export async function loadSavedMove(
   goalId: string,
 ): Promise<SavedMove | null> {
   const trace: GraphTraceEntry[] = [];
+
   const spec = (step: string, relationship: string): TraceSpec => ({
     trace,
     step,
@@ -505,82 +506,116 @@ export async function loadSavedMove(
       "(Developer)-[:HAS_GOAL]->(Goal)-[:PROPOSES]->(NextMove)",
     ),
   );
+
   if (head === null) {
-    // the query itself failed (see the "saved move FAILED" log above);
-    // do not report that as "goal not found"
     throw new Error(
       "loadSavedMove: graph query failed, see [mission-graph] logs",
     );
   }
+
   const h = head[0];
+
   if (!h) {
     await diagnoseSavedMove(graph, developerId, goalId);
     return null;
   }
+
   const moveId = str(h.id);
 
   const [focus, cap, start, strengths, gaps, demos, files] = await Promise.all([
     query(
       graph,
       "move focus",
-      `MATCH (:NextMove {id: $id})-[:FOCUSES_ON]->(t:Topic) RETURN t.slug AS slug LIMIT 1`,
+      `
+        MATCH (:NextMove {id: $id})-[:FOCUSES_ON]->(t:Topic)
+        RETURN t.slug AS slug
+        LIMIT 1
+        `,
       { id: moveId },
       spec("focus", "(NextMove)-[:FOCUSES_ON]->(Topic)"),
     ),
+
     query(
       graph,
       "move capability",
-      `MATCH (:NextMove {id: $id})-[:ADVANCES]->(c:Capability)
-       RETURN c.id AS id, coalesce(c.name, c.id) AS name LIMIT 1`,
+      `
+        MATCH (:NextMove {id: $id})-[:ADVANCES]->(c:Capability)
+        RETURN c.id AS id, coalesce(c.name, c.id) AS name
+        LIMIT 1
+        `,
       { id: moveId },
       spec("capability", "(NextMove)-[:ADVANCES]->(Capability)"),
     ),
+
     query(
       graph,
       "move start file",
-      `MATCH (:NextMove {id: $id})-[:STARTS_AT]->(f:FileChange) RETURN f.id AS id LIMIT 1`,
+      `
+        MATCH (:NextMove {id: $id})-[:STARTS_AT]->(f:FileChange)
+        RETURN f.id AS id
+        LIMIT 1
+        `,
       { id: moveId },
       spec("start_file", "(NextMove)-[:STARTS_AT]->(FileChange)"),
     ),
+
     query(
       graph,
       "move strengths",
-      `MATCH (:NextMove {id: $id})-[:LEVERAGES]->(t:Topic) RETURN t.slug AS slug`,
+      `
+        MATCH (:NextMove {id: $id})-[:LEVERAGES]->(t:Topic)
+        RETURN t.slug AS slug
+        `,
       { id: moveId },
       spec("strengths", "(NextMove)-[:LEVERAGES]->(Topic)"),
     ),
+
     query(
       graph,
       "move gaps",
-      `MATCH (:NextMove {id: $id})-[:CLOSES_GAP_IN]->(t:Topic) RETURN t.slug AS slug`,
+      `
+        MATCH (:NextMove {id: $id})-[:CLOSES_GAP_IN]->(t:Topic)
+        RETURN t.slug AS slug
+        `,
       { id: moveId },
       spec("gaps", "(NextMove)-[:CLOSES_GAP_IN]->(Topic)"),
     ),
+
     query(
       graph,
       "move demonstrations",
       `
-      MATCH (:NextMove {id: $id})-[b:BACKED_BY]->(x:Demonstration)
-      OPTIONAL MATCH (x)-[:IN_REPOSITORY]->(r:Repository)
-      RETURN coalesce(b.ref, "") AS ref, x.id AS id,
-             coalesce(r.full_name, r.name, "") AS repository,
-             coalesce(x.path, "") AS path,
-             coalesce(x.commit_sha, "") AS commit_sha,
-             coalesce(x.technique, "") AS technique,
-             coalesce(x.summary, "") AS summary,
-             coalesce(x.permalink, "") AS permalink
-      `,
+        MATCH (:NextMove {id: $id})-[b:BACKED_BY]->(x:Demonstration)
+        OPTIONAL MATCH (x)-[:IN_REPOSITORY]->(r:Repository)
+        RETURN coalesce(b.ref, "") AS ref,
+               x.id AS id,
+               coalesce(r.full_name, r.name, "") AS repository,
+               coalesce(x.path, "") AS path,
+               coalesce(x.commit_sha, "") AS commit_sha,
+               coalesce(x.technique, "") AS technique,
+               coalesce(x.summary, "") AS summary,
+               coalesce(x.permalink, "") AS permalink
+        `,
       { id: moveId },
       spec(
         "evidence",
         "(NextMove)-[:BACKED_BY]->(Demonstration)-[:IN_REPOSITORY]->(Repository)",
       ),
     ),
+
     query(
       graph,
       "move file changes",
-      `MATCH (:NextMove {id: $id})-[b:BACKED_BY]->(f:FileChange)
-       RETURN coalesce(b.ref, "") AS ref, f.id AS id`,
+      `
+        MATCH (:NextMove {id: $id})-[b:BACKED_BY]->(f:FileChange)
+        OPTIONAL MATCH (r:Repository)
+        WHERE r.id = f.repository_id
+        RETURN coalesce(b.ref, "") AS ref,
+               f.id AS id,
+               coalesce(r.full_name, r.name, "") AS repository,
+               coalesce(f.path, "") AS path,
+               coalesce(f.commit_sha, "") AS commit_sha
+        `,
       { id: moveId },
       spec("evidence_files", "(NextMove)-[:BACKED_BY]->(FileChange)"),
     ),
@@ -600,7 +635,44 @@ export async function loadSavedMove(
 
   trace.sort((a, b) => STEP_ORDER.indexOf(a.step) - STEP_ORDER.indexOf(b.step));
 
-  const fileByRef = new Map((files ?? []).map((r) => [str(r.ref), str(r.id)]));
+  const fileByRef = new Map((files ?? []).map((r) => [str(r.ref), r]));
+
+  const demonstrationEvidence: SavedEvidence[] = (demos ?? []).map((r) => {
+    const file = fileByRef.get(str(r.ref));
+
+    return {
+      ref: str(r.ref),
+      demonstrationId: str(r.id),
+      fileChangeId: str(file?.id),
+      repository: str(r.repository) || str(file?.repository),
+      path: str(r.path) || str(file?.path),
+      commitSha: str(r.commit_sha) || str(file?.commit_sha),
+      technique: str(r.technique),
+      summary: str(r.summary).slice(0, 300),
+      permalink: str(r.permalink),
+    };
+  });
+
+  const demonstrationRefs = new Set(
+    demonstrationEvidence.map((e) => e.ref).filter(Boolean),
+  );
+
+  const fileOnlyEvidence: SavedEvidence[] = (files ?? [])
+    .filter((r) => Boolean(str(r.ref)) && !demonstrationRefs.has(str(r.ref)))
+    .map((r) => ({
+      ref: str(r.ref),
+      demonstrationId: "",
+      fileChangeId: str(r.id),
+      repository: str(r.repository),
+      path: str(r.path),
+      commitSha: str(r.commit_sha),
+      technique: "",
+      summary: "",
+      permalink: "",
+    }));
+
+  const evidence = [...demonstrationEvidence, ...fileOnlyEvidence];
+
   const createdAt = str(h.created_at);
   const title = str(h.title);
 
@@ -622,17 +694,7 @@ export async function loadSavedMove(
     startFileChangeId: start?.[0] ? str(start[0].id) : null,
     strengthSlugs: (strengths ?? []).map((r) => str(r.slug)).filter(Boolean),
     gapSlugs: (gaps ?? []).map((r) => str(r.slug)).filter(Boolean),
-    evidence: (demos ?? []).map((r) => ({
-      ref: str(r.ref),
-      demonstrationId: str(r.id),
-      fileChangeId: fileByRef.get(str(r.ref)) ?? "",
-      repository: str(r.repository),
-      path: str(r.path),
-      commitSha: str(r.commit_sha),
-      technique: str(r.technique),
-      summary: str(r.summary).slice(0, 300),
-      permalink: str(r.permalink),
-    })),
+    evidence,
     trace,
   };
 }
@@ -656,7 +718,7 @@ const MISSION_COLS = `
   coalesce(m.created_at, "") AS created_at,
   coalesce(m.started_at, "") AS started_at,
   coalesce(m.submitted_head, "") AS submitted_head,
-  coalesce(m.completed_at, "") AS completed_at
+  coalesce(m.completed_at, "") AS completed_at,
   coalesce(m.verification_state, "assigned") AS verification_state
 `;
 

@@ -865,8 +865,7 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
               gen.errors.slice(0, 3).join(" · ") || "No valid test file.",
             );
             run.infra = true;
-            run.error =
-              "The evaluator could not produce a valid test file for this mission. This is not caused by your code. Try again.";
+            run.error = `The evaluator could not produce a valid test file (${gen.errors[0] ?? "no reason given"}). This is not caused by your code. Try again.`;
             finish("error");
             return;
           }

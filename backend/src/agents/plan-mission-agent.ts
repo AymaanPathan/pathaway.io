@@ -146,6 +146,7 @@ function renderUser(input: PlanMissionInput): string {
   return `DATA:\n${JSON.stringify(data)}\n\nCURRENT CODE ${inspection.startPath} (the only code you may quote)\n\`\`\`\n${inspection.excerpt}\n\`\`\``;
 }
 
+
 async function callLlm(
   llm: LlmClient,
   user: string,
@@ -153,14 +154,25 @@ async function callLlm(
 ): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
-    return await llm.complete({
+    const raw = await llm.complete({
       system: SYSTEM,
       user,
       maxTokens: 3200,
       json: true,
       signal: controller.signal,
     });
+
+    const response = raw.trim();
+
+    if (!response) {
+      throw new Error(
+        "LLM returned an empty response; check the model, finish reason, and completion token usage.",
+      );
+    }
+
+    return response;
   } finally {
     clearTimeout(timer);
   }

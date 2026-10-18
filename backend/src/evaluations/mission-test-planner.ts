@@ -113,15 +113,20 @@ const DATABASE =
 const HTTP_VERB = /\b(GET|POST|PUT|PATCH|DELETE)\s+\/[\w/:.-]*/;
 const HTTP_WORDS =
   /\bstatus code\b|\bHTTP\s?\d{3}\b|\bendpoints?\b|\broutes?\b|\brespon(ds?|se) (with|status)\b|\b[245]\d\d\b status|\bstatus [245]\d\d\b/i;
-
+/** files that actually serve HTTP; a util or service file is tested by calling it */
+const SERVER_PATH =
+  /(^|\/)(routes?|controllers?|handlers?|api|server|app|middleware|endpoints?)(\/|\.|$)/i;
 export function classifyCriterion(
   c: MissionCriterion,
   profile: RepoProfile,
   libToken: string,
+  scopePaths: string[] = [],
 ): { strategy: StrategyId; reason: string } {
   const text = `${c.description} ${c.how}`;
   const lower = text.toLowerCase();
-  const http = HTTP_VERB.test(text) || HTTP_WORDS.test(text);
+  const http =
+    HTTP_VERB.test(text) ||
+    (HTTP_WORDS.test(text) && scopePaths.some((p) => SERVER_PATH.test(p)));
 
   if (c.check === "review")
     return {
@@ -162,9 +167,20 @@ export function planMissionTests(
 ): MissionTestPlan {
   const libToken = libraryToken(spec.contract?.library);
   const commit = assessCommit(changed, spec, libToken);
+  const scopePaths = [
+    spec.scope.startPath,
+    ...spec.scope.modifyPaths,
+    ...spec.scope.createPaths,
+  ];
 
   const criteria: CriterionPlan[] = spec.criteria.map((c) => {
-    const { strategy, reason } = classifyCriterion(c, profile, libToken);
+    const { strategy, reason } = classifyCriterion(
+      c,
+      profile,
+      libToken,
+      scopePaths,
+    );
+
     const av = strategyAvailability(strategy, profile);
     const text = `${c.description} ${c.how}`.toLowerCase();
     return {

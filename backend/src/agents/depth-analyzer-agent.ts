@@ -1,5 +1,10 @@
 import type { Graph } from "../db/falkordb.js";
-import { nvidia, NVIDIA_MODEL } from "../ai-models/nvidia-nemotron-3.5.js";
+import {
+  CEREBRAS_LIMITS,
+  CEREBRAS_MODEL,
+  cerebrasChat,
+  governorFor,
+} from "../ai-models/cerebras.js";
 import {
   DEPTH_BANDS,
   DEPTH_RANK,
@@ -73,7 +78,6 @@ const asObjects = (v: unknown): Row[] =>
     ? v.filter((x) => x && typeof x === "object" && !Array.isArray(x))
     : [];
 const uniq = <T>(items: T[]): T[] => [...new Set(items)];
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const envNum = (name: string, fallback: number): number => {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n >= 0 && process.env[name] !== undefined
@@ -160,13 +164,6 @@ export function extractJson(text: string): unknown {
   return JSON.parse(repairJson(cleaned.slice(start)));
 }
 
-function retryAfterMs(err: any): number | null {
-  const h = err?.headers;
-  const raw = h?.get?.("retry-after") ?? h?.["retry-after"];
-  const secs = Number(raw);
-  return Number.isFinite(secs) && secs > 0 ? secs * 1000 : null;
-}
-
 type LlmFactoryOptions = {
   model?: string;
   timeoutMs?: number;
@@ -176,23 +173,37 @@ type LlmFactoryOptions = {
   systemPrefix?: string;
 };
 
-function createOpenAiLlm(
-  client: typeof nvidia,
-  defaultModel: string,
-  options: {
-    model?: string;
-    timeoutMs?: number;
-    maxRetries?: number;
-    jsonMode?: boolean;
-    thinking?: boolean;
-    systemPrefix?: string;
-  } = {},
-): DepthLlm {
-  const model = options.model ?? process.env.DEPTH_LLM_MODEL ?? defaultModel;
-  const timeoutMs = options.timeoutMs ?? envNum("DEPTH_LLM_TIMEOUT_MS", 90_000);
-  const maxRetries = options.maxRetries ?? envNum("DEPTH_LLM_RETRIES", 3);
+/**
+ * DEPTH_LLM_MODEL may still point at a model Cerebras does not serve (an old
+ * experiment, for example). Only known Cerebras models are honoured unless
+ * DEPTH_LLM_ALLOW_ANY_MODEL=true, otherwise every call would time out.
+ */
+function resolveDepthModel(explicit?: string): string {
+  const wanted = explicit ?? process.env.DEPTH_LLM_MODEL;
+  if (!wanted) return CEREBRAS_MODEL;
+  if (
+    CEREBRAS_LIMITS[wanted] ||
+    process.env.DEPTH_LLM_ALLOW_ANY_MODEL === "true"
+  )
+    return wanted;
+  log(
+    `DEPTH_LLM_MODEL "${wanted}" is not a known Cerebras model; using ${CEREBRAS_MODEL}`,
+  );
+  return CEREBRAS_MODEL;
+}
+
+/**
+ * Every call goes through cerebrasChat(): one shared rate governor per model
+ * (so the depth agent, the explainer and the topic chat never fight over the
+ * same quota), 429 handling that waits for retry-after, and automatic removal
+ * of request parameters a model rejects.
+ */
+export function createCerebrasLlm(options: LlmFactoryOptions = {}): DepthLlm {
+  const model = resolveDepthModel(options.model);
+  const timeoutMs = options.timeoutMs ?? envNum("DEPTH_LLM_TIMEOUT_MS", 45_000);
+  const retries = options.maxRetries ?? envNum("DEPTH_LLM_RETRIES", 3);
   const jsonMode =
-    options.jsonMode ?? process.env.DEPTH_LLM_JSON_MODE === "true";
+    options.jsonMode ?? process.env.DEPTH_LLM_JSON_MODE !== "false";
   const thinking =
     options.thinking ?? process.env.DEPTH_LLM_THINKING === "true";
   const systemPrefix =
@@ -202,67 +213,37 @@ function createOpenAiLlm(
     model,
     async completeJson(request) {
       const startedAt = Date.now();
-      let text = "";
-      let finish: string | null | undefined;
-      let hasReasoning = false;
-
-      for (let attempt = 0; ; attempt++) {
-        try {
-          const body: Row = {
-            model,
-            temperature: request.temperature ?? 0.1,
-            max_tokens: request.maxTokens ?? 4000,
-            ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
-            ...(thinking
-              ? {}
-              : { chat_template_kwargs: { enable_thinking: false } }),
-            messages: [
-              {
-                role: "system",
-                content: systemPrefix
-                  ? `${systemPrefix}\n${request.system}`
-                  : request.system,
-              },
-              { role: "user", content: request.user },
-            ],
-          };
-          const res = await client.chat.completions.create(body as any, {
-            timeout: timeoutMs,
-            maxRetries: 0,
-          });
-          const choice = res.choices?.[0];
-          const message = (choice?.message ?? {}) as Row;
-          text = String(message.content ?? "");
-          finish = choice?.finish_reason;
-          hasReasoning = Boolean(
-            message.reasoning_content ?? message.reasoning,
-          );
-          break;
-        } catch (err: any) {
-          const status: number | undefined = err?.status;
-          const retryable =
-            status === undefined || status === 429 || status >= 500;
-          if (!retryable || attempt >= maxRetries) {
-            throw new LlmTransportError(
-              `LLM ${status ?? "network"}: ${String(err?.message ?? err).slice(0, 300)}`,
-            );
-          }
-          const delay =
-            retryAfterMs(err) ??
-            Math.min(30_000, 3_000 * 2 ** attempt) +
-              Math.floor(Math.random() * 1_000);
-          log(`${request.stage} ${status ?? "network"} - retry in ${delay}ms`, {
-            attempt: attempt + 1,
-            reason: String(err?.message ?? err).slice(0, 120),
-          });
-          await sleep(delay);
-        }
+      let result: Awaited<ReturnType<typeof cerebrasChat>>;
+      try {
+        result = await cerebrasChat({
+          model,
+          system: systemPrefix
+            ? `${systemPrefix}\n${request.system}`
+            : request.system,
+          user: request.user,
+          maxTokens: request.maxTokens ?? 4000,
+          temperature: request.temperature ?? 0.1,
+          timeoutMs,
+          retries,
+          jsonMode,
+          thinking,
+          label: request.stage,
+          log,
+        });
+      } catch (err: any) {
+        throw new LlmTransportError(String(err?.message ?? err).slice(0, 300));
       }
 
+      const { text, finish, hasReasoning, usage } = result;
       const ms = Date.now() - startedAt;
       try {
         const out = extractJson(text);
-        log(`${request.stage} ok`, { ms, chars: text.length, finish });
+        log(`${request.stage} ok`, {
+          ms,
+          chars: text.length,
+          finish,
+          ...(usage ? { tokens: usage } : {}),
+        });
         return out;
       } catch {
         const empty = text.trim().length === 0;
@@ -290,35 +271,33 @@ function createOpenAiLlm(
   };
 }
 
-export function createNvidiaLlm(options: LlmFactoryOptions = {}): DepthLlm {
-  return createOpenAiLlm(nvidia, NVIDIA_MODEL, options);
-}
-
 export function createDepthLlmFromEnv(): DepthLlm {
-  return createNvidiaLlm();
+  return createCerebrasLlm();
 }
 
+/**
+ * Concurrency + circuit breaker. Rate limiting itself (requests and tokens per
+ * minute) lives in the shared governor inside cerebrasChat(), so nothing here
+ * can push the API over its limit.
+ */
 class LlmGateway {
   calls = 0;
   failures: string[] = [];
   private active = 0;
   private waiters: Array<() => void> = [];
-  private window: Array<{ at: number; tokens: number }> = [];
   private consecutiveFailures = 0;
   private announcedOpen = false;
+  private openedAt = 0;
 
   constructor(
     private readonly llm: DepthLlm,
-    private readonly concurrency = 4,
-    private readonly tpm = 0,
-    private readonly breaker = 3,
+    private readonly concurrency = 8,
+    private readonly breaker = 6,
   ) {}
 
   get model(): string {
     return this.llm.model;
   }
-
-  private openedAt = 0;
 
   get open(): boolean {
     if (!(this.breaker > 0 && this.consecutiveFailures >= this.breaker))
@@ -346,20 +325,6 @@ class LlmGateway {
     else this.active--;
   }
 
-  private async reserve(tokens: number): Promise<void> {
-    if (!this.tpm) return;
-    while (true) {
-      const now = Date.now();
-      this.window = this.window.filter((w) => now - w.at < 60_000);
-      const used = this.window.reduce((s, w) => s + w.tokens, 0);
-      if (this.window.length === 0 || used + tokens <= this.tpm) {
-        this.window.push({ at: now, tokens });
-        return;
-      }
-      await sleep(Math.max(250, this.window[0].at + 60_000 - now + 50));
-    }
-  }
-
   private noteFailure(stage: string, message: string): void {
     this.consecutiveFailures += 1;
     if (this.consecutiveFailures >= this.breaker) this.openedAt = Date.now();
@@ -380,12 +345,6 @@ class LlmGateway {
       let current = request;
       for (let attempt = 1; attempt <= 2; attempt++) {
         if (this.open) return null;
-
-        const estimate = Math.ceil(
-          (current.system.length + current.user.length) / 3.5 +
-            (current.maxTokens ?? 4000) * 0.5,
-        );
-        await this.reserve(estimate);
         this.calls += 1;
 
         try {
@@ -437,10 +396,13 @@ class LlmGateway {
 }
 
 function makeGateway(options: DepthAnalyzerOptions): LlmGateway {
+  // optional manual override of the token budget (tokens per minute, before the safety margin)
+  const tpmOverride = options.llmTpm ?? envNum("DEPTH_LLM_TPM", 0);
+  if (tpmOverride > 0)
+    governorFor(options.llm.model).setTokenBudget(tpmOverride);
   return new LlmGateway(
     options.llm,
-    Math.max(1, options.llmConcurrency ?? envNum("DEPTH_LLM_CONCURRENCY", 2)),
-    options.llmTpm ?? envNum("DEPTH_LLM_TPM", 0),
+    Math.max(1, options.llmConcurrency ?? envNum("DEPTH_LLM_CONCURRENCY", 8)),
     options.llmBreaker ?? envNum("DEPTH_LLM_BREAKER", 6),
   );
 }
@@ -1988,7 +1950,8 @@ async function judgeTopic(
       stage: "judge",
       system: JUDGE_SYSTEM,
       user: `Judge this developer's depth in the topic below.\n\nEVIDENCE:\n${evidencePayload(evidence, atlas)}`,
-      maxTokens: 4000,
+      // the JSON answer is ~1k tokens; 2500 leaves room without reserving 4k of quota per call
+      maxTokens: 2500,
     });
     if (!raw) return { evidence, judgement: null, refined };
     const judgement = parseJudgement(raw);
@@ -2202,9 +2165,12 @@ async function synthesize(
 export interface DepthAnalyzerOptions {
   llm: DepthLlm;
   maxTopics?: number;
+  /** kept for compatibility: gathering now runs inside the judge pool */
   gatherConcurrency?: number;
+  /** topics gathered + judged in parallel (default 8; the rate governor keeps it under the API limits) */
   judgeConcurrency?: number;
   llmConcurrency?: number;
+  /** optional tokens-per-minute override for the shared rate governor */
   llmTpm?: number;
   llmBreaker?: number;
   maxRefinements?: number;
@@ -2250,7 +2216,7 @@ async function proposeFoundations(
         packages: s.packages.slice(0, 6),
       })),
     )}`,
-    maxTokens: 3000,
+    maxTokens: 2500,
     temperature: 0,
   });
   if (!raw) {
@@ -2677,14 +2643,18 @@ export async function analyzeDeveloperDepth(
     model: gateway.model,
     maxTopics,
     force: options.force === true,
+    rateLimiter: governorFor(gateway.model).stats(),
   });
   onProgress("depth_start", { developerId });
 
   await ensureDepthSchema(graph);
 
-  const atlas = await readEvidenceAtlas(graph, developerId, onProgress);
+  // the atlas and the shared topic catalog are independent reads
+  const [atlas, catalog] = await Promise.all([
+    readEvidenceAtlas(graph, developerId, onProgress),
+    listTopicCatalog(graph, 200),
+  ]);
   if (!atlas) throw new Error(`Unknown developer ${developerId}`);
-  const catalog = await listTopicCatalog(graph, 200);
 
   onProgress("depth_discovering", { packages: atlas.packages.length });
   const discoveryKey = `${developerId}:${maxTopics}`;
@@ -2711,39 +2681,35 @@ export async function analyzeDeveloperDepth(
   }
   onProgress("depth_topics_proposed", { count: discovery.topics.length });
 
-  const gathered = await mapPool(
-    discovery.topics,
-    options.gatherConcurrency ?? 6,
-    async (spec) => {
-      const evidence = await gatherTopicEvidence(graph, atlas, spec);
-      onProgress("depth_evidence_gathered", {
-        topic: spec.slug,
-        files: evidence.totals.files,
-        baseline: evidence.baseline.level,
-      });
-      return evidence;
-    },
-  );
-
+  // Gather and judge each topic in ONE pass: a topic's judge call starts the
+  // moment its evidence is ready instead of waiting for every other topic.
+  // The shared rate governor keeps the parallel calls inside the API limits.
   const dropped = [...discovery.dropped];
-  const live: TopicEvidence[] = [];
-  for (const ev of gathered) {
-    if (ev.matched) live.push(ev);
-    else
-      dropped.push({
-        slug: ev.spec.slug,
-        reason: "the graph found no matching authored code",
-      });
-  }
-
-  live.sort((a, b) => b.totals.files - a.totals.files);
-
   let refinements = 0;
   const footprints = new Map<string, TopicFootprint>();
-  const assessments = await mapPool(
-    live,
-    options.judgeConcurrency ?? 4,
-    async (ev): Promise<DepthAssessmentRecord> => {
+  const judgeLimit = Math.max(
+    1,
+    options.judgeConcurrency ?? envNum("DEPTH_JUDGE_CONCURRENCY", 8),
+  );
+
+  const perTopic = await mapPool(
+    discovery.topics,
+    judgeLimit,
+    async (spec): Promise<DepthAssessmentRecord | null> => {
+      const ev = await gatherTopicEvidence(graph, atlas, spec);
+      onProgress("depth_evidence_gathered", {
+        topic: spec.slug,
+        files: ev.totals.files,
+        baseline: ev.baseline.level,
+      });
+      if (!ev.matched) {
+        dropped.push({
+          slug: spec.slug,
+          reason: "the graph found no matching authored code",
+        });
+        return null;
+      }
+
       const key = `${developerId}:${ev.spec.slug}`;
       const evFp = evidenceFingerprint(ev);
       const hit = options.force ? undefined : judgementCache.get(key);
@@ -2793,7 +2759,17 @@ export async function analyzeDeveloperDepth(
     },
   );
 
+  const assessments = perTopic.filter(
+    (r): r is DepthAssessmentRecord => r !== null,
+  );
   assessments.sort((a, b) => a.topic.name.localeCompare(b.topic.name));
+
+  // The profile summary and the prerequisite ("relate") pass only depend on
+  // the finished assessments, so they run side by side.
+  const summaryPromise: Promise<DepthProfileSummary> =
+    options.synthesize === false
+      ? Promise.resolve(deterministicSummary(assessments))
+      : synthesize(gateway, assessments);
 
   const finalSpecs = await proposeFoundations(
     gateway,
@@ -2807,11 +2783,6 @@ export async function analyzeDeveloperDepth(
   );
 
   const relationReport = buildRelationsReport(finalSpecs, catalog, footprints);
-
-  const summaryPromise: Promise<DepthProfileSummary> =
-    options.synthesize === false
-      ? Promise.resolve(deterministicSummary(assessments))
-      : synthesize(gateway, assessments);
 
   let metrics: TopicGraphMetrics | null = null;
   let storage: DepthDiagnostics["storage"] = null;
@@ -2890,6 +2861,7 @@ export async function analyzeDeveloperDepth(
     rejectedKeywordTopics: diagnostics.rejectedKeywords.length,
     mappingsWritten: storage?.mappings ?? null,
     relationsPersisted: storage?.relationsPersisted ?? null,
+    rateLimiter: governorFor(gateway.model).stats(),
     durationMs: result.durationMs,
   });
   return result;
@@ -3065,7 +3037,7 @@ export async function explainTopicEvidence(
   const hit = explainCache.get(cacheKey);
   if (hit && Date.now() - hit.at < EXPLAIN_TTL_MS) return hit.value;
 
-  const gateway = new LlmGateway(llm, 1, 0, 2);
+  const gateway = new LlmGateway(llm, 1, 2);
   const raw = await gateway.json({
     stage: "explain",
     system: EXPLAIN_SYSTEM,

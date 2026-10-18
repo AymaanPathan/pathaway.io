@@ -1,5 +1,5 @@
 import type { Graph } from "../db/falkordb.js";
-import { cerebras, CEREBRAS_MODEL } from "../ai-models/cerebras.js";
+import { groq, GROQ_MODEL } from "../ai-models/groq.js";
 import { listTopicCatalog } from "../graph/depth-analyzer-graph.js";
 import {
   briefForAgent,
@@ -11,6 +11,8 @@ import {
   type Resolution,
   type TopicLink,
 } from "../graph/goal-graph.js";
+import { cerebras, CEREBRAS_MODEL } from "../ai-models/cerebras.js";
+import { gptOssNvidia } from "../ai-models/gpt-oss-nvidia.js";
 
 type Row = Record<string, any>;
 
@@ -52,38 +54,56 @@ export interface LlmClient {
 }
 
 export function cerebrasClient(): LlmClient {
-  const call = async (req: LlmRequest, json: boolean): Promise<string> => {
-    const response = await cerebras.chat.completions.create(
-      {
-        model: CEREBRAS_MODEL,
-        temperature: 0.3,
-        max_tokens: req.maxTokens,
-        messages: [
-          { role: "system", content: req.system },
-          { role: "user", content: req.user },
-        ],
-        ...(json ? { response_format: { type: "json_object" } } : {}),
-      },
-      { signal: req.signal },
-    );
-    const content = response.choices[0]?.message?.content;
-    return typeof content === "string" ? content : "";
-  };
   return {
     async complete(req: LlmRequest): Promise<string> {
-      try {
-        const out = await call(req, Boolean(req.json));
-        if (out.trim() || !req.json) return out;
-        // empty answer in JSON mode: ask once more without response_format
-        if (req.signal?.aborted) return out;
-        return await call(req, false);
-      } catch (error) {
-        // never fall back after a cancel/timeout: the signal is already dead
-        if (req.signal?.aborted) throw error;
-        if (req.json && /response_format|json/i.test(String(error)))
-          return call(req, false);
-        throw error;
+     const json = req.json ?? false;
+
+      const response = await cerebras.chat.completions.create(
+        {
+          model: CEREBRAS_MODEL,
+          temperature: 0.3,
+          max_tokens: req.maxTokens,
+          messages: [
+            { role: "system", content: req.system },
+            { role: "user", content: req.user },
+          ],
+          ...(json
+            ? { response_format: { type: "json_object" as const } }
+            : {}),
+        },
+        { signal: req.signal },
+      );
+
+      return response.choices[0]?.message?.content ?? "";
+    },
+  };
+}
+
+export function gptOssNvidiaClient(): LlmClient {
+  return {
+    async complete(req: LlmRequest): Promise<string> {
+      if (!process.env.NVIDIA_API_KEY) {
+        throw new Error("NVIDIA_API_KEY is missing from backend/.env");
       }
+
+      const response = await gptOssNvidia.chat.completions.create(
+        {
+          model: process.env.NVIDIA_MODEL || "openai/gpt-oss-20b",
+          temperature: 0.3,
+          top_p: 1,
+          max_tokens: req.maxTokens,
+          messages: [
+            { role: "system", content: req.system },
+            { role: "user", content: req.user },
+          ],
+        },
+        {
+          signal: req.signal,
+          maxRetries: 2,
+        },
+      );
+
+      return response.choices[0]?.message?.content ?? "";
     },
   };
 }
@@ -677,14 +697,67 @@ Rules:
 - Do not repeat something already built (see evidence techniques), the previousMove or a completedMoves entry.
 - Forbidden phrases: "one level deeper", "add a test for the new case", "close this gap", "best practices", generic refactors.`;
 
+function compactForPrompt(value: unknown, key = ""): unknown {
+  if (typeof value === "string") {
+    const limit = /excerpt|code/i.test(key)
+      ? 350
+      : /description|summary|reason|history/i.test(key)
+        ? 180
+        : 120;
+
+    return clip(value, limit);
+  }
+
+  if (Array.isArray(value)) {
+    const limit = /code/i.test(key)
+      ? 4
+      : /evidence/i.test(key)
+        ? 14
+        : /link/i.test(key)
+          ? 10
+          : /completedMoves|history/i.test(key)
+            ? 5
+            : /approaches|strengths|gaps|topics|seeds/i.test(key)
+              ? 8
+              : 8;
+
+    return value.slice(0, limit).map((item) => compactForPrompt(item, key));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+        k,
+        compactForPrompt(v, k),
+      ]),
+    );
+  }
+
+  return value;
+}
+
 function renderUser(brief: Row): string {
   const { code, ...data } = brief;
+
+  const compactData = compactForPrompt(data);
+
   const blocks = (
-    code as Array<{ evidenceId: string; path: string; excerpt: string }>
+    Array.isArray(code)
+      ? (code as Array<{
+          evidenceId: string;
+          path: string;
+          excerpt: string;
+        }>)
+      : []
   )
-    .map((c) => `[${c.evidenceId}] ${c.path}\n\`\`\`\n${c.excerpt}\n\`\`\``)
+    .slice(0, 4)
+    .map(
+      (c) =>
+        `[${c.evidenceId}] ${c.path}\n\`\`\`\n${clip(c.excerpt, 350)}\n\`\`\``,
+    )
     .join("\n\n");
-  return `DATA:\n${JSON.stringify(data)}\n\nCODE (the only code you may quote):\n${blocks || "(none)"}`;
+
+  return `DATA:\n${JSON.stringify(compactData)}\n\nCODE (the only code you may quote):\n${blocks || "(none)"}`;
 }
 
 /* ========================================================================== */
@@ -1538,7 +1611,7 @@ export async function planGoal(
     try {
       const r = await callLlmWithRetry(
         llm,
-        { system: SYSTEM, user: prompt, maxTokens: 3800, json: true },
+        { system: SYSTEM, user: prompt, maxTokens: 3000, json: true },
         { ...retryBase, label: `goal generation (repair ${validationUsed})` },
       );
       stats.calls += r.attempts;

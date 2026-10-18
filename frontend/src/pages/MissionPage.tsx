@@ -2128,6 +2128,8 @@ export default function MissionPage() {
   const [syncing, setSyncing] = useState(false);
   const [syncedAt, setSyncedAt] = useState("");
   const [showGraphReveal, setShowGraphReveal] = useState(false);
+  /* re-reads the stored result; never starts an evaluation */
+  const [refreshing, setRefreshing] = useState(false);
 
   const started = useRef(false);
   const celebratedRun = useRef("");
@@ -2390,9 +2392,42 @@ export default function MissionPage() {
     setBusy("");
   };
 
+  /**
+   * Re-read the stored result. Does NOT start an evaluation and never writes to
+   * the graph: it only uses GET requests.
+   */
+  const refreshResult = async () => {
+    if (!mission) return;
+    setRefreshing(true);
+    setRunNote("");
+    try {
+      const res = await api<{ run: RunView | null }>(
+        `${API}/${encodeURIComponent(mission.id)}/evaluate/latest`,
+      );
+      if (res.body?.run) setRun(res.body.run);
+      else
+        setRunNote(
+          "The detailed run is no longer on the server (a restart clears it). Showing the saved result instead.",
+        );
+      await Promise.all([loadEvaluation(mission.id), refresh(mission.id)]);
+    } catch {
+      setRunNote("The server could not be reached.");
+    }
+    setRefreshing(false);
+  };
+
   /** Evaluate the latest push in the Daytona sandbox. */
   const startEvaluate = async () => {
     if (!mission || !workspace) return;
+    // the same push was already evaluated: make the user confirm before re-running
+    if (
+      run?.headSha &&
+      run.headSha === commits[0]?.sha &&
+      !window.confirm(
+        "This push was already evaluated. Evaluating again re-runs the tests and the graph update. Continue?",
+      )
+    )
+      return;
     setBusy("evaluate");
     setRunNote("");
     setEnvNote("");
@@ -2478,6 +2513,23 @@ export default function MissionPage() {
     }
     return "";
   };
+
+  const refreshButton = (
+    <button
+      type="button"
+      onClick={() => void refreshResult()}
+      disabled={refreshing || busy !== "" || live}
+      style={border}
+      className="pm-btn inline-flex items-center gap-1.5 rounded-full bg-white px-4 py-2 text-[13px] font-semibold"
+    >
+      <RefreshCw
+        size={14}
+        className={refreshing ? "animate-spin" : ""}
+        aria-hidden
+      />
+      {refreshing ? "Refreshing…" : "Refresh result"}
+    </button>
+  );
 
   const evaluateButton = (
     <button
@@ -3282,7 +3334,10 @@ export default function MissionPage() {
                     >
                       Evaluation
                     </h2>
-                    {canWork && workspace && evaluateButton}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {(run || evaluation) && refreshButton}
+                      {canWork && workspace && evaluateButton}
+                    </div>
                   </div>
 
                   {runNote && (
@@ -3295,7 +3350,28 @@ export default function MissionPage() {
                     </p>
                   )}
 
-                  {!run && !runNote && (
+                  {!run && evaluation && (
+                    <div
+                      style={{ ...border, backgroundColor: "#fff" }}
+                      className="space-y-2 rounded-xl p-4"
+                    >
+                      <p className="text-[13px] font-bold">
+                        Saved result · commit {short(evaluation.headCommit)}
+                      </p>
+                      <p className="text-[13px] leading-snug">
+                        {evaluation.summary}
+                      </p>
+                      <ul className="space-y-0.5 text-[13px]">
+                        {evaluation.results.map((r) => (
+                          <li key={r.id}>
+                            <GateMark ok={r.met} /> {r.id}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {!run && !runNote && !evaluation && (
                     <div
                       style={{ ...border, backgroundColor: "#fff" }}
                       className="space-y-2 rounded-xl p-4"
