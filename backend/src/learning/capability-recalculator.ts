@@ -1,4 +1,5 @@
 import type { Graph } from "../db/falkordb.js";
+import { ACTIVE_DEMONSTRATION_PREDICATE } from "./graph-updater.js";
 import {
   rollUpDemonstrations,
   type Demonstration,
@@ -15,6 +16,7 @@ export async function loadRollupInputs(
   const result = await graph.query(
     `
     MATCH (:Developer {id:$developer_id})-[:DEMONSTRATED]->(x:Demonstration)-[:OF_CAPABILITY]->(c:Capability)
+    WHERE ${ACTIVE_DEMONSTRATION_PREDICATE}
     RETURN x.id AS id, c.id AS capabilityId, x.technique AS technique,
       x.depth AS depth, x.repository_id AS repositoryId,
       x.commit_sha AS commitSha, x.created_at AS createdAt`,

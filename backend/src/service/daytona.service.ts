@@ -1733,6 +1733,7 @@ export async function runInSandbox(opts: {
   missionText?: string;
   /** Explicit, test-only credentials for HTTP missions. Default: none (real auth, no credentials). */
   testAuth?: TestAuthSetup;
+  skipDevTests?: boolean;
   /** resolved env (user-provided + generated). Values are redacted from the log. */
   env: Record<string, string>;
   onStep: StepReporter;
@@ -2004,7 +2005,7 @@ export async function runInSandbox(opts: {
 
     // ---- the developer's own tests (before the mission test is placed) ----
     let dev = noDev;
-    if (plan.projectTestCommand) {
+    if (plan.projectTestCommand && !opts.skipDevTests) {
       onStep(
         "devtests",
         "running",
@@ -2041,11 +2042,17 @@ export async function runInSandbox(opts: {
             : "Your tests failed. See the output below.",
       );
     } else {
-      dlog("dev tests: package.json has no test script");
+      dlog(
+        opts.skipDevTests
+          ? "dev tests: skipped by the caller"
+          : "dev tests: package.json has no test script",
+      );
       onStep(
         "devtests",
         "skipped",
-        "package.json has no test script, so your own tests were not run.",
+        opts.skipDevTests
+          ? "Skipped: only the mission tests run."
+          : "package.json has no test script, so your own tests were not run.",
       );
     }
 

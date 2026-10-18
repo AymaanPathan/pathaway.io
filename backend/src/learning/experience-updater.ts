@@ -4,6 +4,8 @@ import {
   groupDemonstrationsIntoExperiences,
   type Demonstration,
 } from "../graph/developer-knowledge-graph.js";
+import { ACTIVE_DEMONSTRATION_PREDICATE } from "./graph-updater.js";
+
 
 function techniqueIdFor(technique: string): string {
   const normalized = technique
@@ -38,6 +40,7 @@ export async function loadDemonstrations(
   const result = await graph.query(
     `
     MATCH (:Developer {id:$developer_id})-[:DEMONSTRATED]->(x:Demonstration)-[:OF_CAPABILITY]->(c:Capability)
+    WHERE ${ACTIVE_DEMONSTRATION_PREDICATE}
     OPTIONAL MATCH (x)-[:IN_CONTEXT]->(ctx:EngineeringContext)
     OPTIONAL MATCH (x)-[:USES]->(s:Skill)
     RETURN x.id AS id, x.rule_id AS ruleId, c.id AS capabilityId,

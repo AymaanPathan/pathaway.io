@@ -265,16 +265,28 @@ export interface ExecutionPlan {
   projectTestCommand: string | null;
 }
 
-/** What the Daytona runner hands back. Optional fields are filled by runners that support them. */
+/** What the Daytona runner hands back. Mirrors SandboxResult in daytona.service.ts. */
 export interface SandboxOutcome {
   infra: boolean;
+  /** none | tests_failed | project | timeout | infrastructure */
+  failureClass:
+    | "none"
+    | "tests_failed"
+    | "project"
+    | "timeout"
+    | "infrastructure";
+  /** why it was classified as infrastructure; "" otherwise */
+  infraReason: string;
   failedAt?: "install" | "extras" | "server" | "services";
   timedOut: boolean;
+  installExit: number;
+  /** exit code of the mission test process, null if it never ran */
+  testExit: number | null;
   resultsRaw: string | null;
   log: string;
   devTests: { ran: boolean; exit: number | null; out: string };
-  /** exit code of the mission test process */
-  missionExit?: number | null;
+  durationMs: number;
+  cleanup: { deleted: boolean; attempts: number; error: string };
 }
 
 /* ------------------------------------------------------------------ */

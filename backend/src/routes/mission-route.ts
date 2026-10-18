@@ -51,18 +51,6 @@ function getDeveloperId(req: Request): string | null {
   return String(raw).trim();
 }
 
-/**
- * The client polls a run many times. Graph learning must be logged and the
- * topics cache dropped once per run, not once per poll.
- */
-const learningReported = new Set<string>();
-function markLearningReported(runId: string): boolean {
-  if (learningReported.has(runId)) return false;
-  if (learningReported.size > 500) learningReported.clear();
-  learningReported.add(runId);
-  return true;
-}
-
 const STATUS_HTTP: Record<string, number> = {
   created: 201,
   existing: 200,
@@ -341,6 +329,47 @@ export function missionRoutes(deps: MissionDeps): Router {
         head,
         githubToken,
         regenerate: req.body?.regenerate === true,
+        // Fires once when the run ends, even if the client stopped polling.
+        onFinished: (learning, finished) => {
+          if (!learning) {
+            log(rid, "evaluation finished without graph learning", {
+              missionId,
+              runId: finished.runId,
+              status: finished.status,
+            });
+          } else {
+            const pipeline = learning.learning;
+            const gu = learning.graphUpdate;
+            log(rid, "evaluation graph learning", {
+              missionId,
+              runId: finished.runId,
+              evidenceStatus: learning.evidenceStatus,
+              verified: learning.verification.verified,
+              graphUpdate: gu
+                ? {
+                    status: gu.status,
+                    failedStage: gu.failedStage,
+                    attempts: gu.attempts,
+                    stagesCompleted: gu.stagesCompleted,
+                    lastError: gu.lastError,
+                  }
+                : null,
+              accepted: pipeline?.accepted ?? 0,
+              skippedExisting: pipeline?.skippedExisting ?? 0,
+              repairedExisting: pipeline?.repairedExisting ?? 0,
+              experiencesUpdated: pipeline?.experiencesUpdated ?? 0,
+              capabilityRollupsUpdated: pipeline?.capabilityRollupsUpdated ?? 0,
+            });
+            if (learning.evidenceStatus === "graph_update_failed")
+              log(rid, "graph update FAILED (retryable)", {
+                missionId,
+                failedStage: gu?.failedStage ?? null,
+              });
+          }
+          // Verified work adds evidence, and a failing push retracts old evidence.
+          // Either way the cached topics dossier is stale.
+          onTopicsChanged(developerId);
+        },
       });
 
       log(
@@ -364,7 +393,7 @@ export function missionRoutes(deps: MissionDeps): Router {
 
   router.get(
     "/:id/evaluate/:runId",
-    guard("evaluate-poll", async (req, res, developerId, rid) => {
+    guard("evaluate-poll", async (req, res, developerId) => {
       const run = getRun(
         developerId,
         String(req.params.id),
@@ -373,51 +402,6 @@ export function missionRoutes(deps: MissionDeps): Router {
       if (!run) {
         res.status(404).json({ error: "run not found" });
         return;
-      }
-
-      // Only once the run is finished, and only once per run.
-      if (
-        run.learning &&
-        (run.status === "done" || run.status === "error") &&
-        markLearningReported(run.runId)
-      ) {
-        const l = run.learning;
-        const pipeline = l.learning;
-        const gu = l.graphUpdate;
-
-        log(rid, "evaluation graph learning", {
-          evidenceStatus: l.evidenceStatus,
-          verified: l.verification.verified,
-          graphUpdate: gu
-            ? {
-                status: gu.status,
-                failedStage: gu.failedStage,
-                attempts: gu.attempts,
-                stagesCompleted: gu.stagesCompleted,
-                lastError: gu.lastError,
-              }
-            : null,
-          accepted: pipeline?.accepted ?? 0,
-          skippedExisting: pipeline?.skippedExisting ?? 0,
-          repairedExisting: pipeline?.repairedExisting ?? 0,
-          experiencesUpdated: pipeline?.experiencesUpdated ?? 0,
-          capabilityRollupsUpdated: pipeline?.capabilityRollupsUpdated ?? 0,
-        });
-
-        if (l.evidenceStatus === "graph_update_failed")
-          log(rid, "evaluation passed but graph update FAILED (retryable)", {
-            missionId: String(req.params.id),
-            failedStage: gu?.failedStage ?? null,
-          });
-
-        // verified work changed the graph: drop the cached topics dossier so
-        // the topics and goal views read the new evidence immediately
-        if (
-          l.evidenceStatus === "updated" ||
-          (pipeline?.accepted ?? 0) > 0 ||
-          (pipeline?.repairedExisting ?? 0) > 0
-        )
-          onTopicsChanged(developerId);
       }
       res.json({ run });
     }),

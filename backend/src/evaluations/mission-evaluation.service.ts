@@ -370,6 +370,7 @@ export async function startEvaluation(
     githubToken: string;
     /** throw away the stored mission test file and write a new one */
     regenerate?: boolean;
+    onFinished?: (learning: MissionLearningResult | null, run: RunView) => void;
   },
 ): Promise<StartResult> {
   const { developerId, missionId, head, githubToken } = input;
@@ -455,6 +456,7 @@ export async function startEvaluation(
     pin: mission.pin as MissionRepoPin,
     baseCommit: String(mission.pin?.baseCommit ?? ""),
     regenerate: input.regenerate === true,
+    onFinished: input.onFinished,
   });
 
   return { status: "started", run: view(run) };
@@ -530,6 +532,7 @@ interface Ctx {
   pin: MissionRepoPin;
   baseCommit: string;
   regenerate: boolean;
+  onFinished?: (learning: MissionLearningResult | null, run: RunView) => void;
 }
 
 const TEST_FILE = /\.(test|spec)\.[tj]sx?$/;
@@ -562,11 +565,10 @@ type RunInput = Parameters<typeof runInSandbox>[0];
 async function runSandbox(input: RunInput): Promise<SandboxOutcome> {
   let last: SandboxOutcome | null = null;
   for (let attempt = 1; attempt <= SANDBOX_ATTEMPTS; attempt++) {
-    last = (await runInSandbox(input)) as unknown as SandboxOutcome;
-    const transient = Boolean(last.infra && last.failedAt);
-    if (!transient) break;
+    last = (await runInSandbox(input)) as SandboxOutcome;
+    if (last.failureClass !== "infrastructure") break;
     console.warn(
-      `[mission-eval] sandbox attempt ${attempt}/${SANDBOX_ATTEMPTS} failed at ${last.failedAt} (environment)`,
+      `[mission-eval] sandbox attempt ${attempt}/${SANDBOX_ATTEMPTS} hit an environment failure: ${last.infraReason || last.failedAt || "unknown"}`,
     );
   }
   return last as SandboxOutcome;
@@ -640,6 +642,11 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
         );
     } finally {
       finish("done");
+      try {
+        ctx.onFinished?.(run.learning, view(run));
+      } catch (error) {
+        console.error("[mission-eval] onFinished callback failed", error);
+      }
     }
   };
 
@@ -897,7 +904,7 @@ async function execute(run: Run, ctx: Ctx): Promise<void> {
         run.infra = sb.infra && Boolean(sb.failedAt);
 
         parsed = parseVitestResults(sb.resultsRaw, ids);
-        missionExit = sb.missionExit ?? null;
+        missionExit = sb.testExit ?? null;
         // a test process that exited non-zero without producing results is a suite error,
         // never a silent success
         suiteError =
