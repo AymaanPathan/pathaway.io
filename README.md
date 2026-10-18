@@ -1,6 +1,7 @@
 <div align="center">
 
-# 🧭 Pathway
+<img width="1100" height="662" alt="home" src="https://github.com/user-attachments/assets/7a8091a1-aa06-4dcf-8e66-222a07510e0f" />
+
 
 ### Your GitHub history, turned into a knowledge graph that assigns your next coding mission.
 
@@ -87,6 +88,8 @@ flowchart LR
 ---
 
 ## 🏙️ 3D Skill City
+<img width="1535" height="690" alt="graph" src="https://github.com/user-attachments/assets/cd872edd-baf8-4a9e-ba09-f69bd23cdd55" />
+
 
 An interactive 3D view of the developer's skills, built with **React Three Fiber**. It is driven entirely by the **Skill graph** and has no connection to the chat agent or the Topic graph.
 
@@ -126,6 +129,8 @@ flowchart LR
 ---
 
 ## 🕸️ Graph data model
+
+<img width="712" height="606" alt="overview" src="https://github.com/user-attachments/assets/74659a6a-3f07-46b3-bfb2-cae9953b861a" />
 
 The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe. It has four connected layers for the agents, plus an independent Skill graph for the 3D city:
 
@@ -391,6 +396,8 @@ flowchart TD
 ```
 
 ### Mission Agent guarantees
+<img width="1525" height="692" alt="mission-1" src="https://github.com/user-attachments/assets/46fc1b66-30c0-41ec-bcea-6289377d7fa6" />
+
 
 - **At most 5 files**, all implementation; `modifyPaths` includes the start file
 - **Exactly 3 acceptance criteria**, each an observable test case the platform runs
@@ -427,6 +434,8 @@ Before the agent may claim "your code lacks X", Pathway checks `package.json` de
 
 ## 🧰 Chat agent tools
 
+
+
 16 typed tools, each declaring `name`, `description`, `whenToUse`, the FalkorDB `features` it uses, and a parameter schema. That one declaration feeds the **planner**, the **argument validator** (`parseToolArgs` clamps numbers, enforces enums, drops unknown keys), and the **UI**.
 
 | Tool | Graph capability |
@@ -448,7 +457,7 @@ Before the agent may claim "your code lacks X", Pathway checks `package.json` de
 | `audit_authenticity` | Genuine vs. superficial usage |
 | `recent_activity` | `last_seen` reads: active vs. gone quiet |
 
-> The chat agent reads the **Topic graph** only. It does not drive or read the 3D Skill City.
+> The chat agent reads the **Topic graph** only.
 
 Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun` with the result, latency, and a plain-language `how[]` trail. Tools return structured UI blocks (`roadmap`, `ranking`, `groups`, `timeline`, `stats`, `callout`): the LLM narrates, the graph supplies the facts.
 
@@ -617,6 +626,7 @@ npm install three @react-three/fiber @react-three/drei
 5. Implement it, push your branch, and let the sandbox verify it
 6. Watch the graph grow and the celebration screen appear
 
+<img width="862" height="491" alt="goal-2" src="https://github.com/user-attachments/assets/edc45e77-ac63-4654-b8b1-20f2e0796935" />
 ---
 
 ## 🛠️ Troubleshooting
