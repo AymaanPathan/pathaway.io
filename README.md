@@ -1,327 +1,593 @@
-# Pathway
+<div align="center">
 
-<p align="center">
+# 🧭 Pathway
 
-### Your GitHub is a history of your code.
-### Pathway is a model of your engineering knowledge.
+### Your GitHub history, turned into a knowledge graph that assigns your next coding mission.
 
-**An engineering intelligence system that reconstructs what your code demonstrates, connects it into a persistent knowledge graph, and uses that graph to reason about your capabilities.**
+**Built for the FalkorDB Hackathon**
 
-[Overview](#-what-is-pathway) · [Architecture](#-how-it-works) · [Knowledge Graph](#-the-graph-is-the-product) · [Agents](#-graph-backed-agents) · [Mission Verification](#-from-code-evidence-to-verified-capabilities)
+![FalkorDB](https://img.shields.io/badge/Graph-FalkorDB-red)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
+![Three.js](https://img.shields.io/badge/React_Three_Fiber-3D-black?logo=threedotjs)
+![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
 
-</p>
+[Demo](#) · [Blog post](#) · [Report a bug](../../issues)
+
+</div>
 
 ---
 
-## The problem isn't a lack of developer data. It's a lack of understanding.
+## 📖 What is Pathway?
 
-A developer can have thousands of commits, dozens of repositories, and years of experience — yet their engineering history remains fragmented across files, pull requests, technologies, and projects.
+Pathway is an AI-powered developer growth platform. It reads your GitHub coding history, builds a **knowledge graph** of what you have actually built, connects that evidence to engineering capabilities, and recommends **one specific coding mission** in your own repository.
 
-A list of skills cannot explain how those skills were demonstrated.
+When you complete a mission and the platform's tests pass, the verified code becomes **new evidence** in the graph and shapes your next recommendation.
 
-A commit count cannot distinguish changing a configuration from implementing a distributed coordination mechanism.
+> Pathway understands what you've built, figures out what you can work on next, gives you a real coding task, and learns from your verified progress.
 
-A chatbot can summarize a repository without building a persistent, queryable model of the engineering knowledge expressed in its code.
+| Typical growth tools | Pathway |
+|---|---|
+| Self-rated skills or quiz scores | Skills derived from **real file changes** |
+| "Top 10 tutorials" lists | **One mission** anchored to a file in *your* repo |
+| Checkbox completion | Completion must **pass platform-run tests** |
+| Opaque scoring | **Graph algorithms**: PageRank, betweenness, label propagation, WCC |
 
-And a generic recommendation engine cannot reliably explain why a particular engineering task fits a developer's demonstrated capabilities.
+---
 
-**Pathway tackles this problem by turning code history into connected, evidence-backed engineering knowledge.**
+## 📑 Table of contents
 
-It doesn't treat a developer as a résumé. It models the relationships between their code, engineering demonstrations, capabilities, technical concepts, prerequisites, goals, and verified implementations.
+1. [Architecture](#-architecture)
+2. [Graph data model](#-graph-data-model)
+3. [Graph algorithms](#-graph-algorithms)
+4. [Agent pipeline](#-agent-pipeline)
+5. [Chat agent tools](#-chat-agent-tools)
+6. [Setup instructions](#-setup-instructions)
+7. [Explore the graph](#-explore-the-graph-yourself)
+8. [Troubleshooting](#-troubleshooting)
 
-## What is Pathway?
+---
 
-Pathway is a graph-centric developer intelligence platform built around one core idea:
+## 🏗️ Architecture
 
-> **Engineering capability should be represented as connected evidence, not just a list of skills or a score.**
-
-Pathway analyzes available GitHub history and constructs a persistent engineering knowledge graph using FalkorDB.
-
-The graph connects what exists in the code to what that code demonstrates, how demonstrated capabilities relate to technical concepts, and which dependencies matter when investigating an engineering goal.
-
-Graph queries and algorithms retrieve and analyze that context. AI agents use it to investigate questions, form evidence-backed goals, and plan bounded implementation missions. Verification logic distinguishes proposed work from demonstrated outcomes.
-
-The result is a system that can investigate a developer's engineering knowledge instead of merely describing their activity.
-
-## The core model
-
-```text
-                 GITHUB HISTORY
-                       │
-           ┌───────────┴───────────┐
-           ▼                       ▼
-       Commits                 Repositories
-           │
-           ▼
-      File Changes
-           │
-           ▼
-   Code-Level Evidence
-           │
-           ▼
-    Demonstrations
-           │
-           ▼
-     Capabilities ─────────── Technical Topics
-           │                       │
-           ▼                       ▼
-     Safeguards              Prerequisites
-           │                       │
-           └───────────┬───────────┘
-                       ▼
-              FALKORDB KNOWLEDGE GRAPH
-                       │
-           ┌───────────┼────────────┐
-           ▼           ▼            ▼
-       Graph       Goal Agent   Chat Agent
-      Analysis         │            │
-                       ▼            ▼
-                 Mission Plan   Investigation
-                       │
-                       ▼
-                Code Implementation
-                       │
-                       ▼
-                  Verification
-                       │
-                       ▼
-              New Verified Evidence
-                       │
-                       └──────► Graph Update
+```mermaid
+flowchart LR
+    GH[(GitHub history)] --> DA[Depth Analyzer]
+    DA --> G[(FalkorDB<br/>Knowledge Graph)]
+    G --> GA[Goal Agent]
+    GA -->|Goal + NextMove| G
+    G --> MA[Mission Agent]
+    REPO[Repo inspection<br/>+ gap probe] --> MA
+    MA --> V{Validators}
+    V -->|rejected: retry up to 3x| MA
+    V -->|accepted| M[Mission]
+    M --> DEV[Developer writes<br/>implementation only]
+    DEV --> SB[Sandbox<br/>platform-written tests]
+    SB -->|pass| EV[Verified Demonstration]
+    EV --> G
+    G <--> CH[Chat Agent<br/>16 graph tools]
+    CH --> UI[React + Three Fiber UI]
+    G --> UI
 ```
 
-This is the central distinction: Pathway does not stop at extracting skills from source code. Its architecture connects evidence, knowledge, reasoning, and verified engineering work into one feedback loop.
-
 ---
 
-## The graph is the product
+## 🕸️ Graph data model
 
-FalkorDB is not just a storage layer behind an AI interface. The graph is the foundation on which Pathway organizes and investigates engineering knowledge.
+The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe. It has four connected layers:
 
-### What the graph represents
-
-| Graph entity | What it represents |
-|---|---|
-| Developer | The engineer whose work is being analyzed |
-| Repository | The codebase containing implementation history |
-| Commit | A recorded change to the codebase |
-| FileChange | The implementation evidence associated with a change |
-| Demonstration | Evidence that an implementation exhibits a capability |
-| Capability | A specific engineering ability or mechanism |
-| Topic / Concept | A technical subject and its associated knowledge |
-| Technique / Safeguard | An implementation approach or correctness mechanism |
-| Prerequisite relationship | A dependency between engineering topics or capabilities |
-| Goal | A specific engineering objective |
-| Mission | A bounded implementation task |
-| Verified outcome | An implementation that has passed the defined verification process |
-
-These entities are connected through relationships such as `CHANGED`, `EVIDENCED_BY`, `DEMONSTRATED_IN`, `SUPPORTED_BY`, and `BUILDS_ON`.
-
-That structure allows Pathway to traverse from an engineering claim to its supporting evidence, move between related capabilities, investigate prerequisites, and connect verified work back to the developer's knowledge model.
-
-### Why relationships matter
-
-Consider rate limiting.
-
-Knowing that a repository uses Redis is not, by itself, proof that its developer understands distributed rate limiting.
-
-A more informative investigation would examine the actual implementation, identify the mechanism demonstrated by the code, connect it to the relevant capability, and inspect the supporting evidence.
-
-```text
-Developer
-   │
-   ▼
-Demonstration
-   │
-   ├── EVIDENCED_BY ──► FileChange
-   │                        │
-   │                        ▼
-   │                    Commit
-   │
-   ├── DEMONSTRATES ──► Capability
-   │                        │
-   │                        ▼
-   │                   Technique
-   │
-   └── IN_CONTEXT ────► Repository
-
-Capability
-   │
-   └── BUILDS_ON ─────► Prerequisite Capability
+```mermaid
+flowchart TB
+    subgraph L1[1. Evidence layer]
+        D1[Developer] --> FC[FileChange / Commit / Repository]
+        FC --> DEM[Demonstration / Experience]
+    end
+    subgraph L2[2. Capability taxonomy]
+        CAP[Capability<br/>SPECIALIZES / PREREQUISITE_OF / RELATED_TO]
+    end
+    subgraph L3[3. Topic taxonomy and depth]
+        TOP[Topic<br/>BUILDS_ON / RELATED_TOPIC]
+        DA2[DepthAssessment]
+    end
+    subgraph L4[4. Goal and mission]
+        GOAL[Goal] --> NM[NextMove] --> MIS[Mission] --> EVAL[Evaluation]
+    end
+    DEM -->|OF_CAPABILITY| CAP
+    TOP -->|MAPS_TO| CAP
+    DA2 -->|OF_TOPIC| TOP
+    DA2 -->|BACKED_BY| FC
+    GOAL -->|REQUIRES| CAP
+    NM -->|FOCUSES_ON| TOP
+    NM -->|ADVANCES| CAP
+    NM -->|STARTS_AT| FC
+    EVAL -.->|passing mission creates| DEM
 ```
 
-The graph makes those connections queryable. It can distinguish a directly supported claim from a possible inference, while exposing missing or unavailable evidence instead of silently treating it as proof.
+### Layer 1: Evidence (what the developer actually did)
 
----
-
-## Graph algorithms with specific jobs
-
-Pathway uses graph analysis to answer different structural questions. No single algorithm is treated as a universal measure of engineering ability.
-
-| Method | Role in Pathway |
-|---|---|
-| Graph traversal | Follows relationships to retrieve relevant evidence, capabilities, and prerequisites |
-| Personalized PageRank | Ranks contextual relevance around selected seed topics |
-| Betweenness centrality | Identifies topics that bridge otherwise separate regions of the graph |
-| Community analysis | Examines clusters of related engineering knowledge |
-| Connectivity analysis | Investigates how topics and capabilities connect |
-| Directed prerequisite traversal | Preserves dependency direction when reasoning about what builds on what |
-
-For example, Personalized PageRank can help rank topics relevant to a goal. It does not, by itself, determine whether a developer is qualified for a task.
-
-Likewise, a topic with high betweenness centrality is structurally important to the graph; that does not automatically make it a developer's strongest skill.
-
-**Graph structure supplies context. Evidence supports claims. Agent reasoning turns that context into decisions.**
-
----
-
-## Graph-backed agents
-
-Pathway uses specialized agents over a shared engineering knowledge model. They serve different purposes rather than independently inventing their own versions of a developer's profile.
-
-### Depth analysis
-
-The depth-analysis workflow assesses technical topics using code evidence, topic relationships, and structured judgments.
-
-It combines AI-assisted discovery and assessment with deterministic reconciliation, evidence-strength constraints, and relationship validation.
-
-The purpose is to build a more informative picture of technical knowledge than a flat technology list.
-
-### Goal reasoning
-
-The Goal Agent investigates a specific engineering objective using graph-derived context, available evidence, related capabilities, prerequisites, and prior verified work.
-
-Its output is intended to be a concrete engineering goal grounded in the current codebase and the developer's demonstrated context — not a generic suggestion to learn a technology.
-
-Goal reasoning must distinguish:
-
-- What the graph directly establishes.
-- What the available evidence suggests.
-- What remains unknown or unsupported.
-- Which implementation context justifies the proposed goal.
-
-### Graph-aware chat
-
-The Chat Agent lets developers ask questions about their engineering knowledge and investigate the answers through graph tools.
-
-It can select relevant tools, follow dependent findings, and return evidence, graph paths, confidence, limitations, and actionable conclusions.
-
-Rather than indiscriminately calling every tool, it can adapt its investigation to the question.
-
-### Mission planning
-
-The Mission Planning Agent turns an established engineering goal into a bounded implementation task.
-
-A mission can specify the implementation scope, relevant files, acceptance criteria, required mechanisms, and constraints that must be preserved.
-
-The intention is to produce a task that can be implemented and evaluated against explicit requirements — not an open-ended learning assignment.
-
----
-
-## From code evidence to verified capabilities
-
-Pathway treats engineering progress as a lifecycle.
-
-```text
-OBSERVE
-   │
-   ▼
-Analyze available code evidence
-   │
-   ▼
-MODEL
-   │
-   ▼
-Connect demonstrations, capabilities,
-topics, and prerequisites
-   │
-   ▼
-INVESTIGATE
-   │
-   ▼
-Use graph context to establish
-a specific engineering goal
-   │
-   ▼
-PLAN
-   │
-   ▼
-Define a bounded implementation mission
-   │
-   ▼
-IMPLEMENT
-   │
-   ▼
-Evaluate the resulting code
-   │
-   ▼
-VERIFY
-   │
-   ▼
-Check acceptance criteria and verification evidence
-   │
-   ▼
-UPDATE
-   │
-   ▼
-Record the verified demonstration
-and refresh relevant engineering knowledge
+```mermaid
+erDiagram
+    Developer ||--o{ Commit : MADE
+    Developer ||--o{ FileChange : AUTHORED_CODE
+    Developer ||--o{ Demonstration : DEMONSTRATED
+    Developer ||--o{ Experience : EXPERIENCED
+    Developer }o--o{ Capability : "HAS_CAPABILITY (level)"
+    Developer }o--o{ Skill : HAS_SKILL
+    FileChange ||--o{ Demonstration : PRODUCED
+    Demonstration }o--|| Capability : OF_CAPABILITY
+    Demonstration }o--o{ FileChange : EVIDENCED_BY
+    Demonstration }o--|| Repository : IN_REPOSITORY
+    Demonstration }o--o| EngineeringContext : IN_CONTEXT
+    Demonstration }o--o{ Skill : USES
+    Experience }o--o{ Capability : DEMONSTRATES_CAPABILITY
+    Experience }o--o{ Problem : SOLVES
+    Experience }o--o{ Technique : USES_TECHNIQUE
+    Experience }o--o{ Technology : USES_TECHNOLOGY
+    Experience }o--|| Repository : OCCURS_IN
+    Experience }o--o{ FileChange : EVIDENCED_BY
+    Experience }o--o{ Demonstration : SUPPORTED_BY
+    SkillCategory ||--o{ Skill : CONTAINS
+    Skill }o--o{ Repository : DEMONSTRATED_IN
 ```
 
-A mission being assigned does not prove a capability. A submission being evaluated does not automatically make it verified.
-
-Pathway's mission workflow distinguishes assigned, evaluated, and verified states. Only verified work is eligible to produce a new demonstration in the capability graph; subsequent unverified submissions can retract that demonstration and mark related assessments stale.
-
-This matters because a developer intelligence system must account for changes in the evidence, not simply accumulate positive claims forever.
-
-**The graph should evolve when the underlying engineering evidence changes.**
-
----
-
-## What makes Pathway different?
-
-| Conventional developer tools | Pathway's approach |
+| Node | Key properties |
 |---|---|
-| Track commits and pull requests | Connect implementation history to engineering demonstrations |
-| Present technology lists | Model capabilities and technical relationships |
-| Display isolated scores | Provide evidence and graph context for assessments |
-| Return generic recommendations | Investigate goals using graph-derived engineering context |
-| Generate tasks from prompts | Plan bounded missions with explicit requirements |
-| Treat completion as progress | Distinguish completed work from verified demonstrations |
-| Start conversations with limited context | Reuse persistent, structured engineering knowledge |
+| `Developer` | `id`, `topic_depth_summary_json` (headline and pattern from the last analysis) |
+| `Commit`, `FileChange` | `id`, authored timestamps, `added_code`, language |
+| `Repository` | `id`, name |
+| `Demonstration` | `id`, `technique`, `summary`, `depth`, `depth_rank`, `path`, `commit_sha`, `permalink`, `source` (`"mission"` for mission-verified evidence), `mission_id` |
+| `Experience` | `id`, `fingerprint` (dedupe key) |
 
-These are architectural distinctions, not a claim that Pathway can perfectly infer every developer's abilities. Its conclusions remain dependent on the repositories, code evidence, graph relationships, and verification data available to it.
+> **Verified vs. inferred.** Only edges produced from the developer's own code (`HAS_CAPABILITY`, `DEMONSTRATED`) count as evidence. Structural edges are `basis = "declared"`; anything guessed from goal text or similarity is `basis = "inferred"` and can never satisfy a prerequisite.
+
+### Layer 2: Capability taxonomy (what can be demonstrated)
+
+```mermaid
+erDiagram
+    Capability ||--o{ Capability : SPECIALIZES
+    Capability }o--o{ Capability : "PREREQUISITE_OF (weight, reason)"
+    Capability }o--o{ Capability : "RELATED_TO (weight)"
+    Capability ||--o{ TechniqueSpec : HAS_TECHNIQUE_SPEC
+    TechniqueSpec ||--o{ Safeguard : HAS_SAFEGUARD
+    Concept }o--|| Capability : CANDIDATE_FOR
+```
+
+| Kind | Rule |
+|---|---|
+| **Learnable capability** (`parentId != null`) | Specific, evidence-checkable (e.g. `distributed_locking`, `job_queues`, `idempotent_operations`). Can be demonstrated, required by a goal, and recommended. |
+| **Domain** (`parentId = null`) | Groups learnable capabilities via `SPECIALIZES` (e.g. `concurrency_control`, `async_processing`). Never a prerequisite. |
+| **Concept** | Created from goal text, `basis = "inferred"`. Never demonstrated, never gates a prerequisite. |
+
+### Layer 3: Topic taxonomy and depth assessment
+
+```mermaid
+erDiagram
+    Topic }o--o{ Topic : "BUILDS_ON (strength, basis)"
+    Topic }o--o{ Topic : "RELATED_TOPIC (basis)"
+    Topic }o--o{ Capability : "MAPS_TO (agent_validated)"
+    Developer ||--o{ DepthAssessment : ASSESSED
+    DepthAssessment }o--|| Topic : OF_TOPIC
+    DepthAssessment }o--o{ FileChange : BACKED_BY
+    DepthAssessment }o--o{ Approach : USES_APPROACH
+    Developer }o--o{ Topic : "KNOWS_TOPIC (level, level_rank)"
+```
+
+`Topic` properties: `id`, `slug`, `name`, `domain` (`frontend | backend | database | infrastructure | ai_ml | mobile | general`), `description`, `aliases_text`, plus **algorithm results written back onto the node**:
+
+| Property | Written by |
+|---|---|
+| `foundation_rank` | `algo.pageRank` |
+| `bridge_score` | `algo.betweenness` |
+| `cluster_id` | `algo.labelPropagation` |
+| `component_id` | `algo.WCC` |
+
+**Edge semantics.** `(advanced)-[:BUILDS_ON]->(prerequisite)`: the target should be understood *before* the source. `strength` is `required` (cannot be learned without it) or `helpful`. `basis` is `llm_inferred`, `evidence_overlap`, or `curated`, so no edge is anonymous.
+
+**`DepthAssessment`** (one per developer and topic) carries `level`, `level_rank`, `score`, `confidence`, `authenticity`, `verdict`, `rationale`, `strengths_json`, `gaps_json`, `evidence_refs_json`, `files`, `commits`, `repos`, `active_days`, `first_seen`, `last_seen`.
+
+| Depth level | Rank | Score band |
+|---|---|---|
+| `none` | 0 | 0 |
+| `surface` | 1 | 1 – 19 |
+| `working` | 2 | 20 – 39 |
+| `proficient` | 3 | 40 – 64 |
+| `deep` | 4 | 65 – 100 |
+
+**Authenticity** (was it built, or just present?): `genuine_implementation`, `working_usage`, `incidental`, `boilerplate`, `insufficient_evidence`.
+
+### Layer 4: Goal, NextMove, Mission, Evaluation
+
+```mermaid
+erDiagram
+    Developer ||--o{ Goal : HAS_GOAL
+    Developer ||--o{ Mission : ASSIGNED
+    Goal }o--o{ Capability : "REQUIRES (priority)"
+    Goal }o--o{ Concept : MENTIONS
+    Goal ||--o| NextMove : PROPOSES
+    Goal ||--o{ Mission : HAS_MISSION
+    NextMove }o--o{ Topic : "TARGETS / FOCUSES_ON / LEVERAGES / CLOSES_GAP_IN"
+    NextMove }o--|| Capability : ADVANCES
+    NextMove }o--o| FileChange : STARTS_AT
+    NextMove }o--o{ Demonstration : "BACKED_BY (ref)"
+    Mission }o--|| NextMove : FROM_MOVE
+    Mission }o--|| Capability : ADVANCES
+    Mission }o--o| Topic : FOCUSES_ON
+    Mission }o--o| FileChange : STARTS_AT
+    Mission }o--o{ Demonstration : "BACKED_BY (ref)"
+    Mission }o--|| Repository : IN_REPOSITORY
+    Mission ||--o{ Evaluation : EVALUATED_AS
+```
+
+| Node | Key properties |
+|---|---|
+| `Goal` | `id`, `developer_id`, `wish`, `resolved_by` |
+| `NextMove` | `title`, `summary`, `done_when`, `details_json` (challenge, decision, steps) |
+| `Mission` | `status` (`proposed → in_progress → submitted → …` or `abandoned`), `repository`, `branch`, `base_commit`, `start_path`, `capability_id`, `focus_slug`, `spec_json`, `pin_json`, `explanation_json` |
+| `Evaluation` | `verdict`, `head_commit`, `ci_state`, `summary`, `results_json`, `scope_warnings_json`, `changed_files_json` |
+
+**Design notes**
+
+- A `Mission` stores a **full snapshot** of the move it came from, because planning a new move replaces the goal's `NextMove`.
+- `explanation_json` stores a **trace of the real queries** that ran while loading the move (pattern, Cypher, params, row counts). Nothing is reconstructed afterwards.
+- A passing evaluation writes a new `(Developer)-[:DEMONSTRATED]->(Demonstration {source:"mission"})-[:OF_CAPABILITY]->(Capability)`. This is the **closed loop**: verified work becomes graph evidence.
+
+### Indexes
+
+```cypher
+CREATE INDEX FOR (n:Developer) ON (n.id)
+CREATE INDEX FOR (n:Topic) ON (n.id)
+CREATE INDEX FOR (n:Capability) ON (n.id)
+CREATE INDEX FOR (n:DepthAssessment) ON (n.id)
+CREATE INDEX FOR (n:DepthAssessment) ON (n.developer_id)
+CREATE INDEX FOR (n:DepthAssessment) ON (n.topic_slug)
+CREATE INDEX FOR (n:Demonstration) ON (n.id)
+CREATE INDEX FOR (n:Experience) ON (n.fingerprint)
+CREATE INDEX FOR (n:Goal) ON (n.id)
+-- plus Commit, FileChange, Repository, Approach, Concept, Problem, Technique, Technology ...
+
+CALL db.idx.fulltext.createNodeIndex('Topic', 'name', 'description', 'aliases_text')
+```
 
 ---
 
-## Technology stack
+## 🧮 Graph algorithms
 
-- **TypeScript** — application and backend logic
-- **FalkorDB** — persistent engineering knowledge graph
-- **OpenCypher** — graph querying and traversal
-- **GitHub** — source of repository and implementation history
-- **Graph algorithms** — contextual ranking and structural analysis
-- **AI agents** — evidence investigation, goal reasoning, chat, and mission planning
-- **Validation and verification logic** — structured output checks and verified-work lifecycle
+Ordering and ranking come from **graph position**, not from an LLM-invented score.
 
-## Project status
+| Question | FalkorDB feature | Stored as / tool |
+|---|---|---|
+| What are my foundations? | `algo.pageRank('Topic', 'BUILDS_ON')` (falls back to `RELATED_TOPIC` if no `BUILDS_ON` edges) | `foundation_rank` · `rank_foundations` |
+| What connects my skills? | `algo.betweenness` | `bridge_score` · `find_bridges` |
+| What do I work on together? | `algo.labelPropagation` over `RELATED_TOPIC` | `cluster_id` · `knowledge_communities` |
+| Which areas are disconnected? | `algo.WCC` | `component_id` |
+| How do topic X and Y connect? | `shortestPath((a)-[:BUILDS_ON\|RELATED_TOPIC*1..6]->(b))` | `connect_topics` |
+| How do I get to X? | `BUILDS_ON*1..4` variable-length traversal | `learning_path_to_topic` |
+| What is ready for me? | `BUILDS_ON` traversal + `KNOWS_TOPIC` join | `recommend_next_topics` |
+| What capability is still missing for my goal? | `[:SPECIALIZES\|PREREQUISITE_OF\|RELATED_TO*1..4]` from goal-required capabilities | Goal frontier |
 
-Pathway is an evolving engineering intelligence system. Its core architecture brings together graph-backed knowledge, code evidence, agent-driven investigation, goal formation, mission planning, and verification.
+Metrics are refreshed safely: each metric is computed, written, and **only then** are stale values of that metric removed, so a failed run leaves the previous ranks intact.
 
-The focus is on making engineering knowledge connected, persistent, inspectable, and capable of evolving as new implementations are verified.
+<details>
+<summary><b>Prerequisite roadmap query</b></summary>
 
-## The bigger vision
+```cypher
+MATCH path = (t:Topic {slug: $slug})-[:BUILDS_ON*1..4]->(f:Topic)
+WITH f, min(length(path)) AS hops
+OPTIONAL MATCH (:Developer {id: $dev})-[k:KNOWS_TOPIC]->(f)
+RETURN f.slug AS slug, f.name AS name, hops,
+       coalesce(k.level, "") AS level,
+       coalesce(k.level_rank, -1) AS rank
+```
+</details>
 
-A developer's engineering history should be more than a record of what happened.
+<details>
+<summary><b>Community detection</b></summary>
 
-It should be a model that can answer why an engineering capability is supported, how that capability connects to other knowledge, what evidence is missing, and how new verified work changes the model.
-
-Pathway is building toward that model.
-
-**Not another list of skills. Not another chatbot that reads your repository.**
-
-**A living, graph-backed model of the engineering knowledge expressed through your code.**
+```cypher
+CALL algo.labelPropagation({
+  nodeLabels: ['Topic'],
+  relationshipTypes: ['RELATED_TOPIC'],
+  maxIterations: 10
+})
+YIELD node, communityId
+RETURN node.slug AS slug, communityId
+```
+</details>
 
 ---
 
-*Pathway — Understand the engineering behind your code.*
+## 🤖 Agent pipeline
+
+```mermaid
+flowchart TD
+    S1[1. Depth Analyzer<br/>file changes to topics, depth, authenticity] --> S2[2. Goal Agent<br/>ONE next move with evidence ids]
+    S2 --> S3[3. Mission Agent<br/>implementation-ready mission]
+    S3 --> VAL[validateMission]
+    VAL --> RC[readContract]
+    RC --> CM[criteriaNameMechanism]
+    CM --> ST[stripTesting]
+    ST --> OUT[(Stored Mission)]
+```
+
+### Mission Agent guarantees
+
+- **At most 5 files**, all implementation; `modifyPaths` includes the start file
+- **Exactly 3 acceptance criteria**, each an observable test case the platform runs
+- **3 to 5 steps**: step 1 opens the start file, the last commits and pushes
+- **`grounding.observedNow`**: a verbatim 12-140 char fragment of the real code
+- **`contract`**: library, exported names, key format, TTL, lifecycle, error behavior
+- **Criteria prove the mechanism**: at least 2 name the required library and assert the interaction, so a trivial local `Map` cannot pass
+
+The developer **never writes tests**. The platform generates them from the criteria and runs them in a sandbox, so verification is independent of the person being verified.
+
+### Self-repairing generation loop
+
+```mermaid
+sequenceDiagram
+    participant A as Mission Agent (LLM)
+    participant V as Validators
+    participant DB as FalkorDB
+    loop up to 3 attempts
+        A->>V: JSON mission
+        alt rejected
+            V-->>A: exact rejection reasons + previous reply
+        else accepted
+            V->>DB: store (source = llm or llm_repaired)
+        end
+    end
+    Note over A,V: No LLM configured: status = llm_unavailable, nothing is invented
+```
+
+### Grounding: the gap probe
+
+Before the agent may claim "your code lacks X", Pathway checks `package.json` dependencies, the start file text, and file paths. If anything matches, the agent must describe what the code actually shows instead of claiming a gap.
+
+---
+
+## 🧰 Chat agent tools
+
+16 typed tools, each declaring `name`, `description`, `whenToUse`, the FalkorDB `features` it uses, and a parameter schema. That one declaration feeds the **planner**, the **argument validator** (`parseToolArgs` clamps numbers, enforces enums, drops unknown keys), and the **UI**.
+
+| Tool | Graph capability |
+|---|---|
+| `profile_overview` | DepthAssessment roll-up, PageRank/betweenness ordering |
+| `strongest_topics` | Depth levels and graph position |
+| `find_gaps` | Gaps relative to graph structure |
+| `recommend_next_topics` | `BUILDS_ON` traversal + `KNOWS_TOPIC` join |
+| `learning_path_to_topic` | `BUILDS_ON*1..4` traversal |
+| `rank_foundations` | `algo.pageRank` |
+| `find_bridges` | `algo.betweenness` |
+| `knowledge_communities` | `algo.labelPropagation` |
+| `connect_topics` | `shortestPath` between topics |
+| `explore_neighborhood` | Neighborhood queries |
+| `connectivity_check` | Structural connectivity |
+| `explain_topic` | Topic detail and context |
+| `compare_topics` | Side-by-side structural comparison |
+| `search_topics` | Full-text index on `Topic` |
+| `audit_authenticity` | Genuine vs. superficial usage |
+| `recent_activity` | `last_seen` reads: active vs. gone quiet |
+
+Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun` with the result, latency, and a plain-language `how[]` trail. Tools return structured UI blocks (`roadmap`, `ranking`, `groups`, `timeline`, `stats`, `callout`): the LLM narrates, the graph supplies the facts.
+
+---
+
+## 🧱 Tech stack
+
+| Layer | Technology |
+|---|---|
+| Graph database | **FalkorDB** (Docker), Cypher, built-in graph algorithms |
+| Backend | Node.js, TypeScript (ESM) |
+| AI | LLM agents with validator and repair loops |
+| Frontend | **React**, **Three.js via React Three Fiber** |
+| Verification | Sandboxed, platform-generated tests |
+| Infra | Docker |
+
+---
+
+## 🚀 Setup instructions
+
+### Prerequisites
+
+- **Node.js** 20+ and **npm** (or pnpm / yarn)
+- **Docker** (for FalkorDB)
+- A **GitHub token** (to read commit history)
+- An **LLM API key** (the Mission Agent will not run without one)
+
+### 1. Clone
+
+```bash
+git clone https://github.com/<your-username>/pathway.git
+cd pathway
+```
+
+### 2. Start FalkorDB with Docker
+
+```bash
+docker run -d --name falkordb \
+  -p 6379:6379 \
+  -p 3000:3000 \
+  -v falkordb_data:/var/lib/falkordb/data \
+  falkordb/falkordb:latest
+```
+
+| Port | Purpose |
+|---|---|
+| `6379` | FalkorDB (Redis protocol), used by the backend |
+| `3000` | FalkorDB Browser UI at http://localhost:3000 |
+
+> If port `3000` clashes with another service, map the browser elsewhere, e.g. `-p 3001:3000`.
+
+Verify:
+
+```bash
+docker exec -it falkordb redis-cli PING
+# PONG
+```
+
+**Or with Docker Compose:**
+
+```yaml
+# docker-compose.yml
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: falkordb
+    ports:
+      - "6379:6379"
+      - "3001:3000"
+    volumes:
+      - falkordb_data:/var/lib/falkordb/data
+    restart: unless-stopped
+
+volumes:
+  falkordb_data:
+```
+
+```bash
+docker compose up -d
+```
+
+### 3. Configure the backend
+
+```bash
+cd backend
+cp .env.example .env
+```
+
+```env
+# FalkorDB
+FALKORDB_HOST=localhost
+FALKORDB_PORT=6379
+FALKORDB_GRAPH=pathway
+
+# GitHub
+GITHUB_TOKEN=ghp_xxx
+
+# LLM
+LLM_API_KEY=sk-xxx
+LLM_TIMEOUT_MS=30000
+
+# Optional: log every successful mission query (failures always log)
+MISSION_DEBUG=0
+
+# Server
+PORT=4000
+```
+
+> Variable names are placeholders: match them to your `.env.example`. `LLM_TIMEOUT_MS` and `MISSION_DEBUG` are read by the Mission Agent and graph layer.
+
+### 4. Install and run the backend
+
+```bash
+npm install
+npm run dev
+```
+
+Backend: **http://localhost:4000**. On first run it creates the indexes and the full-text index on `Topic`, and seeds the capability taxonomy.
+
+### 5. Run the frontend
+
+```bash
+cd ../frontend
+npm install
+npm run dev
+```
+
+Frontend: **http://localhost:5173**. The 3D graph explorer uses `three`, `@react-three/fiber`, and `@react-three/drei`:
+
+```bash
+npm install three @react-three/fiber @react-three/drei
+```
+
+### 6. Try the full loop
+
+1. Sign in with GitHub and sync your repositories
+2. Run the **analysis** (Depth Analyzer builds `DepthAssessment`s and `KNOWS_TOPIC` edges, then refreshes PageRank, betweenness, communities and WCC)
+3. Set a **goal** on the Goal page
+4. Get your **next move**, then your **mission**
+5. Implement it, push your branch, and let the sandbox verify it
+6. Watch the graph grow and the celebration screen appear
+
+---
+
+## 🔍 Explore the graph yourself
+
+Open the FalkorDB Browser (http://localhost:3000, or your mapped port) and run:
+
+```cypher
+// A developer's assessed topics and depth
+MATCH (d:Developer)-[:ASSESSED]->(a:DepthAssessment)-[:OF_TOPIC]->(t:Topic)
+RETURN d, a, t LIMIT 50
+
+// Prerequisite structure
+MATCH (a:Topic)-[b:BUILDS_ON]->(f:Topic)
+RETURN a, b, f LIMIT 100
+
+// Foundations by stored PageRank
+MATCH (t:Topic) WHERE t.foundation_rank IS NOT NULL
+RETURN t.name, t.foundation_rank ORDER BY t.foundation_rank DESC LIMIT 10
+
+// Goal to mission chain
+MATCH (g:Goal)-[:PROPOSES]->(n:NextMove)
+OPTIONAL MATCH (g)-[:HAS_MISSION]->(m:Mission)-[:EVALUATED_AS]->(e:Evaluation)
+RETURN g, n, m, e
+
+// Evidence behind a mission-verified capability
+MATCH (d:Developer)-[:DEMONSTRATED]->(x:Demonstration {source: "mission"})-[:OF_CAPABILITY]->(c:Capability)
+RETURN d, x, c
+```
+
+---
+
+## 🛠️ Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `ECONNREFUSED 6379` | FalkorDB is not running: `docker ps`, then `docker start falkordb` |
+| Empty foundation ranking | No `BUILDS_ON` edges yet: re-run the analysis so metrics refresh |
+| Communities show only "Standalone" | Not enough `RELATED_TOPIC` links; the tool falls back to `Topic.cluster_id` |
+| `llm_unavailable` on mission | Set `LLM_API_KEY`; Pathway will not invent a mission without an LLM |
+| `generation_failed` | All 3 repair attempts were rejected: read the rejection notes in the logs |
+| "N of M rows matched nothing" in logs | A `MATCH` in a batch write found no node; check that parent nodes were written first |
+| Port 3000 already in use | Remap the FalkorDB Browser with `-p 3001:3000` |
+| Tool timed out | Tools are capped at 20 s: check graph size and DB health |
+
+---
+
+## 🗺️ Roadmap
+
+- [ ] Team graphs: "who on my team could pair with me on this?" as one query
+- [ ] Mission difficulty calibrated from `hops` and readiness
+- [ ] Decay-aware recommendations from `last_seen` (refresher missions)
+- [ ] More languages and taxonomy coverage
+
+---
+
+## 💡 Design principles
+
+1. **Graph for structure, LLM for judgment**: ordering and readiness come from algorithms
+2. **Ground every claim**: verbatim code, gap probes, evidence ids, stored query traces
+3. **Independent verification**: platform tests run against developer code
+4. **Evidence over assertion**: only verified edges count; inferred edges are labeled
+5. **Self-describing tools**: adding a graph tool is a single file
+
+---
+
+## 🤝 Contributing
+
+1. Fork the repo
+2. `git checkout -b feature/my-feature`
+3. `git commit -m "feat: add my feature"`
+4. Push and open a Pull Request
+
+---
+
+## 📄 License
+
+MIT © Pathway team
+
+<div align="center">
+
+**Built with ❤️ for the FalkorDB Hackathon**
+
+</div>

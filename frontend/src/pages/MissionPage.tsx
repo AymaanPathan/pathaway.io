@@ -1557,15 +1557,15 @@ const GRAPH_STAGES: Array<{ id: string; label: string; note: string }> = [
   },
 ];
 
-const STATUS_HEADLINE: Record<string, string> = {
-  updated: "Your graph just learned from this mission",
-  no_evidence: "Mission passed. No new code evidence was found.",
-  not_verified: "Mission passed, but it was not promoted as evidence.",
-  repository_missing: "Mission passed. The repository link needs attention.",
-  graph_update_failed: "Mission passed. The graph update failed.",
+type GraphNode = {
+  title: string;
+  sub: string;
+  tag: string;
+  fill: string;
+  show: boolean;
 };
 
-/** Full-screen explanation of how a passing mission feeds Pathway's graph. Overview theme. */
+/** Full-screen explanation of how a passing mission feeds Pathway's graph. Only shows data that is non-zero. */
 function GraphUpdateReveal({
   mission,
   run,
@@ -1582,10 +1582,14 @@ function GraphUpdateReveal({
   const status = learning?.evidenceStatus ?? "";
   const updated = status === "updated";
   const failed = status === "graph_update_failed";
+  const learned = updated || gu?.status === "completed";
   const verified = learning?.verification?.verified ?? null;
   const reasons = learning?.verification?.reasons ?? [];
-  const headline =
-    STATUS_HEADLINE[status] ?? "Mission passed. Graph status is unavailable.";
+  const headline = failed
+    ? "Mission passed. The graph update failed."
+    : learned
+      ? "Your graph just learned from this mission"
+      : "Mission complete";
   const doneStages = new Set(gu?.stagesCompleted ?? []);
 
   useEffect(() => {
@@ -1600,73 +1604,90 @@ function GraphUpdateReveal({
     };
   }, [onClose]);
 
-  /* nodes light up only when the backend reports real writes */
-  const lit = updated || (result?.accepted ?? 0) > 0;
-  const nodes = [
-    { x: 80, y: 120, title: "Developer", sub: "you", fill: "#fff" },
+  const detected = result?.detected ?? 0;
+  const accepted = result?.accepted ?? 0;
+  const experiences = result?.experiencesUpdated ?? 0;
+  const capabilities = result?.capabilityRollupsUpdated ?? 0;
+
+  /* only nodes that have real data are drawn */
+  const allNodes: GraphNode[] = [
     {
-      x: 240,
-      y: 60,
+      title: "Developer",
+      sub: "you",
+      tag: "IDENTITY",
+      fill: "#fff",
+      show: true,
+    },
+    {
       title: "Commit",
       sub: short(run.headSha || run.head || "pushed"),
-      fill: doneStages.has("evidence_written") ? LIGHT_GREEN : "#fff",
+      tag: "SOURCE",
+      fill: LIGHT_GREEN,
+      show: Boolean(run.headSha || run.head),
     },
     {
-      x: 400,
-      y: 120,
       title: "FileChange",
-      sub: `${result?.detected ?? 0} detected`,
-      fill: doneStages.has("evidence_written") ? LIGHT_GREEN : "#fff",
+      sub: `${detected} detected`,
+      tag: "CODE",
+      fill: LIGHT_GREEN,
+      show: detected > 0,
     },
     {
-      x: 560,
-      y: 60,
       title: "Demonstration",
-      sub: `${result?.accepted ?? 0} accepted`,
-      fill: lit ? YELLOW : "#fff",
+      sub: `${accepted} accepted`,
+      tag: "PROOF",
+      fill: YELLOW,
+      show: accepted > 0,
     },
     {
-      x: 720,
-      y: 120,
       title: "Experience",
-      sub: `${result?.experiencesUpdated ?? 0} updated`,
-      fill: doneStages.has("aggregates_rebuilt") ? LIGHT_GREEN : "#fff",
+      sub: `${experiences} updated`,
+      tag: "AGGREGATE",
+      fill: LIGHT_GREEN,
+      show: experiences > 0,
     },
     {
-      x: 880,
-      y: 60,
       title: "Capability",
-      sub: `${result?.capabilityRollupsUpdated ?? 0} rollups`,
-      fill: doneStages.has("aggregates_rebuilt") ? GREEN : "#fff",
+      sub: `${capabilities} rollups`,
+      tag: "GROWTH",
+      fill: GREEN,
+      show: capabilities > 0,
     },
   ];
+  const visible = allNodes.filter((n) => n.show);
   const NW = 124;
   const NH = 58;
+  const MARGIN = 80;
+  const W = 960;
+  const step = visible.length > 1 ? (W - MARGIN * 2) / (visible.length - 1) : 0;
+  const nodes = visible.map((n, i) => ({
+    ...n,
+    x: visible.length > 1 ? MARGIN + step * i : W / 2,
+    y: i % 2 === 0 ? 120 : 60,
+  }));
 
   const tiles = [
     {
       label: "Detected",
-      value: result ? String(result.detected) : "–",
+      value: detected,
       note: "code changes with learnable patterns",
     },
     {
       label: "Accepted",
-      value: result ? String(result.accepted) : "–",
-      note: result
-        ? `${result.reviewed} reviewed · ${result.skippedExisting} already known`
-        : "no learning result returned",
+      value: accepted,
+      note: "demonstrations written to the graph",
     },
     {
       label: "Experiences",
-      value: result ? String(result.experiencesUpdated) : "–",
+      value: experiences,
       note: "rebuilt from verified evidence",
     },
     {
       label: "Capabilities",
-      value: result ? String(result.capabilityRollupsUpdated) : "–",
+      value: capabilities,
       note: "rollups recalculated",
     },
-  ];
+  ].filter((t) => t.value > 0);
 
   return (
     <div
@@ -1693,7 +1714,7 @@ function GraphUpdateReveal({
           className="flex items-center justify-between gap-3 px-5 py-3"
           style={{
             borderBottom: `2px solid ${INK}`,
-            backgroundColor: failed ? SOFT_CORAL : updated ? YELLOW : CREAM,
+            backgroundColor: failed ? SOFT_CORAL : learned ? YELLOW : CREAM,
           }}
         >
           <div className="flex min-w-0 items-center gap-3">
@@ -1701,7 +1722,7 @@ function GraphUpdateReveal({
               style={{ ...border, backgroundColor: "#fff" }}
               className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
             >
-              {updated ? <Sparkles size={20} /> : <Check size={20} />}
+              {learned ? <Sparkles size={20} /> : <Check size={20} />}
             </span>
             <div className="min-w-0">
               <p
@@ -1760,22 +1781,14 @@ function GraphUpdateReveal({
                 style={{ fontFamily: DISPLAY }}
                 className="text-[17px] font-bold"
               >
-                Where your evidence went
+                How your graph updated
               </h3>
-              <span
-                className="text-[12px] font-semibold"
-                style={{ color: MUTED }}
-              >
-                {lit
-                  ? "Highlighted nodes were written by the backend."
-                  : "Nothing was promoted, so no node is highlighted."}
-              </span>
             </div>
             <div className="mt-2 overflow-x-auto">
               <svg
                 viewBox="0 0 960 190"
                 role="img"
-                aria-label="Developer to commit, file changes, demonstration, experience and capability"
+                aria-label={`Graph update path: ${nodes.map((n) => n.title).join(", ")}`}
                 className="mx-auto h-auto w-full min-w-[720px]"
               >
                 <defs>
@@ -1806,7 +1819,7 @@ function GraphUpdateReveal({
                   const x2 = b.x - NW / 2 - 4;
                   return (
                     <line
-                      key={i}
+                      key={`${a.title}-${b.title}`}
                       x1={x1}
                       y1={a.y}
                       x2={x2}
@@ -1873,34 +1886,26 @@ function GraphUpdateReveal({
                     >
                       {n.sub}
                     </text>
+                    <text
+                      x={n.x}
+                      y={178}
+                      textAnchor="middle"
+                      fontSize="10"
+                      fontWeight={700}
+                      fill={MUTED}
+                      style={{ fontFamily: MONO, letterSpacing: "0.12em" }}
+                    >
+                      {n.tag}
+                    </text>
                   </g>
-                ))}
-                {[
-                  ["IDENTITY", 80],
-                  ["SOURCE", 240],
-                  ["CODE", 400],
-                  ["PROOF", 560],
-                  ["AGGREGATE", 720],
-                  ["GROWTH", 880],
-                ].map(([t, x]) => (
-                  <text
-                    key={t}
-                    x={x as number}
-                    y={178}
-                    textAnchor="middle"
-                    fontSize="10"
-                    fontWeight={700}
-                    fill={MUTED}
-                    style={{ fontFamily: MONO, letterSpacing: "0.12em" }}
-                  >
-                    {t}
-                  </text>
                 ))}
               </svg>
             </div>
           </section>
 
-          <div className="grid gap-4 lg:grid-cols-[1.1fr_1fr]">
+          <div
+            className={`grid gap-4 ${tiles.length > 0 ? "lg:grid-cols-[1.1fr_1fr]" : ""}`}
+          >
             {/* stages */}
             <section
               style={{ ...border, backgroundColor: "#fff" }}
@@ -1932,7 +1937,7 @@ function GraphUpdateReveal({
                 {GRAPH_STAGES.map((s, i) => {
                   const ok = doneStages.has(s.id);
                   const bad = gu?.failedStage === s.id && !ok;
-                  const skipped = !ok && !bad && !updated && !failed;
+                  const skipped = !ok && !bad && !learned && !failed;
                   return (
                     <li
                       key={s.id}
@@ -1991,43 +1996,42 @@ function GraphUpdateReveal({
               )}
             </section>
 
-            {/* numbers */}
-            <section className="grid grid-cols-2 gap-3">
-              {tiles.map((t, i) => (
-                <div
-                  key={t.label}
-                  className="gr-rise rounded-2xl p-3.5"
-                  style={{
-                    ...border,
-                    backgroundColor: "#fff",
-                    boxShadow: shadow(2),
-                    animationDelay: `${500 + i * 120}ms`,
-                  }}
-                >
+            {/* numbers (zero values are hidden) */}
+            {tiles.length > 0 && (
+              <section className="grid grid-cols-2 gap-3 self-start">
+                {tiles.map((t, i) => (
                   <div
-                    className="text-[10.5px] font-bold uppercase tracking-wider"
-                    style={{ color: MUTED }}
-                  >
-                    {t.label}
-                  </div>
-                  <div
-                    className="mt-1 text-[28px] font-bold leading-none"
+                    key={t.label}
+                    className="gr-rise rounded-2xl p-3.5"
                     style={{
-                      fontFamily: DISPLAY,
-                      color: updated && t.value !== "–" ? GREEN : INK,
+                      ...border,
+                      backgroundColor: "#fff",
+                      boxShadow: shadow(2),
+                      animationDelay: `${500 + i * 120}ms`,
                     }}
                   >
-                    {t.value}
+                    <div
+                      className="text-[10.5px] font-bold uppercase tracking-wider"
+                      style={{ color: MUTED }}
+                    >
+                      {t.label}
+                    </div>
+                    <div
+                      className="mt-1 text-[28px] font-bold leading-none"
+                      style={{ fontFamily: DISPLAY, color: GREEN }}
+                    >
+                      {t.value}
+                    </div>
+                    <div
+                      className="mt-1.5 text-[11.5px] leading-snug"
+                      style={{ color: MUTED }}
+                    >
+                      {t.note}
+                    </div>
                   </div>
-                  <div
-                    className="mt-1.5 text-[11.5px] leading-snug"
-                    style={{ color: MUTED }}
-                  >
-                    {t.note}
-                  </div>
-                </div>
-              ))}
-            </section>
+                ))}
+              </section>
+            )}
           </div>
 
           {verified === false && reasons.length > 0 && (
@@ -2055,9 +2059,7 @@ function GraphUpdateReveal({
               className="max-w-xl text-[12px] leading-snug"
               style={{ color: MUTED }}
             >
-              {updated
-                ? `${result?.accepted ?? 0} accepted, ${result?.rejected.length ?? 0} rejected, ${result?.capabilityRollupsUpdated ?? 0} capability rollup(s) recalculated. These are backend-reported counts.`
-                : "A passing test run alone is never treated as proof. Only verified evidence reaches your capability model."}
+              Only verified evidence reaches your capability model.
             </p>
             <div className="flex flex-wrap gap-2">
               <Link

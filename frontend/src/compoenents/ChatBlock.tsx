@@ -28,6 +28,11 @@ import type { CSSProperties, ReactNode } from "react";
  *
  * Every piece is built by a backend tool from FalkorDB results, so this file
  * only decides how things LOOK. It never interprets or invents data.
+ *
+ * LAYOUT NOTE: the chat panel is narrow (~170px of usable width). The parent
+ * page sets `overflow-wrap: anywhere` on `.chatscroll`, which lets the browser
+ * shrink grid cells to one letter. Both roots below reset it to `break-word`
+ * so this file renders correctly no matter what the page CSS does.
  */
 
 const YELLOW = "#F5C542";
@@ -43,6 +48,13 @@ const WHITE = "#FFFDF8";
 const DISPLAY_FONT = '"Space Grotesk", "Arial Black", sans-serif';
 const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 const border: CSSProperties = { border: `2px solid ${INK}` };
+
+/** Stops the parent's `overflow-wrap: anywhere` from crushing grid/flex cells. */
+const SAFE_WRAP: CSSProperties = {
+  overflowWrap: "break-word",
+  wordBreak: "normal",
+  minWidth: 0,
+};
 
 const LEVEL_COLOR: Record<string, string> = {
   none: "#9ca3af",
@@ -157,11 +169,15 @@ export function Blocks({
 }) {
   if (!blocks.length) return null;
   return (
-    <div className={wide ? "grid gap-4 lg:grid-cols-2" : "space-y-2.5"}>
+    <div
+      className={wide ? "grid gap-4 lg:grid-cols-2" : "space-y-2.5"}
+      style={SAFE_WRAP}
+    >
       {blocks.map((b, i) => (
         <div
           key={`${b.type}-${i}`}
           className={wide && FULL.has(b.type) ? "lg:col-span-2" : ""}
+          style={{ minWidth: 0 }}
         >
           <BlockView block={b} onPick={onPick} wide={wide} />
         </div>
@@ -231,7 +247,7 @@ function Frame({
   return (
     <section
       className="rounded-xl p-3"
-      style={{ backgroundColor: WHITE, ...border }}
+      style={{ backgroundColor: WHITE, ...border, ...SAFE_WRAP }}
     >
       {title && (
         <header className="mb-2">
@@ -274,7 +290,7 @@ function Pill({ t, onPick }: { t: Obj; onPick: (slug: string) => void }) {
       type="button"
       title={s(t.note)}
       onClick={() => (assessed ? onPick(s(t.slug)) : undefined)}
-      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-bold transition-transform hover:-translate-y-0.5"
+      className="inline-flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-0.5 text-left text-[12px] font-bold transition-transform hover:-translate-y-0.5"
       style={{
         backgroundColor: assessed ? WHITE : CARD,
         border: `2px ${assessed ? "solid" : "dashed"} ${INK}`,
@@ -282,9 +298,11 @@ function Pill({ t, onPick }: { t: Obj; onPick: (slug: string) => void }) {
       }}
     >
       <Dot level={t.level} />
-      {s(t.name)}
+      <span className="min-w-0 break-words">{s(t.name)}</span>
       {t.note && (
-        <span className="font-semibold text-neutral-700">· {s(t.note)}</span>
+        <span className="min-w-0 break-words font-semibold text-neutral-700">
+          · {s(t.note)}
+        </span>
       )}
     </button>
   );
@@ -299,6 +317,7 @@ function Callout({ b }: { b: Obj }) {
       style={{
         backgroundColor: WHITE,
         ...border,
+        ...SAFE_WRAP,
         borderLeft: `8px solid ${TONE[s(b.tone)] ?? SKY}`,
       }}
     >
@@ -319,29 +338,62 @@ function Callout({ b }: { b: Obj }) {
 
 /* ------------------------------------------------------------------ stats */
 
+/**
+ * Responsive stat tiles.
+ *  - short values (256, 115, 12, High) become compact tiles that auto-fit
+ *    as many per row as the width allows (2 in the chat panel, up to 6 wide)
+ *  - long text values (Genuine implementation) get a full-width tile so they
+ *    never wrap letter by letter
+ *  - labels only wrap between words
+ */
 function Stats({ b, wide }: { b: Obj; wide: boolean }) {
   const items = arr(b.items);
+  const min = wide ? 110 : 72;
   return (
     <div
-      className={`grid gap-2 ${wide ? "grid-cols-3 sm:grid-cols-6" : "grid-cols-3"}`}
+      className="grid gap-2"
+      style={{
+        gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`,
+        ...SAFE_WRAP,
+      }}
     >
-      {items.map((it, i) => (
-        <div
-          key={i}
-          className="rounded-xl px-2 py-2 text-center"
-          style={{ backgroundColor: WHITE, ...border }}
-        >
+      {items.map((it, i) => {
+        const value = s(it.value);
+        const isShort =
+          /^[\d.,%\s/+\-kKmMxX]+$/.test(value) || value.length <= 6;
+        return (
           <div
-            className="text-[17px] font-black leading-none"
-            style={{ fontFamily: DISPLAY_FONT }}
+            key={i}
+            className="flex min-w-0 flex-col items-center justify-center rounded-xl px-2 py-2.5 text-center"
+            style={{
+              backgroundColor: WHITE,
+              ...border,
+              gridColumn: isShort ? undefined : "1 / -1",
+            }}
           >
-            {s(it.value)}
+            <div
+              className={`font-black leading-tight ${isShort ? "text-[18px]" : "text-[13px]"}`}
+              style={{
+                fontFamily: DISPLAY_FONT,
+                overflowWrap: "break-word",
+                wordBreak: "normal",
+              }}
+            >
+              {value}
+            </div>
+            <div
+              className="mt-1 text-[10px] font-bold uppercase leading-3 tracking-wide text-neutral-700"
+              style={{
+                overflowWrap: "normal",
+                wordBreak: "normal",
+                hyphens: "none",
+              }}
+            >
+              {s(it.label)}
+            </div>
           </div>
-          <div className="mt-1 text-[11px] font-bold uppercase text-neutral-700">
-            {s(it.label)}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -400,10 +452,10 @@ function PathView({ b, onPick }: { b: Obj; onPick: (slug: string) => void }) {
     <Frame title={s(b.title)}>
       <div className="flex flex-wrap items-center gap-y-2">
         {steps.map((st, i) => (
-          <div key={`${st.slug}-${i}`} className="flex items-center">
+          <div key={`${st.slug}-${i}`} className="flex max-w-full items-center">
             <Pill t={st} onPick={onPick} />
             {i < steps.length - 1 && (
-              <span className="mx-1.5 flex flex-col items-center text-[10px] font-black uppercase text-neutral-700">
+              <span className="mx-1.5 flex shrink-0 flex-col items-center text-[10px] font-black uppercase text-neutral-700">
                 <ArrowRight size={14} strokeWidth={3} />
                 {s(st.edge)}
               </span>
@@ -434,7 +486,7 @@ function Issues({ b, onPick }: { b: Obj; onPick: (slug: string) => void }) {
                 borderLeft: `6px solid ${SEVERITY[s(it.severity)] ?? SKY}`,
               }}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span
                   className="rounded-full px-2 py-px text-[10px] font-black uppercase"
                   style={{
@@ -444,7 +496,9 @@ function Issues({ b, onPick }: { b: Obj; onPick: (slug: string) => void }) {
                 >
                   {s(it.severity)}
                 </span>
-                <span className="text-[13px] font-black">{s(it.title)}</span>
+                <span className="min-w-0 text-[13px] font-black">
+                  {s(it.title)}
+                </span>
               </div>
               <p className="mt-1 text-[12px] leading-4 text-neutral-900">
                 {s(it.detail)}
@@ -527,7 +581,7 @@ function Compare({ b, onPick }: { b: Obj; onPick: (slug: string) => void }) {
                 <td className="py-1.5 pr-2 font-black text-neutral-700">
                   {s(r.label)}
                 </td>
-                {(r.values as string[]).map((v, j) => (
+                {((r.values ?? []) as string[]).map((v, j) => (
                   <td
                     key={j}
                     className="px-1.5 py-1.5 font-bold"
@@ -575,7 +629,7 @@ function Roadmap({ b, onPick }: { b: Obj; onPick: (slug: string) => void }) {
                 <button
                   type="button"
                   onClick={() => (st.assessed ? onPick(s(st.slug)) : undefined)}
-                  className="text-[13px] font-black hover:underline"
+                  className="text-left text-[13px] font-black hover:underline"
                   style={{ opacity: status === "known" ? 0.65 : 1 }}
                 >
                   {s(st.name)}
@@ -600,7 +654,7 @@ function Bullets({ b }: { b: Obj }) {
   return (
     <Frame title={s(b.title)}>
       <ul className="space-y-1.5">
-        {(b.items as string[]).map((it, i) => (
+        {((b.items ?? []) as string[]).map((it, i) => (
           <li key={i} className="flex items-start gap-2 text-[12px] leading-4">
             {good ? (
               <CheckCircle2
@@ -611,7 +665,7 @@ function Bullets({ b }: { b: Obj }) {
             ) : (
               <Flame size={14} color={CORAL} className="mt-px shrink-0" />
             )}
-            <span>{it}</span>
+            <span className="min-w-0">{it}</span>
           </li>
         ))}
       </ul>
@@ -633,8 +687,8 @@ function Approaches({ b }: { b: Obj }) {
               borderLeft: `4px solid ${LEVEL_COLOR[s(a.depth)] ?? LINE}`,
             }}
           >
-            <div className="flex flex-wrap items-center justify-between gap-1.5 text-[12px]">
-              <span className="font-black">{s(a.name)}</span>
+            <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[12px]">
+              <span className="min-w-0 font-black">{s(a.name)}</span>
               <span className="font-bold text-neutral-700">
                 {a.primary ? "primary · " : ""}
                 {LEVEL_LABEL[s(a.depth)] ?? s(a.depth)} · {s(a.authenticity)}
@@ -714,10 +768,10 @@ function Section({
   return (
     <section
       className="overflow-hidden rounded-2xl"
-      style={{ backgroundColor: WHITE, ...border }}
+      style={{ backgroundColor: WHITE, ...border, ...SAFE_WRAP }}
     >
       <div
-        className="flex items-center justify-between gap-2 px-3 py-1.5"
+        className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5"
         style={{ backgroundColor: CARD, borderBottom: `2px solid ${INK}` }}
       >
         <span className="text-[11px] font-black uppercase tracking-[.14em] text-neutral-700">
@@ -796,7 +850,7 @@ function ToolChip({
 }) {
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded-full py-0.5 pl-1 pr-2.5 text-[12px] font-bold"
+      className="inline-flex max-w-full flex-wrap items-center gap-1.5 rounded-full py-0.5 pl-1 pr-2.5 text-[12px] font-bold"
       style={{
         backgroundColor: state === "run" ? `${YELLOW}55` : WHITE,
         border: `2px ${state === "miss" ? "dashed" : "solid"} ${INK}`,
@@ -852,17 +906,17 @@ function InvestigationPanel({ inv, findings }: { inv: Obj; findings: Obj[] }) {
   return (
     <details
       className="group overflow-hidden rounded-2xl"
-      style={{ backgroundColor: WHITE, ...border }}
+      style={{ backgroundColor: WHITE, ...border, ...SAFE_WRAP }}
       open={status !== "complete"}
     >
       <summary
-        className="flex cursor-pointer select-none items-center gap-2 px-3 py-2 text-[12px] font-black"
+        className="flex cursor-pointer select-none flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 text-[12px] font-black"
         style={{ backgroundColor: CARD }}
       >
         <ChevronRight
           size={14}
           strokeWidth={3}
-          className="transition-transform group-open:rotate-90"
+          className="shrink-0 transition-transform group-open:rotate-90"
         />
         Investigation
         <span className="font-bold text-neutral-700">
@@ -948,8 +1002,8 @@ function FindingCard({ f }: { f: Obj }) {
         borderLeft: `6px solid ${CONFIDENCE_COLOR[conf] ?? LINE}`,
       }}
     >
-      <div className="flex items-start gap-2">
-        <p className="min-w-0 flex-1 text-[13px] font-black leading-5">
+      <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
+        <p className="min-w-0 flex-1 basis-[140px] text-[13px] font-black leading-5">
           {s(f.claim)}
         </p>
         {conf && (
@@ -977,7 +1031,7 @@ function FindingCard({ f }: { f: Obj }) {
                 className="mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full"
                 style={{ backgroundColor: INK }}
               />
-              <span>{e}</span>
+              <span className="min-w-0">{e}</span>
             </li>
           ))}
         </ul>
@@ -1020,15 +1074,18 @@ function GraphPaths({ paths }: { paths: Obj[] }) {
             <div key={i}>
               <div className="flex flex-wrap items-center gap-y-1.5">
                 {nodes.map((nm, j) => (
-                  <span key={`${nm}-${j}`} className="flex items-center">
+                  <span
+                    key={`${nm}-${j}`}
+                    className="flex max-w-full items-center"
+                  >
                     <span
-                      className="rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+                      className="min-w-0 rounded-full px-2.5 py-0.5 text-[12px] font-bold"
                       style={{ backgroundColor: WHITE, ...border }}
                     >
                       {nm}
                     </span>
                     {j < nodes.length - 1 && (
-                      <span className="mx-1.5 flex flex-col items-center text-[10px] font-black uppercase text-neutral-700">
+                      <span className="mx-1.5 flex shrink-0 flex-col items-center text-[10px] font-black uppercase text-neutral-700">
                         <ArrowRight size={14} strokeWidth={3} />
                         {rels[j] ?? "linked to"}
                       </span>
@@ -1106,7 +1163,11 @@ function NextActions({
                 </span>
               </span>
               {prompt && (
-                <ChevronRight size={14} strokeWidth={3} className="mt-1" />
+                <ChevronRight
+                  size={14}
+                  strokeWidth={3}
+                  className="mt-1 shrink-0"
+                />
               )}
             </button>
           );
@@ -1150,7 +1211,7 @@ export function AiMessage({
   const invStatus = s(inv?.status, "complete");
 
   return (
-    <div className="w-full space-y-2.5">
+    <div className="w-full min-w-0 space-y-2.5" style={SAFE_WRAP}>
       {/* 1. ANSWER (streamed) */}
       <Section label="Answer">
         {text ? (
@@ -1172,7 +1233,11 @@ export function AiMessage({
             className="flex items-center gap-2 text-[13px] font-bold text-neutral-800"
             aria-live="polite"
           >
-            <Loader2 size={14} className="animate-spin" strokeWidth={3} />
+            <Loader2
+              size={14}
+              className="shrink-0 animate-spin"
+              strokeWidth={3}
+            />
             {liveSteps.length
               ? "Reading your graph…"
               : "Working out which graph tools to use…"}
@@ -1192,9 +1257,11 @@ export function AiMessage({
             }}
           >
             <AlertTriangle size={13} className="mt-px shrink-0" />
-            {invStatus === "failed"
-              ? "No graph check completed, so treat this answer as unverified."
-              : "Some checks were empty or incomplete. Open the investigation to see which, before relying on this answer."}
+            <span className="min-w-0">
+              {invStatus === "failed"
+                ? "No graph check completed, so treat this answer as unverified."
+                : "Some checks were empty or incomplete. Open the investigation to see which, before relying on this answer."}
+            </span>
           </p>
         )}
         {m.local && (
@@ -1322,7 +1389,7 @@ export function AiMessage({
                 key={f}
                 type="button"
                 onClick={() => onFollow(f)}
-                className="rounded-full px-2.5 py-0.5 text-[12px] font-bold transition-transform hover:-translate-y-0.5"
+                className="max-w-full rounded-full px-2.5 py-0.5 text-left text-[12px] font-bold transition-transform hover:-translate-y-0.5"
                 style={{ backgroundColor: LAVENDER, ...border }}
               >
                 {f}
@@ -1373,7 +1440,7 @@ function StepList({ steps }: { steps: string[] }) {
           >
             {i + 1}
           </span>
-          <span className="text-[12px] leading-[1.55] text-neutral-900">
+          <span className="min-w-0 text-[12px] leading-[1.55] text-neutral-900">
             {st}
           </span>
         </li>
@@ -1460,7 +1527,7 @@ function ToolCard({ t }: { t: Obj }) {
               {args.map(([k, v]) => (
                 <code
                   key={k}
-                  className="rounded px-1.5 py-px text-[11px]"
+                  className="max-w-full break-all rounded px-1.5 py-px text-[11px]"
                   style={{ backgroundColor: CARD, fontFamily: MONO }}
                 >
                   {k}={s(v)}
@@ -1531,12 +1598,12 @@ export function ToolTrace({
   const used = ran.filter((t) => t.ok && !t.miss).length;
 
   return (
-    <details className="group">
-      <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2.5 text-[12px] font-black">
+    <details className="group" style={SAFE_WRAP}>
+      <summary className="flex cursor-pointer select-none flex-wrap items-center gap-x-2 gap-y-0.5 px-3 py-2.5 text-[12px] font-black">
         <ChevronRight
           size={14}
           strokeWidth={3}
-          className="transition-transform group-open:rotate-90"
+          className="shrink-0 transition-transform group-open:rotate-90"
         />
         Technical trace
         <span className="font-bold text-neutral-700">

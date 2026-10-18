@@ -2,32 +2,75 @@ import { Router } from "express";
 import { getGraphForDeveloper } from "../db/falkordb.js";
 import {
   planGoal,
+  cerebrasClient,
+  gptOssNvidiaClient,
   type GoalPlan,
   type LlmClient,
 } from "../agents/goal-agent.js";
 import { requireAuth, type AuthedRequest } from "../middleware/requireAuth.js";
 import { goalSetLocks } from "./route-context.js";
-import { gptOssNvidiaClient } from "../ai-models/gpt-oss-nvidia.js";
 
 export const goalRouter = Router();
 
 const SLUG = /^[a-z0-9_]{1,60}$/;
 const MAX_GOAL_TOPICS = 4;
 
+/** Tries the fast provider first; on any failure uses the fallback. */
+function withFallback(
+  primary: LlmClient,
+  secondary: LlmClient | null,
+): LlmClient {
+  return {
+    async complete(req) {
+      try {
+        return await primary.complete(req);
+      } catch (error) {
+        if (!secondary) throw error;
+        console.warn(
+          "[goal-route] primary LLM failed, using fallback:",
+          error instanceof Error ? error.message : error,
+        );
+        return secondary.complete(req);
+      }
+    },
+  };
+}
+
+function tryClient(
+  name: string,
+  enabled: boolean,
+  make: () => LlmClient,
+): LlmClient | null {
+  if (!enabled) return null;
+  try {
+    return make();
+  } catch (error) {
+    console.warn(
+      `[goal-route] ${name} unavailable:`,
+      error instanceof Error ? error.message : error,
+    );
+    return null;
+  }
+}
+
 // Created on first use so a missing key surfaces as the agent's
 // "llm_unavailable" status (HTTP 503) instead of failing at server start.
 let llmClient: LlmClient | null | undefined;
 function getLlm(): LlmClient | null {
   if (llmClient !== undefined) return llmClient;
-  try {
-    llmClient = gptOssNvidiaClient();
-  } catch (error) {
-    console.warn(
-      "[goal-route] LLM unavailable:",
-      error instanceof Error ? error.message : error,
-    );
-    llmClient = null;
-  }
+  // use your real Cerebras env var name here if it differs
+  const cerebras = tryClient(
+    "cerebras",
+    Boolean(process.env.CEREBRAS_API_KEY),
+    cerebrasClient,
+  );
+  const nvidia = tryClient(
+    "nvidia",
+    Boolean(process.env.NVIDIA_API_KEY),
+    gptOssNvidiaClient,
+  );
+  llmClient = cerebras ? withFallback(cerebras, nvidia) : nvidia;
+  if (!llmClient) console.warn("[goal-route] no LLM provider configured");
   return llmClient;
 }
 

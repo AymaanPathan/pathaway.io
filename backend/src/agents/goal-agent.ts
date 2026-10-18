@@ -1,8 +1,6 @@
 import type { Graph } from "../db/falkordb.js";
-import { groq, GROQ_MODEL } from "../ai-models/groq.js";
 import { listTopicCatalog } from "../graph/depth-analyzer-graph.js";
 import {
-  briefForAgent,
   buildGoalGraph,
   storeNextMove,
   type EvidenceItem,
@@ -56,7 +54,7 @@ export interface LlmClient {
 export function cerebrasClient(): LlmClient {
   return {
     async complete(req: LlmRequest): Promise<string> {
-     const json = req.json ?? false;
+      const json = req.json ?? false;
 
       const response = await cerebras.chat.completions.create(
         {
@@ -70,6 +68,9 @@ export function cerebrasClient(): LlmClient {
           ...(json
             ? { response_format: { type: "json_object" as const } }
             : {}),
+          // less hidden reasoning = far fewer tokens and much faster.
+          // Remove this line if your SDK rejects the field.
+          ...({ reasoning_effort: "low" } as object),
         },
         { signal: req.signal },
       );
@@ -96,10 +97,12 @@ export function gptOssNvidiaClient(): LlmClient {
             { role: "system", content: req.system },
             { role: "user", content: req.user },
           ],
+          // Remove this line if your SDK rejects the field.
+          ...({ reasoning_effort: "low" } as object),
         },
         {
           signal: req.signal,
-          maxRetries: 2,
+          maxRetries: 1,
         },
       );
 
@@ -617,151 +620,101 @@ export interface PlanGoalInput {
   wish: string;
   goalTopics?: string[];
   persist?: boolean;
-  /** per LLM request (default LLM_TIMEOUT_MS or 60s) */
+  /** per LLM request (default LLM_TIMEOUT_MS or 25s) */
   timeoutMs?: number;
-  /** transport retries per request (default LLM_MAX_RETRIES or 2, max 5) */
+  /** transport retries per request (default LLM_MAX_RETRIES or 1, max 5) */
   maxRetries?: number;
-  /** total LLM time budget for one call including retries (default LLM_TOTAL_BUDGET_MS or 120s) */
+  /** total LLM time budget for one call including retries (default LLM_TOTAL_BUDGET_MS or 45s) */
   budgetMs?: number;
   /** caller cancellation */
   signal?: AbortSignal;
 }
 
 /* ========================================================================== */
-/* PROMPT                                                                     */
+/* PROMPT (small input, compact output; the server expands it into a Draft)   */
 /* ========================================================================== */
 
-const SYSTEM = `You are the decision maker of a developer-growth agent. A knowledge graph gives you DATA about one developer: topics, related topics, groups of topics, assessed depth, what they built, safeguards, capabilities with demonstration counts, and real code. The graph never chooses. You do.
-
-Your job: decide the ONE next engineering move that moves this developer toward their goal, then turn it into a concrete task, and explain the choice so a reader can check it against the evidence.
-
-How to decide:
-1. Read what the developer has actually built (evidence + code) and how deep it is.
-2. Look at related topics, groups and capabilities for the real options: deepen a mechanism they already built, fix a failure you can see, or extend into a related topic.
-3. Weigh at least two alternatives against the move you choose.
-4. Do NOT choose because a number is high (files, commits, repos, relevance). Those only describe volume.
-5. "0 demonstrations" or "not assessed" means no evidence was found. It is NOT a proven weakness.
-6. The developer named a topic (see resolvedBy.seeds). Your focusSlug MUST be one of those seed topics, unless resolvedBy.method is "domain". Related topics are context: use them in buildsOnSlugs or gapSlugs, never as the focus. Evidence with no capability or technique is still real authored code: you may start from it.
-7. Reason approach by approach. Each topic lists its approaches with their own depth, authenticity, hardening and gaps. Pick the approach your move changes (decision.approachSlug, copied from the data). Only when the move adds an approach that does not exist yet, set approachSlug to null and give its name in decision.newApproach (it must differ from every listed approach).
-8. Separate what you know. basis.observed: what the data and code show, citing evidence ids. basis.inferred: what you conclude from it. basis.missing: what has no evidence yet. Missing evidence is not proof of weakness; never state a weakness as fact unless the code shows it.
-9. completedMoves lists missions this developer already verified. Do not repeat or lightly reword one.
-10. Reuse before you add. If the CODE or evidence already contains a server, client, store, route or module that can carry the new behaviour, EXTEND it. List the evidence ids of the existing code you extend in decision.reuses, and say in decision.builds what is reused, what changes, and what new behaviour the task introduces.
-11. Compare candidates. decision.considered needs at least two real alternatives. For each give the evidence ids that support or limit it, the trade-off, and why you did not take it. At least one alternative must be based on DIFFERENT code than your move (an evidence id that is not in decision.reuses) and must fix a failure you can see there. An alternative that is just a smaller version of your own move does not count.
-12. decision.whyOverAlternatives must cite evidence ids and state what would change your choice. Do not claim your move is "best", "optimal" or "most important".
-13. decision.progression: "existing" lists capabilities that already exist (cite E# ids), "change" is the proposed new behaviour, "verified" is the observable result that will be checked.
-14. FIX A FAILURE YOU CAN SEE. challenge.failureScenario must describe a concrete situation (an input, event or state) in which the code shown in CODE behaves wrongly, and what happens instead of the right behaviour. Good gap types: code that exists but is never called; a failure path with no handling; a hard-coded value that breaks a real case; two code paths that disagree. NOT allowed: adding an optional parameter, strategy, option or configuration "for flexibility", learning exercises, or anything justified by practice, extensibility or "only supports X". If the first excerpt shows no failure, read the other excerpts before choosing.
-15. HISTORY. Only claim past work that appears in "history", previousMove or completedMoves. If history.verifiedMissions is 0 and previousMoveForThisGoal is false, nothing was done before: never write "previous move", "earlier mission" or "already addressed".
-16. ESTIMATED ASSESSMENTS. A topic with assessmentEstimated true has a level guessed from counts, with no model judgement. Do not use that level as a reason. Cite code instead.
-17. Evidence marked newerVersionExists has no code on purpose: a newer version of that file is listed as its own evidence item. Start from evidence with hasCode true.
-18. observedInCode must be copied exactly from the code, with no ellipsis and no added words.
-
-Reply with JSON only, exactly this shape:
-{
- "decision": {
-  "focusSlug": "<topic slug from the data>",
-  "capabilityId": "<capability id from the data or null>",
-  "approachSlug": "<approach slug of the focus topic from the data that this move changes, or null when adding a new approach>",
-  "newApproach": "<name of the new approach when approachSlug is null, else empty>",
-  "buildsOnSlugs": ["<proven topic slugs this builds on>"],
-  "gapSlugs": ["<topic slugs whose gap this closes, may be empty>"],
-  "why": "<2-3 sentences: why THIS move, citing evidence ids like E4>",
-  "evidenceIds": ["E#", "..."],
-  "reuses": ["<E# of existing code this move extends; each must also be in evidenceIds>"],
-  "builds": {
-   "reused": "<what existing code/mechanism is reused, citing E#>",
-   "changes": "<what in that code changes>",
-   "newBehavior": "<the new behaviour the task introduces>"
-  },
-  "basis": {"observed": "<what the data and code show, citing E# ids>", "inferred": "<what you conclude from it>", "missing": "<what has no evidence yet, or empty>"},
-  "considered": [{"option": "<alternative you weighed>", "evidenceIds": ["E#"], "tradeoff": "<what it would give and cost>", "whyNot": "<why you did not take it>"}],
-  "whyOverAlternatives": "<why this move over the alternatives, citing E# ids, and what would change the choice>",
-  "progression": {"existing": ["<existing capability, citing E#>"], "change": "<proposed change>", "verified": "<observable outcome that will be checked>"}
- },
- "challenge": {
-  "mechanism": "<the exact mechanism being changed or added, one sentence>",
-  "existingEvidenceId": "<E# of code you are starting from; must have code in CODE and be in decision.reuses>",
-  "observedInCode": "<VERBATIM fragment, 12-140 chars, copied from that evidence's code, where the problem shows>",
-  "limitation": "<what that code does wrong or leaves unhandled, 1-2 sentences, behaviour not 'no tests' and not 'only supports X'>",
-  "failureScenario": "<a concrete situation where the shown code misbehaves and what happens instead, 40+ chars>"
- },
- "task": {
-  "objective": "<starts with a verb, 12-120 chars, names the specific mechanism>",
-  "startPath": "<exactly the path of existingEvidenceId>",
-  "steps": ["<3 to 5 specific steps; step 1 opens startPath and names functions/behaviour from the code>"],
-  "doneWhen": "<ONE observable condition a test, command or review can check>"
- }
-}
+const SYSTEM = `You choose ONE next engineering move for a developer from DATA and CODE. Reply with JSON only.
 Rules:
-- Use only slugs, capability ids and evidence ids that appear in the data. Every slug in buildsOnSlugs needs at least one of its evidence ids in decision.evidenceIds.
-- Do not invent files, functions or capabilities. Only reference code shown in CODE.
-- Do not repeat something already built (see evidence techniques), the previousMove or a completedMoves entry.
-- Forbidden phrases: "one level deeper", "add a test for the new case", "close this gap", "best practices", generic refactors.`;
+- focusSlug must be one of "seeds" (unless method is "domain").
+- Fix a failure VISIBLE in CODE: unhandled error, dead code, hard-coded value that breaks a real case, two paths that disagree. Not options, flexibility, practice or tests-for-completeness.
+- reuseId is an evidence id with hasCode=true. observedInCode is copied verbatim (12-140 chars) from that code.
+- Use only slugs, capability ids and evidence ids from DATA. Do not repeat "done" or "previous". Only mention past work if "hasHistory" is true.
+- approachSlug is the approach of the focus topic your move changes (from DATA), or null plus newApproach.
+Shape:
+{"focusSlug":"","capabilityId":null,"approachSlug":null,"newApproach":"","buildsOnSlugs":[],"gapSlugs":[],
+"why":"2 sentences citing E#","reuseId":"E#","evidenceIds":["E#"],
+"observedInCode":"","limitation":"what that code does wrong","failureScenario":"concrete input/state where it misbehaves and what happens instead",
+"objective":"verb first, 12-120 chars","steps":["3-4 specific steps, step 1 opens the file"],"doneWhen":"one checkable condition",
+"alternative":{"option":"","evidenceId":"E#","whyNot":""}}`;
 
-function compactForPrompt(value: unknown, key = ""): unknown {
-  if (typeof value === "string") {
-    const limit = /excerpt|code/i.test(key)
-      ? 350
-      : /description|summary|reason|history/i.test(key)
-        ? 180
-        : 120;
+function renderUser(result: GoalGraphResult): string {
+  const seeds = new Set(result.resolution.seeds.map((s) => s.slug));
+  const codeIds = new Set(result.code.map((c) => c.evidenceId));
 
-    return clip(value, limit);
-  }
+  const topics = [...result.topics]
+    .sort(
+      (a, b) =>
+        Number(seeds.has(b.slug)) - Number(seeds.has(a.slug)) ||
+        b.relevance - a.relevance,
+    )
+    .slice(0, 6);
+  const topicSlugs = new Set(topics.map((t) => t.slug));
 
-  if (Array.isArray(value)) {
-    const limit = /code/i.test(key)
-      ? 4
-      : /evidence/i.test(key)
-        ? 14
-        : /link/i.test(key)
-          ? 10
-          : /completedMoves|history/i.test(key)
-            ? 5
-            : /approaches|strengths|gaps|topics|seeds/i.test(key)
-              ? 8
-              : 8;
+  const evidence = result.evidence
+    .filter((e) => codeIds.has(e.id) || topicSlugs.has(e.topicSlug))
+    .sort((a, b) => Number(codeIds.has(b.id)) - Number(codeIds.has(a.id)))
+    .slice(0, 8);
 
-    return value.slice(0, limit).map((item) => compactForPrompt(item, key));
-  }
+  const data = {
+    goal: clip(result.wish, 200),
+    seeds: [...seeds],
+    method: result.resolution.method,
+    topics: topics.map((t) => ({
+      slug: t.slug,
+      name: t.name,
+      level:
+        t.depth.assessed && !t.depth.estimated ? t.depth.level : "unassessed",
+      gaps: t.depth.gaps.slice(0, 2).map((g) => clip(g, 100)),
+      approaches: t.depth.approaches
+        .slice(0, 3)
+        .map((a) => ({ slug: a.slug, name: a.name, depth: a.depth })),
+    })),
+    capabilities: result.coverage
+      .filter((c) => seeds.has(c.topicSlug))
+      .slice(0, 8)
+      .map((c) => ({
+        id: c.capabilityId,
+        name: c.capability,
+        demos: c.demonstrations,
+      })),
+    evidence: evidence.map((e) => ({
+      id: e.id,
+      topic: e.topicSlug,
+      path: e.path,
+      capabilityId: e.capabilityId || null,
+      technique: clip(e.technique, 60),
+      hasCode: codeIds.has(e.id),
+    })),
+    done: result.completedMoves.slice(0, 5).map((m) => clip(m.title, 80)),
+    previous: result.previousMove?.title ?? null,
+    hasHistory:
+      Boolean(result.previousMove) || result.completedMoves.length > 0,
+  };
 
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([k, v]) => [
-        k,
-        compactForPrompt(v, k),
-      ]),
-    );
-  }
-
-  return value;
-}
-
-function renderUser(brief: Row): string {
-  const { code, ...data } = brief;
-
-  const compactData = compactForPrompt(data);
-
-  const blocks = (
-    Array.isArray(code)
-      ? (code as Array<{
-          evidenceId: string;
-          path: string;
-          excerpt: string;
-        }>)
-      : []
-  )
-    .slice(0, 4)
+  const blocks = result.code
+    .slice(0, 3)
     .map(
       (c) =>
-        `[${c.evidenceId}] ${c.path}\n\`\`\`\n${clip(c.excerpt, 350)}\n\`\`\``,
+        `[${c.evidenceId}] ${c.path}\n\`\`\`\n${clip(c.excerpt, 600)}\n\`\`\``,
     )
     .join("\n\n");
 
-  return `DATA:\n${JSON.stringify(compactData)}\n\nCODE (the only code you may quote):\n${blocks || "(none)"}`;
+  return `DATA:\n${JSON.stringify(data)}\n\nCODE (only code you may quote):\n${blocks || "(none)"}`;
 }
 
 /* ========================================================================== */
-/* VALIDATION                                                                 */
+/* VALIDATION: auto-fix what code can fix, reject only what it cannot         */
 /* ========================================================================== */
 
 const GENERIC =
@@ -769,8 +722,6 @@ const GENERIC =
 const CHECKABLE =
   /\b(test|asserts?|returns?|responds?|status|header|logs?|emits?|throws?|rejects?|retries|retried|fails?|passes|exits?|calls?|equals?|within|at most|at least|exactly)\b/i;
 const PATH_TOKEN = /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]{1,6}/g;
-const SUPERLATIVE =
-  /\b(the best|best option|best choice|optimal|most important|clearly better|obviously)\b/i;
 /** reasons that describe a nice-to-have or a learning exercise, not a failure */
 const NICE_TO_HAVE =
   /\b(practice|exercise|learn(ing)?|extensib(le|ility)|flexib(le|ility)|nice[- ]to[- ]have|future[- ]?proof|might want|may want|in case|for completeness)\b/i;
@@ -799,371 +750,222 @@ export function nearDuplicate(a: string, b: string): boolean {
   return shared / Math.min(A.size, B.size) >= 0.8;
 }
 
-function readDraft(raw: Row | null): Draft | null {
-  if (!raw) return null;
-  const d = (raw.decision ?? {}) as Row;
-  const c = (raw.challenge ?? {}) as Row;
-  const t = (raw.task ?? {}) as Row;
-  const b = (d.builds ?? {}) as Row;
-  const p = (d.progression ?? {}) as Row;
-  const considered: ConsideredOption[] = (
-    Array.isArray(d.considered) ? d.considered : []
-  )
-    .map((x: Row) => ({
-      option: str(x?.option),
-      whyNot: str(x?.whyNot),
-      tradeoff: str(x?.tradeoff),
-      evidenceIds: strList(x?.evidenceIds, 6).map((id) => id.toUpperCase()),
-    }))
-    .filter((x: ConsideredOption) => x.option && x.whyNot)
-    .slice(0, 4);
-  return {
-    decision: {
-      focusSlug: str(d.focusSlug),
-      capabilityId:
-        str(d.capabilityId) && str(d.capabilityId) !== "null"
-          ? str(d.capabilityId)
-          : null,
-      approachSlug:
-        str(d.approachSlug) && str(d.approachSlug) !== "null"
-          ? str(d.approachSlug)
-          : null,
-      newApproach:
-        str(d.newApproach) && str(d.newApproach) !== "null"
-          ? str(d.newApproach)
-          : null,
-      basis: {
-        observed: str((d.basis as Row | undefined)?.observed),
-        inferred: str((d.basis as Row | undefined)?.inferred),
-        missing: str((d.basis as Row | undefined)?.missing),
-      },
-      buildsOnSlugs: strList(d.buildsOnSlugs, 4),
-      gapSlugs: strList(d.gapSlugs, 4),
-      why: str(d.why),
-      evidenceIds: strList(d.evidenceIds, 8).map((x) => x.toUpperCase()),
-      reuses: strList(d.reuses, 6).map((x) => x.toUpperCase()),
-      builds: {
-        reused: str(b.reused),
-        changes: str(b.changes),
-        newBehavior: str(b.newBehavior ?? b.new_behavior),
-      },
-      whyOverAlternatives: str(d.whyOverAlternatives),
-      progression: {
-        existing: strList(p.existing, 5),
-        change: str(p.change),
-        verified: str(p.verified),
-      },
-      considered,
-    },
-    challenge: {
-      mechanism: str(c.mechanism),
-      existingEvidenceId: str(c.existingEvidenceId).toUpperCase(),
-      observedInCode: str(c.observedInCode),
-      limitation: str(c.limitation),
-      failureScenario: str(c.failureScenario),
-    },
-    task: {
-      objective: clip(str(t.objective).replace(/\s+/g, " "), 140),
-      startPath: str(t.startPath),
-      steps: strList(t.steps, 6),
-      doneWhen: str(t.doneWhen ?? t.done_when),
-    },
-  };
-}
+type Finalized =
+  | { ok: true; draft: Draft; fixes: string[] }
+  | { ok: false; errors: string[] };
 
-function validate(
-  raw: Row | null,
-  result: GoalGraphResult,
-): { ok: true; draft: Draft } | { ok: false; errors: string[] } {
-  const draft = readDraft(raw);
-  if (!draft) return { ok: false, errors: ["the reply was not valid JSON"] };
-  const errors: string[] = [];
-  const { decision: d, challenge: c, task: t } = draft;
-
-  const topics = new Map(result.topics.map((x) => [x.slug, x]));
+function finalize(raw: Row | null, result: GoalGraphResult): Finalized {
+  if (!raw) return { ok: false, errors: ["the reply was not valid JSON"] };
+  const fixes: string[] = [];
+  const topics = new Map(result.topics.map((t) => [t.slug, t]));
   const evidence = new Map(result.evidence.map((e) => [e.id, e]));
-  const codeBy = new Map(result.code.map((x) => [x.evidenceId, x]));
-  const capabilities = new Set(result.coverage.map((x) => x.capabilityId));
+  const codeBy = new Map(result.code.map((c) => [c.evidenceId, c]));
+  const seeds = result.resolution.seeds.map((s) => s.slug);
+  const ids = (v: unknown) => strList(v, 8).map((x) => x.toUpperCase());
 
-  if (!topics.has(d.focusSlug))
-    errors.push(
-      `decision.focusSlug "${d.focusSlug}" is not a topic slug in the data`,
-    );
+  // reuse evidence: must have code, otherwise pick one ourselves
+  let reuseId = str(raw.reuseId ?? raw.existingEvidenceId).toUpperCase();
+  if (!codeBy.has(reuseId)) {
+    const fb =
+      result.code.find((c) =>
+        seeds.includes(evidence.get(c.evidenceId)?.topicSlug ?? ""),
+      ) ?? result.code[0];
+    if (!fb) return { ok: false, errors: ["no code excerpt available"] };
+    fixes.push(`reuseId "${reuseId}" has no code, used ${fb.evidenceId}`);
+    reuseId = fb.evidenceId;
+  }
+  const code = codeBy.get(reuseId)!;
+  const anchor = evidence.get(reuseId)!;
 
-  const seedSlugs = result.resolution.seeds.map((s) => s.slug);
+  // focus
+  let focus = str(raw.focusSlug);
+  const needSeed = result.resolution.method !== "domain";
+  if (!topics.has(focus) || (needSeed && !seeds.includes(focus))) {
+    const next = seeds.includes(anchor.topicSlug)
+      ? anchor.topicSlug
+      : (seeds.find((s) => topics.has(s)) ?? seeds[0] ?? "");
+    fixes.push(`focusSlug "${focus}" replaced by ${next}`);
+    focus = next;
+  }
+  if (!topics.has(focus))
+    return { ok: false, errors: ["no valid focus topic"] };
+
+  // approach
+  const approaches = topics.get(focus)!.depth.approaches;
+  let approachSlug = str(raw.approachSlug);
   if (
-    result.resolution.method !== "domain" &&
-    topics.has(d.focusSlug) &&
-    !seedSlugs.includes(d.focusSlug)
+    approachSlug === "null" ||
+    !approaches.some((a) => a.slug === approachSlug)
   )
-    errors.push(
-      `decision.focusSlug must be one of the topics the developer asked about (${seedSlugs.join(", ")}); use related topics only in buildsOnSlugs or gapSlugs`,
-    );
-
-  if (d.capabilityId && !capabilities.has(d.capabilityId))
-    errors.push(
-      `decision.capabilityId "${d.capabilityId}" is not a capability id in the data (use null if none)`,
-    );
-  for (const s of d.buildsOnSlugs)
-    if (!topics.has(s))
-      errors.push(`buildsOnSlugs "${s}" is not a topic slug in the data`);
-  for (const s of d.gapSlugs)
-    if (!topics.has(s))
-      errors.push(`gapSlugs "${s}" is not a topic slug in the data`);
-
-  const badIds = d.evidenceIds.filter((id) => !evidence.has(id));
-  if (badIds.length)
-    errors.push(`evidenceIds not in the data: ${badIds.join(", ")}`);
-  if (!d.evidenceIds.length)
-    errors.push("decision.evidenceIds must cite at least one evidence id");
-  for (const s of d.buildsOnSlugs) {
-    if (!topics.has(s)) continue;
-    const backed = d.evidenceIds.some(
-      (id) => evidence.get(id)?.topicSlug === s,
-    );
-    if (!backed)
-      errors.push(
-        `buildsOnSlugs "${s}" has no evidence id from that topic in decision.evidenceIds`,
-      );
-  }
-  if (d.why.length < 30) errors.push("decision.why is missing or too short");
-
-  // ---- approach: name the one you change, or name a genuinely new one ----
-  const focusApproaches = topics.get(d.focusSlug)?.depth.approaches ?? [];
-  if (d.approachSlug) {
-    if (!focusApproaches.some((a) => a.slug === d.approachSlug))
-      errors.push(
-        `decision.approachSlug "${d.approachSlug}" is not an approach of ${d.focusSlug} in the data (${focusApproaches.map((a) => a.slug).join(", ") || "none assessed"}); use null and decision.newApproach when adding a new approach`,
-      );
-  } else if (focusApproaches.length) {
-    const fresh = d.newApproach ?? "";
-    if (fresh.length < 10)
-      errors.push(
-        `decision.approachSlug is null: set decision.newApproach to the name of the approach you add. Existing approaches: ${focusApproaches.map((a) => `${a.slug} (${a.name})`).join(", ")}. If your move changes one of them, set approachSlug to it instead`,
-      );
-    else if (
-      focusApproaches.some(
-        (a) => nearDuplicate(a.name, fresh) || a.slug === fresh,
-      )
-    )
-      errors.push(
-        `decision.newApproach "${clip(fresh, 40)}" matches an existing approach; set decision.approachSlug to that approach instead`,
-      );
+    approachSlug = "";
+  let newApproach = str(raw.newApproach);
+  if (newApproach === "null") newApproach = "";
+  if (
+    !approachSlug &&
+    approaches.length &&
+    (newApproach.length < 10 ||
+      approaches.some(
+        (a) => nearDuplicate(a.name, newApproach) || a.slug === newApproach,
+      ))
+  ) {
+    approachSlug = (approaches.find((a) => a.isPrimary) ?? approaches[0]!).slug;
+    newApproach = "";
   }
 
-  // observed vs inferred vs missing, with evidence ids behind the observation
-  const observedIds = (d.basis.observed.match(/\bE\d+\b/gi) ?? []).map((x) =>
-    x.toUpperCase(),
+  const evidenceIds = uniq(
+    [reuseId, ...ids(raw.evidenceIds)].filter((id) => evidence.has(id)),
   );
-  if (d.basis.observed.length < 20 || !observedIds.length)
-    errors.push(
-      "decision.basis.observed must state what the data shows and cite at least one evidence id (E#)",
-    );
-  else if (observedIds.some((id) => !evidence.has(id)))
-    errors.push(
-      "decision.basis.observed cites an evidence id that is not in the data",
-    );
-  if (d.basis.inferred.length < 15)
-    errors.push(
-      "decision.basis.inferred must state what you conclude from the observation",
-    );
-
-  // ---- reuse: extend what exists instead of rebuilding it ----
-  if (!d.reuses.length)
-    errors.push(
-      "decision.reuses must list the evidence ids of the existing code this move extends",
-    );
-  else {
-    const badReuse = d.reuses.filter((id) => !evidence.has(id));
-    if (badReuse.length)
-      errors.push(`decision.reuses not in the data: ${badReuse.join(", ")}`);
-    const notCited = d.reuses.filter(
-      (id) => evidence.has(id) && !d.evidenceIds.includes(id),
-    );
-    if (notCited.length)
-      errors.push(
-        `decision.evidenceIds must include every reuses id (missing: ${notCited.join(", ")})`,
-      );
-    if (c.existingEvidenceId && !d.reuses.includes(c.existingEvidenceId))
-      errors.push(
-        `decision.reuses must include challenge.existingEvidenceId (${c.existingEvidenceId}): the task starts from code that already exists`,
-      );
-  }
-  if (
-    d.builds.reused.length < 15 ||
-    d.builds.changes.length < 15 ||
-    d.builds.newBehavior.length < 15
-  )
-    errors.push(
-      "decision.builds needs reused, changes and newBehavior, each a real sentence (15+ chars)",
-    );
-
-  // ---- candidate comparison ----
-  if (d.considered.length < 2)
-    errors.push(
-      "decision.considered must list at least two real alternatives you weighed",
-    );
-  for (const alt of d.considered) {
-    const bad = alt.evidenceIds.filter((id) => !evidence.has(id));
-    if (bad.length)
-      errors.push(
-        `alternative "${clip(alt.option, 40)}" cites evidence ids not in the data: ${bad.join(", ")}`,
-      );
-    if (alt.tradeoff.length < 20)
-      errors.push(
-        `alternative "${clip(alt.option, 40)}" needs a tradeoff (what it would give and cost)`,
-      );
-    if (alt.whyNot.length < 15)
-      errors.push(`alternative "${clip(alt.option, 40)}" needs a real whyNot`);
-    if (nearDuplicate(alt.option, t.objective))
-      errors.push(
-        `alternative "${clip(alt.option, 40)}" repeats the chosen move; list a genuinely different option`,
-      );
-  }
-  if (
-    d.considered.length >= 2 &&
-    result.evidence.length > d.reuses.length &&
-    !d.considered.some((alt) =>
-      alt.evidenceIds.some((id) => evidence.has(id) && !d.reuses.includes(id)),
-    )
-  )
-    errors.push(
-      "at least one alternative must cite evidence that is NOT in decision.reuses: compare your move against a fix in different code, not a smaller version of itself",
-    );
-  const whyIds = (d.whyOverAlternatives.match(/\bE\d+\b/gi) ?? []).map((x) =>
-    x.toUpperCase(),
+  const buildsOnSlugs = strList(raw.buildsOnSlugs, 4).filter(
+    (s) =>
+      topics.has(s) &&
+      evidenceIds.some((id) => evidence.get(id)?.topicSlug === s),
   );
-  if (d.whyOverAlternatives.length < 40 || !whyIds.length)
-    errors.push(
-      "decision.whyOverAlternatives must explain the choice over the alternatives and cite at least one evidence id (E#)",
-    );
-  else if (whyIds.some((id) => !evidence.has(id)))
-    errors.push(
-      "decision.whyOverAlternatives cites an evidence id that is not in the data",
-    );
-  if (SUPERLATIVE.test(d.whyOverAlternatives))
-    errors.push(
-      'decision.whyOverAlternatives must not claim the move is "best" or "optimal"; state what the evidence supports and what would change the choice',
-    );
+  const gapSlugs = strList(raw.gapSlugs, 4).filter((s) => topics.has(s));
+  const capRaw = str(raw.capabilityId);
+  const capabilityId = result.coverage.some((c) => c.capabilityId === capRaw)
+    ? capRaw
+    : null;
 
-  // ---- history: only claim past work that exists in the graph ----
-  const hasHistory =
-    Boolean(result.previousMove) || result.completedMoves.length > 0;
-  if (!hasHistory) {
-    const claims = [
-      d.why,
-      d.whyOverAlternatives,
-      d.basis.inferred,
-      ...d.considered.flatMap((x) => [x.option, x.whyNot, x.tradeoff]),
-    ];
-    const hit = claims.find((s) => HISTORY_CLAIM.test(s));
-    if (hit)
-      errors.push(
-        `the text refers to a previous/earlier/last move ("${clip(hit, 80)}") but history shows no earlier move or verified mission for this developer; remove that claim`,
-      );
-  }
-
-  // ---- progression ----
-  if (!d.progression.existing.length)
-    errors.push(
-      "decision.progression.existing must list at least one capability that already exists",
-    );
-  if (d.progression.change.length < 15 || d.progression.verified.length < 15)
-    errors.push(
-      "decision.progression needs change and verified, each a real sentence",
-    );
-
-  // ---- the problem must be visible in the code ----
-  const code = codeBy.get(c.existingEvidenceId);
-  if (!code)
-    errors.push(
-      `challenge.existingEvidenceId must be one of the ids that have code: ${result.code.map((x) => x.evidenceId).join(", ") || "none"}`,
-    );
-  else {
-    const quote = norm(c.observedInCode.replace(/(…|\.\.\.)+\s*$/, ""));
-    if (quote.length < 12 || !norm(code.excerpt).includes(quote))
-      errors.push(
-        `challenge.observedInCode must be a verbatim fragment (12-140 chars) copied from ${c.existingEvidenceId}'s code, with no ellipsis; "${clip(c.observedInCode, 60)}" does not appear in it`,
-      );
-    if (t.startPath.toLowerCase() !== code.path.toLowerCase())
-      errors.push(
-        `task.startPath must be exactly "${code.path}" (the path of ${c.existingEvidenceId})`,
-      );
-    if (!d.evidenceIds.includes(c.existingEvidenceId))
-      errors.push(`decision.evidenceIds must include ${c.existingEvidenceId}`);
-  }
-  if (c.mechanism.length < 15) errors.push("challenge.mechanism is missing");
-  if (c.limitation.length < 20)
-    errors.push(
-      "challenge.limitation must describe what the existing code does wrong or leaves unhandled",
-    );
-  if (c.failureScenario.length < 40)
-    errors.push(
-      "challenge.failureScenario must describe a concrete situation in which the code shown misbehaves, and what happens instead (40+ chars)",
-    );
-  if (ABSENT_OPTION.test(c.limitation) || ABSENT_OPTION.test(c.failureScenario))
-    errors.push(
-      'the limitation is "the code lacks an option". That is not a failure. Describe a situation where the current code gives a wrong result, drops an error, or ignores something it already has',
-    );
+  // verbatim quote: take a real line from the code if the model's is not exact
+  let observed = str(raw.observedInCode).replace(/(…|\.\.\.)+\s*$/, "");
   if (
-    [d.why, c.limitation, c.failureScenario, t.objective].some((s) =>
-      NICE_TO_HAVE.test(s),
-    )
-  )
-    errors.push(
-      "the reasoning rests on practice, learning, flexibility or extensibility. Choose a move justified by a failure visible in the code",
-    );
+    norm(observed).length < 12 ||
+    !norm(code.excerpt).includes(norm(observed))
+  ) {
+    const line = code.excerpt
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length >= 12 && !/^(\/\/|\/\*|\*|import )/.test(l));
+    observed = (line ?? code.excerpt.trim()).slice(0, 140);
+    fixes.push("observedInCode replaced by a real line from the code");
+  }
 
-  if (t.objective.length < 12)
-    errors.push("task.objective is missing or too short");
-  if (t.steps.length < 3) errors.push("task.steps needs 3 to 5 steps");
-  if (t.steps.some((s) => s.length < 20))
-    errors.push("every step must be specific (20+ chars)");
-  if (t.doneWhen.length < 30 || !CHECKABLE.test(t.doneWhen))
+  const why = str(raw.why);
+  const limitation = str(raw.limitation);
+  const failureScenario = str(raw.failureScenario);
+  const objective = clip(str(raw.objective).replace(/\s+/g, " "), 140);
+  const steps = strList(raw.steps, 5);
+  const doneWhen = str(raw.doneWhen);
+
+  const errors: string[] = [];
+  if (why.length < 30) errors.push("why is missing or too short");
+  if (limitation.length < 20)
+    errors.push("limitation must say what the code does wrong");
+  if (failureScenario.length < 40)
     errors.push(
-      "task.doneWhen must be an observable condition a test, command or review can check",
+      "failureScenario must be a concrete situation where the code misbehaves (40+ chars)",
     );
-  if ([t.objective, t.doneWhen, ...t.steps].some((s) => GENERIC.test(s)))
+  if (ABSENT_OPTION.test(limitation) || ABSENT_OPTION.test(failureScenario))
     errors.push(
-      "the task uses a generic phrase; name the specific mechanism and behaviour instead",
+      '"the code lacks an option" is not a failure; describe a wrong result or dropped error',
     );
+  if (NICE_TO_HAVE.test(limitation) || NICE_TO_HAVE.test(failureScenario))
+    errors.push(
+      "the reasoning rests on practice/flexibility; choose a failure visible in the code",
+    );
+  if (objective.length < 12) errors.push("objective is missing or too short");
+  if (steps.length < 3 || steps.some((s) => s.length < 20))
+    errors.push("steps needs 3-5 specific steps (20+ chars each)");
+  if (doneWhen.length < 30 || !CHECKABLE.test(doneWhen))
+    errors.push("doneWhen must be one observable, checkable condition");
+  if ([objective, doneWhen, ...steps].some((s) => GENERIC.test(s)))
+    errors.push("generic phrase used; name the specific mechanism");
 
   const known = result.evidence
     .map((e) => e.path.toLowerCase())
     .filter(Boolean);
   const stray = (
-    [t.objective, ...t.steps, t.doneWhen].join(" ").match(PATH_TOKEN) ?? []
+    [objective, ...steps, doneWhen].join(" ").match(PATH_TOKEN) ?? []
   ).filter((tok) => {
     const x = tok.toLowerCase();
     return !known.some((k) => k.endsWith(x) || x.endsWith(k) || k.includes(x));
   });
   if (stray.length)
-    errors.push(
-      `files mentioned that are not in the evidence: ${stray.slice(0, 3).join(", ")}`,
-    );
+    errors.push(`files not in the evidence: ${stray.slice(0, 3).join(", ")}`);
 
   if (
+    !result.previousMove &&
+    result.completedMoves.length === 0 &&
+    [why, limitation].some((s) => HISTORY_CLAIM.test(s))
+  )
+    errors.push("do not mention previous/earlier moves: there is no history");
+  if (
     result.evidence.some(
-      (e) => e.technique && nearDuplicate(t.objective, e.technique),
+      (e) => e.technique && nearDuplicate(objective, e.technique),
     )
   )
     errors.push(
-      "the objective repeats a technique the developer already demonstrated; propose new behaviour",
+      "objective repeats a technique already demonstrated; propose new behaviour",
     );
   if (
     result.previousMove?.title &&
-    nearDuplicate(t.objective, result.previousMove.title)
+    nearDuplicate(objective, result.previousMove.title)
   )
-    errors.push("the objective repeats the previously proposed move");
+    errors.push("objective repeats the previous move");
   const repeated = result.completedMoves.find(
-    (m) => m.title && nearDuplicate(t.objective, m.title),
+    (m) => m.title && nearDuplicate(objective, m.title),
   );
   if (repeated)
     errors.push(
-      `the objective repeats a mission the developer already verified ("${clip(repeated.title, 80)}")`,
+      `objective repeats a verified mission ("${clip(repeated.title, 80)}")`,
     );
 
-  return errors.length ? { ok: false, errors } : { ok: true, draft };
+  if (errors.length) return { ok: false, errors };
+
+  const a = (raw.alternative ?? {}) as Row;
+  const considered: ConsideredOption[] =
+    str(a.option) && str(a.whyNot) && !nearDuplicate(str(a.option), objective)
+      ? [
+          {
+            option: str(a.option),
+            whyNot: str(a.whyNot),
+            tradeoff: "",
+            evidenceIds: ids([a.evidenceId]).filter((id) => evidence.has(id)),
+          },
+        ]
+      : [];
+
+  const draft: Draft = {
+    decision: {
+      focusSlug: focus,
+      capabilityId,
+      approachSlug: approachSlug || null,
+      newApproach: approachSlug ? null : newApproach || null,
+      basis: {
+        observed: `${reuseId}: ${observed}`,
+        inferred: why,
+        missing: "",
+      },
+      buildsOnSlugs,
+      gapSlugs,
+      why,
+      evidenceIds,
+      reuses: [reuseId],
+      builds: {
+        reused: `Extends ${code.path} (${reuseId})`,
+        changes: limitation,
+        newBehavior: objective,
+      },
+      whyOverAlternatives: `${why} (${reuseId})`,
+      progression: {
+        existing: [
+          `${anchor.capability || anchor.technique || code.path} (${reuseId})`,
+        ],
+        change: objective,
+        verified: doneWhen,
+      },
+      considered,
+    },
+    challenge: {
+      mechanism: clip(objective, 140),
+      existingEvidenceId: reuseId,
+      observedInCode: observed,
+      limitation,
+      failureScenario,
+    },
+    task: { objective, startPath: code.path, steps, doneWhen },
+  };
+  return { ok: true, draft, fixes };
 }
 
 /* ========================================================================== */
@@ -1400,7 +1202,7 @@ async function mapWishWithLlm(
   stats: { calls: number },
   notes: string[],
 ): Promise<string[]> {
-  const catalog = await listTopicCatalog(graph, 120);
+  const catalog = await listTopicCatalog(graph, 60);
   if (!catalog.length) return [];
   const known = new Map<string, string>();
   for (const t of catalog) {
@@ -1416,7 +1218,7 @@ async function mapWishWithLlm(
       {
         system: MAP_SYSTEM,
         user: `Goal: ${clip(wish, 200)}\n\nTopics:\n${list}`,
-        maxTokens: 300,
+        maxTokens: 200,
         json: true,
       },
       { ...retry, label: "topic mapping" },
@@ -1444,7 +1246,7 @@ async function mapWishWithLlm(
 /* ========================================================================== */
 
 /** validation-repair budget: only rejected model OUTPUT spends this, never a transport failure */
-const MAX_ATTEMPTS = 4;
+const MAX_ATTEMPTS = 2;
 
 export async function planGoal(
   graph: Graph,
@@ -1452,10 +1254,11 @@ export async function planGoal(
   input: PlanGoalInput,
 ): Promise<GoalPlan> {
   const started = Date.now();
-  const timeoutMs = input.timeoutMs ?? envInt("LLM_TIMEOUT_MS", 60_000);
+  const timeoutMs = input.timeoutMs ?? envInt("LLM_TIMEOUT_MS", 25_000);
   const maxRetries =
-    input.maxRetries ?? Math.min(envInt("LLM_MAX_RETRIES", 2), 5);
-  const budgetMs = input.budgetMs ?? envInt("LLM_TOTAL_BUDGET_MS", 120_000);
+    input.maxRetries ?? Math.min(envInt("LLM_MAX_RETRIES", 1), 5);
+  const budgetMs = input.budgetMs ?? envInt("LLM_TOTAL_BUDGET_MS", 45_000);
+  const deadline = started + envInt("GOAL_DEADLINE_MS", 55_000);
   const notes: string[] = [];
   const timings = { graph: 0, llm: 0, store: 0, total: 0 };
   const stats = { calls: 0 };
@@ -1595,28 +1398,32 @@ export async function planGoal(
     });
 
   // The graph is built once above and reused: a transport failure never rebuilds it.
-  const user = renderUser(briefForAgent(result));
-  let previous = "";
+  const user = renderUser(result);
   let errors: string[] = [];
   let draft: Draft | undefined;
   let repaired = false;
   let validationUsed = 0; // only rejected model output spends this
   let transportError: LlmError | null = null;
   t0 = Date.now();
-  while (validationUsed < MAX_ATTEMPTS) {
+  while (validationUsed < MAX_ATTEMPTS && Date.now() < deadline - 4_000) {
     const prompt =
       validationUsed === 0
         ? user
-        : `${user}\n\nYour previous reply was rejected for these reasons:\n${errors.map((e) => `- ${e}`).join("\n")}\n\nPrevious reply:\n${clip(previous, 1600)}\n\nReturn corrected JSON only. Keep the decision if it is sound; fix only what was rejected. If the rejection says the reasoning is not a visible failure, choose a different move.`;
+        : `${user}\n\nYour previous reply was rejected:\n${errors.map((e) => `- ${e}`).join("\n")}\nReturn corrected JSON only. If the problem is the reasoning, choose a different failure visible in CODE.`;
+    let text = "";
     try {
       const r = await callLlmWithRetry(
         llm,
-        { system: SYSTEM, user: prompt, maxTokens: 3000, json: true },
-        { ...retryBase, label: `goal generation (repair ${validationUsed})` },
+        { system: SYSTEM, user: prompt, maxTokens: 900, json: true },
+        {
+          ...retryBase,
+          budgetMs: Math.max(5_000, Math.min(budgetMs, deadline - Date.now())),
+          label: `goal generation (repair ${validationUsed})`,
+        },
       );
       stats.calls += r.attempts;
       llmRetries += r.attempts - 1;
-      previous = r.text;
+      text = r.text;
     } catch (error) {
       transportError =
         error instanceof LlmError
@@ -1630,16 +1437,18 @@ export async function planGoal(
       llmRetries += transportError.attempts - 1;
       break; // transport is exhausted: do not burn repair attempts
     }
-    const checked = validate(extractJson(previous), result);
+    const checked = finalize(extractJson(text), result);
     if (checked.ok) {
       draft = checked.draft;
       repaired = validationUsed > 0;
+      if (checked.fixes.length)
+        notes.push(`auto-fixed: ${checked.fixes.join(" | ")}`);
       break;
     }
     errors = checked.errors;
     validationUsed += 1;
     notes.push(
-      `validation attempt ${validationUsed} rejected: ${errors.join(" | ")}${errors[0]?.includes("not valid JSON") ? ` (raw: ${clip(previous.trim(), 200) || "empty"})` : ""}`,
+      `validation attempt ${validationUsed} rejected: ${errors.join(" | ")}`,
     );
   }
   timings.llm += Date.now() - t0;

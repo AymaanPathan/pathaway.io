@@ -3880,6 +3880,10 @@ topicsRouter.get(
 
       const st = (detail.stats ?? {}) as Row;
       const comps = (st.baselineComponents ?? {}) as Record<string, number>;
+      const lvl = (s: string) => {
+        const c = d.bySlug.get(s);
+        return { level: c?.level ?? null, assessed: Boolean(c) };
+      };
 
       return res.json({
         topic: {
@@ -3887,6 +3891,48 @@ topicsRouter.get(
           confidence: ctx.confidence.effective,
           statedConfidence: card.confidence,
         },
+        verdict: card.verdict,
+        scoring: {
+          score: card.score,
+          baseline: card.baselineScore,
+          level: card.level,
+          band: DEPTH_BANDS[card.level],
+        },
+        confidence: ctx.confidence,
+        graph: {
+          metrics: {
+            foundationRank: card.graph.foundationRank,
+            bridgeScore: card.graph.bridgeScore,
+            clusterId: card.graph.clusterId,
+            componentId: card.graph.componentId,
+          },
+          foundations: (detail.context?.foundations ?? [])
+            .filter((f) => f.hops === 1)
+            .map((f) => ({
+              slug: f.slug,
+              name: f.name,
+              reason: f.reason ?? "",
+              level: f.developerLevel,
+              assessed: f.developerLevel !== "none",
+            })),
+          unlocks: detail.unlocks.map((u) => ({
+            slug: u.slug,
+            name: u.name,
+            reason: u.reason,
+            ...lvl(u.slug),
+          })),
+          related: detail.related.map((r) => ({
+            slug: r.slug,
+            name: r.name,
+            reason: r.reason,
+            ...lvl(r.slug),
+          })),
+          community: { peers: clusterPeers },
+        },
+        approaches: detail.approaches,
+        capabilityPaths: detail.capabilityPaths,
+        prerequisitePaths: ctx.paths,
+        evidence: { byKind: evidenceByKind },
         trace,
         depthProfile: {
           score: card.score,

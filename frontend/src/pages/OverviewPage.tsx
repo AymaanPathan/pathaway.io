@@ -30,8 +30,6 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import {
   AiMessage,
-  Blocks,
-  ToolTrace,
   type LiveStep,
   type TraceEvent,
 } from "../compoenents/ChatBlock";
@@ -1491,7 +1489,7 @@ function GoalBox() {
 }
 
 /* ========================================================================== */
-/* CHAT (local fallback only)                                                 */
+/* CHAT                                                                       */
 /* ========================================================================== */
 
 type ChatMsg = {
@@ -1515,6 +1513,19 @@ type ChatMsg = {
   insight?: Obj;
 };
 type ChatCtx = { nodes: Obj[]; sel: string | null; detail: Obj | null };
+
+/**
+ * A reply is "rich" when it carries structured output (tools, evidence, blocks...).
+ * Rich replies open in the big response panel; plain text stays in the chat bubble.
+ */
+const isRich = (m: ChatMsg) =>
+  m.role === "ai" &&
+  (m.pending === true ||
+    !!m.insight ||
+    !!m.investigation ||
+    asArray(m.blocks).length > 0 ||
+    asArray(m.tools).length > 0 ||
+    asArray(m.followups).length > 0);
 
 function localAnswer(q: string, c: ChatCtx): { text: string; slugs: string[] } {
   const s = q.toLowerCase();
@@ -1587,6 +1598,137 @@ function localAnswer(q: string, c: ChatCtx): { text: string; slugs: string[] } {
   };
 }
 
+/**
+ * Compact chat card. The chat column is narrow, so a rich reply shows only a short
+ * preview here. The full answer (diagnosis, tools, evidence, graph views) opens in
+ * the wide response panel under the graph.
+ */
+function ReplyCard({
+  m,
+  active,
+  onOpen,
+}: {
+  m: ChatMsg;
+  active: boolean;
+  onOpen: () => void;
+}) {
+  const pending = m.pending === true;
+  const inv = (m.investigation ?? null) as Obj | null;
+  const invStatus = asString(inv?.status, "complete");
+  const toolsRan = asObjects(m.tools).filter((t) => !t.skipped).length;
+  const findings = asObjects(m.findings).length;
+  const steps = m.steps ?? [];
+  const hasText = m.text.trim().length > 0;
+
+  return (
+    <div
+      className="w-full min-w-0 overflow-hidden rounded-2xl"
+      style={{
+        backgroundColor: PAPER,
+        ...border,
+        borderBottomLeftRadius: 4,
+        overflowWrap: "break-word",
+      }}
+    >
+      <div className="min-w-0 p-3">
+        {pending && !hasText ? (
+          <div
+            className="flex items-center gap-2 text-[12px] font-bold text-neutral-800"
+            aria-live="polite"
+          >
+            <RefreshCw size={13} className="shrink-0 animate-spin" />
+            {steps.length
+              ? "Reading your graph…"
+              : "Working out which graph tools to use…"}
+          </div>
+        ) : (
+          <p
+            className="text-[12px] font-semibold leading-[1.6] text-neutral-900"
+            style={clamp(6)}
+          >
+            {hasText ? m.text : "No answer was produced."}
+          </p>
+        )}
+
+        {pending && steps.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1">
+            {steps.map((st) => (
+              <span
+                key={st.tool}
+                className="inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold"
+                style={{
+                  backgroundColor: WHITE,
+                  border: `1.5px ${st.state === "miss" ? "dashed" : "solid"} ${INK}`,
+                }}
+              >
+                <Dot
+                  color={
+                    st.state === "done"
+                      ? GREEN
+                      : st.state === "miss"
+                        ? LINE
+                        : YELLOW
+                  }
+                  small
+                />
+                <span className="truncate">{st.title}</span>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {!pending && (
+          <div className="mt-2 flex flex-wrap gap-1">
+            {toolsRan > 0 && (
+              <Chip
+                text={`${toolsRan} tool${toolsRan === 1 ? "" : "s"}`}
+                background={WHITE}
+              />
+            )}
+            {findings > 0 && (
+              <Chip
+                text={`${findings} finding${findings === 1 ? "" : "s"}`}
+                background={WHITE}
+              />
+            )}
+            {inv && invStatus !== "complete" && (
+              <Chip
+                text={
+                  invStatus === "failed" ? "unverified" : "some checks empty"
+                }
+                background={invStatus === "failed" ? CORAL : YELLOW}
+              />
+            )}
+          </div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={onOpen}
+        className="press flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[12px] font-bold"
+        style={{
+          borderTop: `2px solid ${INK}`,
+          backgroundColor: active ? YELLOW : WHITE,
+        }}
+      >
+        <span>
+          {active
+            ? pending
+              ? "Streaming in the panel below"
+              : "Showing in the panel below"
+            : "Open full response"}
+        </span>
+        <ChevronRight
+          size={14}
+          strokeWidth={3}
+          style={{ transform: "rotate(90deg)" }}
+        />
+      </button>
+    </div>
+  );
+}
+
 /* ========================================================================== */
 /* MAIN                                                                       */
 /* ========================================================================== */
@@ -1628,8 +1770,9 @@ const LENSES: Array<{ id: Lens; label: string }> = [
 ];
 
 const WELCOME =
-  "Select a topic to see why Pathway rated it that way, or ask me anything about your graph. Topics I mention glow on the map.";
+  "Select a topic to see why Pathway rated it that way, or ask me anything about your graph. Topics I mention glow on the map. Full answers open in a big panel under the graph.";
 const EVIDENCE_ID = "topic-evidence";
+const STAGE_ID = "response-stage";
 const scrollToEvidence = () =>
   window.setTimeout(
     () =>
@@ -1637,6 +1780,14 @@ const scrollToEvidence = () =>
         .getElementById(EVIDENCE_ID)
         ?.scrollIntoView({ behavior: "smooth", block: "start" }),
     80,
+  );
+const scrollToStage = () =>
+  window.setTimeout(
+    () =>
+      document
+        .getElementById(STAGE_ID)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" }),
+    140,
   );
 
 export default function OverviewPage() {
@@ -1681,12 +1832,23 @@ export default function OverviewPage() {
   ]);
   const [draft, setDraft] = useState("");
   const [thinking, setThinking] = useState(false);
-  const [stage, setStage] = useState<ChatMsg | null>(null);
+  /** id of the reply currently shown in the big response panel */
+  const [stageId, setStageId] = useState<number | null>(null);
   const [highlight, setHighlight] = useState<Set<string>>(new Set());
   const msgId = useRef(2);
   const chatRef = useRef<HTMLDivElement>(null);
   const asideRef = useRef<HTMLElement>(null);
   const jobRef = useRef<Obj | null>(null);
+
+  const stage = useMemo(
+    () => messages.find((m) => m.id === stageId) ?? null,
+    [messages, stageId],
+  );
+
+  const openStage = (id: number) => {
+    setStageId(id);
+    scrollToStage();
+  };
 
   /* ---------------- loading ---------------- */
 
@@ -2040,8 +2202,17 @@ export default function OverviewPage() {
     setMessages((m) => [
       ...m,
       { id: userId, role: "user", text },
-      { id: aiId, role: "ai", text: "", pending: true, steps: [] },
+      {
+        id: aiId,
+        role: "ai",
+        text: "",
+        pending: true,
+        steps: [],
+        question: text,
+      },
     ]);
+    /* the big panel opens straight away and streams the answer */
+    openStage(aiId);
     setThinking(true);
     const patch = (fn: (m: ChatMsg) => ChatMsg) =>
       setMessages((ms) => ms.map((x) => (x.id === aiId ? fn(x) : x)));
@@ -2121,6 +2292,7 @@ export default function OverviewPage() {
       } else if (r.status === 429) {
         reply = {
           text: asString(r.data.error, "Slow down a little."),
+          question: text,
           slugs: [],
           local: false,
         };
@@ -2129,11 +2301,22 @@ export default function OverviewPage() {
       /* local answer below */
     }
     if (!reply)
-      reply = { ...localAnswer(text, { nodes, sel, detail }), local: true };
+      reply = {
+        ...localAnswer(text, { nodes, sel, detail }),
+        question: text,
+        local: true,
+      };
     const final = reply;
     const slugs = [...new Set(final.slugs.filter(Boolean))];
     setHighlight(new Set(slugs));
     patch((m) => ({ ...m, ...final, slugs, pending: false, steps: undefined }));
+    /* plain text replies (errors, local fallback) stay in the chat, no big panel */
+    const rich =
+      !!final.insight ||
+      !!final.investigation ||
+      asArray(final.blocks).length > 0 ||
+      asArray(final.tools).length > 0;
+    if (!rich) setStageId((cur) => (cur === aiId ? null : cur));
     setThinking(false);
   };
 
@@ -2251,13 +2434,14 @@ export default function OverviewPage() {
         svg g:focus-visible { outline: 2px solid ${INK}; outline-offset: 2px; }
         details > summary { list-style: none; }
         details > summary::-webkit-details-marker { display: none; }
-        /* keep everything inside the chat panel from spilling out sideways */
-        .chatscroll { overflow-x: hidden; overflow-wrap: anywhere; }
+        /* keep everything inside the chat panel from spilling out sideways.
+           break-word (not "anywhere") so grid cells never collapse to one letter */
+        .chatscroll { overflow-x: hidden; overflow-wrap: break-word; }
         .chatscroll > * { min-width: 0; max-width: 100%; }
         .chatscroll pre { white-space: pre-wrap; word-break: break-word; max-width: 100%; overflow-x: auto; }
         .chatscroll table { display: block; max-width: 100%; overflow-x: auto; }
         .chatscroll img, .chatscroll svg, .chatscroll video { max-width: 100%; height: auto; }
-        .chatscroll a { word-break: break-all; }
+        .chatscroll a { overflow-wrap: anywhere; }
         @keyframes ostripe { to { background-position: 28px 0; } }
         @keyframes oblink { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
         @keyframes oring { 0% { r: 0; opacity: .9; } 100% { r: 46; opacity: 0; } }
@@ -2669,32 +2853,12 @@ export default function OverviewPage() {
                           >
                             {m.text}
                           </div>
-                        ) : m.insight?.diagnosis && !m.pending ? (
-                          <div className="w-full min-w-0 max-w-full overflow-hidden">
-                            <ResponsePanel m={m}>
-                              <InsightAnswer
-                                m={m}
-                                onPick={pick}
-                                onFollow={(q) => void send(q)}
-                                onOpen={() => setStage(m)}
-                              />
-                            </ResponsePanel>
-                          </div>
-                        ) : m.blocks ||
-                          m.pending ||
-                          m.tools ||
-                          m.local ||
-                          m.followups ? (
-                          <div className="w-full min-w-0 max-w-full overflow-hidden">
-                            <ResponsePanel m={m}>
-                              <AiMessage
-                                m={m}
-                                onPick={pick}
-                                onFollow={(q) => void send(q)}
-                                onOpen={() => setStage(m)}
-                              />
-                            </ResponsePanel>
-                          </div>
+                        ) : isRich(m) ? (
+                          <ReplyCard
+                            m={m}
+                            active={stageId === m.id}
+                            onOpen={() => openStage(m.id)}
+                          />
                         ) : (
                           <div
                             className="w-full break-words rounded-2xl px-3 py-2.5 text-[12px] leading-[1.6]"
@@ -2785,23 +2949,11 @@ export default function OverviewPage() {
           </aside>
         </div>
 
-        {/* 3. TOPIC EVIDENCE: graph first, details after */}
-        {sel && detail && (
-          <TopicEvidence
-            key={sel}
-            slug={sel}
-            detail={detail}
-            onPick={pick}
-            onAsk={(q) => {
-              window.scrollTo({ top: 0, behavior: "smooth" });
-              void send(q);
-            }}
-          />
-        )}
-
-        {stage?.blocks && stage.blocks.length > 0 && (
+        {/* 3. RESPONSE PANEL: the full structured answer, wide and readable */}
+        {stage && isRich(stage) && (
           <section
-            className="mt-6 min-w-0 overflow-hidden rounded-2xl p-4"
+            id={STAGE_ID}
+            className="mt-6 min-w-0 scroll-mt-16 rounded-2xl p-4 sm:p-5"
             style={{
               backgroundColor: PAPER,
               ...border,
@@ -2809,46 +2961,64 @@ export default function OverviewPage() {
               animation: "oslide .25s ease-out both",
             }}
           >
-            <div className="mb-3 flex items-start justify-between gap-3">
+            <div className="mb-4 flex items-start justify-between gap-3">
               <div className="min-w-0">
-                <Eyebrow>ANSWER</Eyebrow>
-                <h2
-                  className="mt-1 break-words text-[17px] font-bold leading-tight"
-                  style={{ fontFamily: DISPLAY_FONT }}
-                >
-                  {stage.question}
-                </h2>
-                {stage.text && (
-                  <p className="mt-1 max-w-3xl break-words text-[12px] leading-5 text-neutral-800">
-                    {stage.text}
-                  </p>
+                <Eyebrow>{stage.pending ? "ANSWERING…" : "RESPONSE"}</Eyebrow>
+                {stage.question && (
+                  <h2
+                    className="mt-1 break-words text-[20px] font-bold leading-tight tracking-tight"
+                    style={{ fontFamily: DISPLAY_FONT }}
+                  >
+                    {stage.question}
+                  </h2>
                 )}
               </div>
               <button
                 type="button"
-                onClick={() => setStage(null)}
-                aria-label="Close answer"
+                onClick={() => setStageId(null)}
+                aria-label="Close response panel"
                 className="hard shrink-0 rounded-full p-1.5"
                 style={{ backgroundColor: WHITE, ...border }}
               >
                 <X size={13} />
               </button>
             </div>
-            <div className="chatscroll">
-              <Blocks blocks={stage.blocks} onPick={pick} wide />
+            <div className="mx-auto w-full min-w-0 max-w-[980px]">
+              <ResponsePanel m={stage}>
+                {stage.insight?.diagnosis && !stage.pending ? (
+                  <InsightAnswer
+                    m={stage}
+                    onPick={pick}
+                    onFollow={(q) => void send(q)}
+                    onOpen={scrollToStage}
+                  />
+                ) : (
+                  <AiMessage
+                    m={stage}
+                    onPick={pick}
+                    onFollow={(q) => void send(q)}
+                    onOpen={scrollToStage}
+                  />
+                )}
+              </ResponsePanel>
             </div>
-            {stage.tools && stage.tools.length > 0 && (
-              <div
-                className="mt-3 rounded-xl"
-                style={{ backgroundColor: WHITE, ...border }}
-              >
-                <ToolTrace tools={stage.tools} meta={stage.meta} />
-              </div>
-            )}
           </section>
         )}
 
-        {/* 4. EXPLORE */}
+        {/* 4. TOPIC EVIDENCE: graph first, details after */}
+        {sel && detail && (
+          <TopicEvidence
+            key={sel}
+            slug={sel}
+            detail={detail}
+            onPick={pick}
+            onAsk={(q) => {
+              void send(q);
+            }}
+          />
+        )}
+
+        {/* 5. EXPLORE */}
         <section className="mt-8">
           <div
             className="flex flex-wrap gap-x-5 gap-y-1"
