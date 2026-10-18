@@ -1,4 +1,4 @@
-
+<div align="center">
 
 <img width="1100" height="662" alt="home" src="https://github.com/user-attachments/assets/7a8091a1-aa06-4dcf-8e66-222a07510e0f" />
 
@@ -46,13 +46,15 @@ When you complete a mission and the platform's tests pass, the verified code bec
 ## 📑 Table of contents
 
 1. [Architecture](#-architecture)
-2. [3D Skill City](#%EF%B8%8F-3d-skill-city)
-3. [Graph data model](#%EF%B8%8F-graph-data-model)
-4. [Graph algorithms](#-graph-algorithms)
-5. [Agent pipeline](#-agent-pipeline)
-6. [Chat agent tools](#-chat-agent-tools)
-7. [Setup instructions](#-setup-instructions)
-8. [Troubleshooting](#%EF%B8%8F-troubleshooting)
+2. [GitHub MCP server](#-github-mcp-server)
+3. [GitHub sync pipeline](#-github-sync-pipeline)
+4. [3D Skill City](#%EF%B8%8F-3d-skill-city)
+5. [Graph data model](#%EF%B8%8F-graph-data-model)
+6. [Graph algorithms](#-graph-algorithms)
+7. [Agent pipeline](#-agent-pipeline)
+8. [Chat agent tools](#-chat-agent-tools)
+9. [Setup instructions](#-setup-instructions)
+10. [Troubleshooting](#%EF%B8%8F-troubleshooting)
 
 ---
 
@@ -60,7 +62,8 @@ When you complete a mission and the platform's tests pass, the verified code bec
 
 ```mermaid
 flowchart LR
-    GH[(GitHub history)] --> EV[(Evidence<br/>Commit / FileChange / Demonstration)]
+    GH[(GitHub)] <-->|GitHub MCP server<br/>Docker, stdio| SYNC[Sync pipeline]
+    SYNC --> EV[(Evidence<br/>Commit / FileChange / Demonstration)]
     EV --> DB[(FalkorDB)]
 
     subgraph A[View 1: Skill graph - independent]
@@ -81,9 +84,131 @@ flowchart LR
     DB --> SK
     DB --> DA
     VE --> DB
+    GH -.->|GitHub MCP: inspect repo at pinned commit| MA
 ```
 
 > The two views are **independent consumers of the same evidence**. The 3D city reads only the Skill graph. The chat agent, goal agent and mission agent read only the Topic graph. Neither calls the other.
+
+---
+
+## 🔌 GitHub MCP server
+
+Pathway reaches GitHub **only through the official [GitHub MCP server](https://github.com/github/github-mcp-server)** (Model Context Protocol). There is no hand-written GitHub REST client: the backend starts the server as a short-lived Docker container and talks to it over stdio with the MCP client SDK.
+
+```mermaid
+flowchart LR
+    SYNC[Sync pipeline] --> CALL[MCP client<br/>@modelcontextprotocol/client]
+    AGENT[Agent-side repo access<br/>mission inspection] --> CALL
+    CALL -->|stdio| DOCKER[docker run -i --rm<br/>ghcr.io/github/github-mcp-server]
+    DOCKER -->|GitHub API| GH[(GitHub)]
+```
+
+**Read-only tool allow-list.** The container is started with `GITHUB_TOOLS`, so only these tools exist for the session:
+
+| MCP tool | Used for |
+|---|---|
+| `get_me` | Resolve the signed-in developer |
+| `search_repositories` | Discover the developer's repositories |
+| `list_commits` | Find the developer's commits (initial window or incremental) |
+| `get_commit` | Fetch the full patch and per-file diffs of a commit |
+| `get_file_contents` | README, manifests and config files; repo inspection at a commit |
+| `list_pull_requests` | Pull requests per repository |
+| `pull_request_read` | Optional PR detail and changed files |
+| `search_issues` | Issues the developer opened and pull requests they reviewed |
+
+**Design notes**
+
+- **One file per tool.** `get-commit.ts`, `list-commits.ts`, and so on are thin wrappers around a single `GithubMcpCall` function, so sync code and agents share them.
+- **Token never goes on the command line.** Docker is passed `-e GITHUB_PERSONAL_ACCESS_TOKEN` and the value comes from the process environment.
+- **Two entry points.** `syncDeveloperGithubData` opens one session for a whole sync. `withGithubMcp(token, tools, fn)` opens a scoped session with its own tool list and closes it afterwards, for agent-side repository access. The scoped helper pins the server image (`v1.11.0`).
+- **SHA-aware file reads.** `get_file_contents` only resolves branch and tag names as `ref`, so a 40-hex commit id is moved to the `sha` argument automatically.
+- **Raw vs. parsed results.** `clientCall` returns the raw MCP result for the sync parser. `withGithubMcp` returns `{ ok, data, text }`.
+
+---
+
+## 🔄 GitHub sync pipeline
+
+Sync turns a developer's GitHub activity into graph evidence. It is incremental, rate-limit aware, and idempotent (every write is a `MERGE`).
+
+```mermaid
+flowchart TD
+    A[connecting<br/>start MCP session] --> B[fetching_repos<br/>search_repositories]
+    B --> C[per repository<br/>list_commits: initial window or since last sync]
+    C --> D[get_commit<br/>full patch per file]
+    D --> E[classify and parse<br/>roles, hunks, symbols, imports, dependency changes]
+    E --> F[repo context<br/>README, manifests, config via get_file_contents]
+    F --> G[pull requests + activity<br/>list_pull_requests, search_issues]
+    G --> H[commit budget applied]
+    H --> I[writing<br/>batched MERGE into FalkorDB]
+    I --> J[learning pipeline<br/>Demonstrations from this batch's file changes]
+    J --> K[checkpoint last_synced_at]
+    K --> L[sync_complete + stats]
+```
+
+Progress events (`connecting`, `repos_found`, `repo_started`, `commits_discovered`, `sync_progress`, `writing`, `learning_complete`, `sync_complete`, and others) are streamed to the UI.
+
+**What gets extracted from every commit**
+
+| Evidence | Examples |
+|---|---|
+| File role | `source`, `test`, `migration`, `schema`, `style`, `markup`, `config`, `infra`, `dependency_manifest` |
+| Diff structure | Hunks, touched scopes, additions and deletions, renames |
+| Code signals | Symbols added, modified and removed; imports added and removed; relative imports; comment lines; max indent depth |
+| Dependencies | Added, removed and changed packages parsed from `package.json`, `pyproject.toml`, `requirements.txt`, `go.mod`, `Cargo.toml`, `Gemfile`, `composer.json` |
+| Repo context | README, manifest and config files, root entries, tooling, dependency map (refreshed every 7 days by default) |
+
+Lockfiles, `node_modules/`, `dist/`, generated and minified files, images and docs are filtered out, so only authored source evidence reaches the graph. Stored patches are capped (60k chars of diff and 40k of added code per file by default) to keep MCP traffic and graph size small.
+
+**What sync writes to FalkorDB**
+
+```mermaid
+erDiagram
+    Developer ||--o{ Repository : CONTRIBUTED_TO
+    Developer ||--o{ Commit : MADE
+    Developer ||--o{ FileChange : AUTHORED_CODE
+    Developer ||--o{ PullRequest : AUTHORED
+    Developer ||--o{ Issue : OPENED
+    Developer ||--o{ ReviewedPullRequest : REVIEWED
+    Commit }o--|| Repository : IN_REPOSITORY
+    Commit ||--o{ FileChange : CHANGED
+    Commit }o--o| PullRequest : IN_PR
+    FileChange }o--|| Repository : IN_REPOSITORY
+    PullRequest }o--|| Repository : IN_REPOSITORY
+    PullRequest ||--o{ File : CHANGED
+    Issue }o--|| Repository : IN_REPOSITORY
+```
+
+**Built for real accounts**
+
+- **Incremental.** A per-repository `last_synced_at` checkpoint plus a 7-day overlap window, so reruns only fetch what is new.
+- **Budgeted onboarding.** First sync is capped (60 commits per repository, 400 total, last 365 days by default), newest first.
+- **Rate-limit aware.** Each call retries up to 3 times with exponential backoff and jitter. On a GitHub rate limit the sync stops retrying, skips the remaining calls, and reports `rateLimited` instead of hanging. Repositories that failed discovery are not checkpointed, so the next run picks them up.
+- **Resilient enrichment.** The learning stage is separate: if the LLM provider is down, the GitHub data is still saved and a `learning_failed` event is emitted.
+- **Bounded concurrency.** Repositories, commits and PR details are fetched with configurable concurrency.
+- **Clean graph.** Evidence outside the history window, excluded repositories (`GITHUB_EXCLUDE_REPOS`) and inactive repository links are pruned.
+- **Safe Cypher.** Labels and properties interpolated into index queries pass an identifier allow-list.
+- **Run stats.** Each sync returns repositories, commits discovered and processed, files changed, source and test files, patches stored, hunks, symbols, imports, dependency changes, GitHub retries, and final graph node and relationship counts.
+
+**Built-in graph analytics** (run over the synced evidence)
+
+```cypher
+// Files that are frequently changed together (co-change coupling)
+MATCH (d:Developer {id: $developer_id})-[:AUTHORED_CODE]->(fc1:FileChange)
+      <-[:CHANGED]-(c:Commit)-[:CHANGED]->(fc2:FileChange)
+WHERE fc1.path < fc2.path
+WITH fc1.path AS pathA, fc2.path AS pathB, count(DISTINCT c) AS co_changes
+WHERE co_changes >= 5
+RETURN pathA, pathB, co_changes ORDER BY co_changes DESC LIMIT 50
+```
+
+```cypher
+// File hotspots
+MATCH (d:Developer {id: $developer_id})-[:AUTHORED_CODE]->(fc:FileChange)
+RETURN fc.path AS path, fc.language AS language,
+       count(DISTINCT fc.commit_sha) AS commits,
+       sum(fc.additions) AS additions, sum(fc.deletions) AS deletions
+ORDER BY commits DESC LIMIT 50
+```
 
 ---
 
@@ -136,12 +261,10 @@ flowchart LR
 The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe. It has four connected layers for the agents, plus an independent Skill graph for the 3D city:
 
 <p align="center">
-<img width="1535" height="735" alt="falkordb" src="https://github.com/user-attachments/assets/d5b30af7-e969-4be4-a20c-99863aa0016a" />
+  <img src="docs/images/evidence-trail.png" alt="Evidence trail in the FalkorDB Browser" width="900"/>
   <br/>
   <sub><b>The real graph in FalkorDB Browser:</b> one developer's demonstrations, the capabilities they prove, and the file changes behind them.</sub>
 </p>
-
-
 
 ```mermaid
 flowchart TB
@@ -335,6 +458,12 @@ CREATE INDEX FOR (n:Goal) ON (n.id)
 -- plus Commit, FileChange, Repository, Approach, Concept, Problem, Technique, Technology ...
 
 CALL db.idx.fulltext.createNodeIndex('Topic', 'name', 'description', 'aliases_text')
+
+-- created by sync ingestion
+CALL db.idx.fulltext.createNodeIndex('Commit', 'message')
+CALL db.idx.fulltext.createNodeIndex('FileChange', 'path', 'added_code')
+CALL db.idx.fulltext.createNodeIndex('PullRequest', 'title', 'body')
+CALL db.idx.fulltext.createNodeIndex('Issue', 'title', 'body')
 ```
 
 ---
@@ -473,6 +602,7 @@ Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun
 | AI | LLM agents (Groq, Cerebras, NVIDIA) with validator and repair loops |
 | Frontend | **React**, **React Three Fiber** + drei (3D Skill City) |
 | API | Express (REST + SSE) |
+| GitHub access | **GitHub MCP server** (Docker, stdio) via the Model Context Protocol client SDK |
 | Verification | Platform-generated tests run in a Daytona sandbox |
 | Infra | Docker |
 
@@ -483,7 +613,7 @@ Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun
 ### Prerequisites
 
 - **Node.js** 20+ and **npm** (or pnpm / yarn)
-- **Docker** (for FalkorDB)
+- **Docker** (runs FalkorDB **and** the GitHub MCP server that the backend starts on demand)
 - A **GitHub OAuth app** and a **personal access token** (sign-in and commit history)
 - At least one **LLM API key** (Groq, Cerebras, or NVIDIA); the Mission Agent will not run without one
 - A **Daytona API key** (evaluation sandbox for mission tests)
@@ -528,6 +658,12 @@ Verify:
 ```bash
 docker exec -it falkordb redis-cli PING
 # PONG
+```
+
+**Pull the GitHub MCP server image.** The backend launches it with `docker run` whenever it syncs or inspects a repository, so Docker must be running and the image available:
+
+```bash
+docker pull ghcr.io/github/github-mcp-server:v1.11.0
 ```
 
 <details>
@@ -609,7 +745,7 @@ DEPTH_LLM_BREAKER=6              # consecutive failures before the circuit break
 | Variable | Purpose |
 |---|---|
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_OAUTH_CALLBACK_URL` | GitHub OAuth app used for sign-in. Create one at **GitHub, Settings, Developer settings, OAuth Apps** and set its callback URL to match. |
-| `GITHUB_PERSONAL_ACCESS_TOKEN` | Token used to read commit history and repositories |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | GitHub token handed to the GitHub MCP server (read-only tools) |
 | `GITHUB_EXCLUDE_REPOS` | Optional list of repositories to leave out of the analysis |
 | `SESSION_JWT_SECRET` | Secret used to sign session tokens |
 | `FRONTEND_URL` | Frontend origin (CORS and OAuth redirects) |
@@ -619,6 +755,31 @@ DEPTH_LLM_BREAKER=6              # consecutive failures before the circuit break
 | `DEPTH_LLM_*` | Rate limiting and failure handling for the Depth Analyzer's LLM calls |
 
 Optional: `LLM_TIMEOUT_MS` (Mission Agent timeout, default `30000`) and `MISSION_DEBUG=1` (log every successful mission query; failures always log).
+
+<details>
+<summary><b>Optional: sync tuning</b></summary>
+
+All have sensible defaults.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GITHUB_HISTORY_DAYS` | `365` | How far back to analyze |
+| `GITHUB_MAX_INITIAL_COMMITS_PER_REPO` | `60` | First-sync cap per repository |
+| `GITHUB_MAX_INITIAL_COMMITS_TOTAL` | `400` | First-sync cap overall |
+| `GITHUB_SYNC_OVERLAP_DAYS` | `7` | Overlap window for incremental syncs |
+| `GITHUB_CONCURRENCY` | `10` | Repositories processed in parallel |
+| `GITHUB_COMMIT_CONCURRENCY` | `12` | Commits fetched in parallel |
+| `GITHUB_FETCH_PRS` | `true` | Fetch pull requests |
+| `GITHUB_FETCH_PR_DETAILS` / `GITHUB_FETCH_PR_FILES` | `false` | One extra MCP call per PR, off for fast onboarding |
+| `GITHUB_FETCH_ACTIVITY` | `true` | Issues opened and pull requests reviewed |
+| `GITHUB_MAX_PATCH_CHARS` | `60000` | Diff size stored per file |
+| `GITHUB_MAX_ADDED_CODE_CHARS` | `40000` | Added-code size stored per file |
+| `GITHUB_REPO_CONTEXT_REFRESH_DAYS` | `7` | How often README and manifests are refreshed |
+| `FALKORDB_BATCH_SIZE` | `500` | Rows per batched write |
+| `FALKORDB_FILECHANGE_BATCH_SIZE` | `40` | FileChange rows per write batch |
+| `GITHUB_SYNC_DEBUG` | `false` | Verbose sync logging |
+
+</details>
 
 ### 4. Install and run the backend
 
@@ -661,6 +822,9 @@ npm install three @react-three/fiber @react-three/drei
 | Problem | Fix |
 |---|---|
 | `ECONNREFUSED 6379` | FalkorDB is not running: `docker ps`, then `docker start falkordb` |
+| MCP connection fails or sync hangs at `connecting` | The backend starts the GitHub MCP server with `docker run`. Make sure Docker is running and pull the image: `docker pull ghcr.io/github/github-mcp-server:v1.11.0` |
+| Sync stops with `rateLimited` | GitHub's rate limit was hit. Progress is checkpointed, so rerun later. Lower `GITHUB_MAX_INITIAL_COMMITS_*` or `GITHUB_COMMIT_CONCURRENCY` to be gentler |
+| `learning_failed` after sync | The LLM provider failed during enrichment. GitHub data is already saved; rerun the sync to learn from it |
 | Empty foundation ranking | No `BUILDS_ON` edges yet: re-run the analysis so metrics refresh |
 | Communities show only "Standalone" | Not enough `RELATED_TOPIC` links; the tool falls back to `Topic.cluster_id` |
 | `llm_unavailable` on mission | Set your LLM API keys (`GROQ_API_KEY`, `CEREBRAS_API_KEY`, `NVIDIA_API_KEY`); Pathway will not invent a mission without an LLM |
