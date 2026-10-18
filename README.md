@@ -135,6 +135,14 @@ flowchart LR
 
 The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe. It has four connected layers for the agents, plus an independent Skill graph for the 3D city:
 
+
+<p align="center">
+<img width="1535" height="735" alt="falkordb" src="https://github.com/user-attachments/assets/b73922fd-7fb1-4b33-a216-dec8fdb05b88" />
+  <br/>
+  <sub><b>The real graph in FalkorDB Browser:</b> one developer's demonstrations, the capabilities they prove, and the file changes behind them.</sub>
+</p>
+
+
 ```mermaid
 flowchart TB
     subgraph L1[1. Evidence layer]
