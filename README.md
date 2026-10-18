@@ -652,21 +652,8 @@ RETURN d, x, c
 
 ---
 
-## 🤝 Contributing
-
-1. Fork the repo
-2. `git checkout -b feature/my-feature`
-3. `git commit -m "feat: add my feature"`
-4. Push and open a Pull Request
-
----
-
-## 📄 License
-
-MIT © Pathway team
-
 <div align="center">
 
-**Built with ❤️ for the FalkorDB Hackathon**
+### ⭐ If you like Pathway, please star the repo!
 
 </div>
