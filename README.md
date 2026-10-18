@@ -1,4 +1,4 @@
-<div align="center">
+
 
 <img width="1100" height="662" alt="home" src="https://github.com/user-attachments/assets/7a8091a1-aa06-4dcf-8e66-222a07510e0f" />
 
@@ -136,10 +136,12 @@ flowchart LR
 The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe. It has four connected layers for the agents, plus an independent Skill graph for the 3D city:
 
 <p align="center">
-  <img src="docs/images/evidence-trail.png" alt="Evidence trail in the FalkorDB Browser" width="900"/>
+<img width="1535" height="735" alt="falkordb" src="https://github.com/user-attachments/assets/d5b30af7-e969-4be4-a20c-99863aa0016a" />
   <br/>
   <sub><b>The real graph in FalkorDB Browser:</b> one developer's demonstrations, the capabilities they prove, and the file changes behind them.</sub>
 </p>
+
+
 
 ```mermaid
 flowchart TB
