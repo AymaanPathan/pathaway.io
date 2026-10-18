@@ -51,8 +51,7 @@ When you complete a mission and the platform's tests pass, the verified code bec
 5. [Agent pipeline](#-agent-pipeline)
 6. [Chat agent tools](#-chat-agent-tools)
 7. [Setup instructions](#-setup-instructions)
-8. [Explore the graph](#-explore-the-graph-yourself)
-9. [Troubleshooting](#%EF%B8%8F-troubleshooting)
+8. [Troubleshooting](#%EF%B8%8F-troubleshooting)
 
 ---
 
@@ -129,6 +128,12 @@ flowchart LR
 ## 🕸️ Graph data model
 
 The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe. It has four connected layers for the agents, plus an independent Skill graph for the 3D city:
+
+<p align="center">
+  <img src="docs/images/evidence-trail.png" alt="Evidence trail in the FalkorDB Browser" width="900"/>
+  <br/>
+  <sub><b>The real graph in FalkorDB Browser:</b> one developer's demonstrations, the capabilities they prove, and the file changes behind them.</sub>
+</p>
 
 ```mermaid
 flowchart TB
@@ -475,24 +480,35 @@ Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun
 ### 1. Clone
 
 ```bash
-git clone https://github.com/<your-username>/pathway.git
-cd pathway
+git clone https://github.com/AymaanPathan/pathway.io.git
+cd pathway.io
 ```
 
 ### 2. Start FalkorDB with Docker
 
+FalkorDB requires Redis 8.0+, which is already bundled in the official `falkordb/falkordb` image, so there is nothing else to install. See the [FalkorDB Getting Started guide](https://docs.falkordb.com/getting-started).
+
+**Quickest start** (no authentication, data is lost when the container is removed):
+
 ```bash
+docker run -p 6379:6379 -p 3000:3000 --rm falkordb/falkordb:latest
+```
+
+**Recommended: with a persistent volume** (data survives restarts):
+
+```bash
+docker volume create falkordb_data
+
 docker run -d --name falkordb \
-  -p 6379:6379 \
-  -p 3000:3000 \
   -v falkordb_data:/var/lib/falkordb/data \
+  -p 6379:6379 -p 3000:3000 \
   falkordb/falkordb:latest
 ```
 
 | Port | Purpose |
 |---|---|
 | `6379` | FalkorDB (Redis protocol), used by the backend |
-| `3000` | FalkorDB Browser UI at http://localhost:3000 |
+| `3000` | Built-in FalkorDB Browser at http://localhost:3000 |
 
 > If port `3000` clashes with another service, map the browser elsewhere, e.g. `-p 3001:3000`.
 
@@ -502,6 +518,20 @@ Verify:
 docker exec -it falkordb redis-cli PING
 # PONG
 ```
+
+<details>
+<summary><b>Optional: password-protect FalkorDB</b></summary>
+
+```bash
+docker run -d --name falkordb \
+  -v falkordb_data:/var/lib/falkordb/data \
+  -p 6379:6379 -p 3000:3000 \
+  -e REDIS_ARGS="--requirepass yourpassword" \
+  falkordb/falkordb:latest
+```
+
+Then set the same password in your backend `.env`.
+</details>
 
 **Or with Docker Compose:**
 
@@ -513,7 +543,7 @@ services:
     container_name: falkordb
     ports:
       - "6379:6379"
-      - "3001:3000"
+      - "3000:3000"
     volumes:
       - falkordb_data:/var/lib/falkordb/data
     restart: unless-stopped
@@ -586,35 +616,6 @@ npm install three @react-three/fiber @react-three/drei
 4. Get your **next move**, then your **mission**
 5. Implement it, push your branch, and let the sandbox verify it
 6. Watch the graph grow and the celebration screen appear
-
----
-
-## 🔍 Explore the graph yourself
-
-Open the FalkorDB Browser (http://localhost:3000, or your mapped port) and run:
-
-```cypher
-// A developer's assessed topics and depth
-MATCH (d:Developer)-[:ASSESSED]->(a:DepthAssessment)-[:OF_TOPIC]->(t:Topic)
-RETURN d, a, t LIMIT 50
-
-// Prerequisite structure
-MATCH (a:Topic)-[b:BUILDS_ON]->(f:Topic)
-RETURN a, b, f LIMIT 100
-
-// Foundations by stored PageRank
-MATCH (t:Topic) WHERE t.foundation_rank IS NOT NULL
-RETURN t.name, t.foundation_rank ORDER BY t.foundation_rank DESC LIMIT 10
-
-// Goal to mission chain
-MATCH (g:Goal)-[:PROPOSES]->(n:NextMove)
-OPTIONAL MATCH (g)-[:HAS_MISSION]->(m:Mission)-[:EVALUATED_AS]->(e:Evaluation)
-RETURN g, n, m, e
-
-// Evidence behind a mission-verified capability
-MATCH (d:Developer)-[:DEMONSTRATED]->(x:Demonstration {source: "mission"})-[:OF_CAPABILITY]->(c:Capability)
-RETURN d, x, c
-```
 
 ---
 
