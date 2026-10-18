@@ -1,6 +1,5 @@
 <div align="center">
 
-# Pathaway
 <img width="1100" height="662" alt="home" src="https://github.com/user-attachments/assets/7a8091a1-aa06-4dcf-8e66-222a07510e0f" />
 
 
