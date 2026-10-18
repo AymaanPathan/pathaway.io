@@ -20,26 +20,24 @@
 
 ## 📖 What is Pathway?
 
-Pathway is an AI-powered developer growth platform. It reads your GitHub coding history, maps it onto a **Topic Graph** (what engineering topics exist, which ones depend on which, and how deeply *you* have actually worked with each), and recommends **one specific coding mission** in your own repository.
+Pathway reads your GitHub coding history and builds a **Topic Graph**: the engineering topics you have actually worked on, how those topics depend on and relate to each other, and how deeply *you* know each one, graded from your own code. It then recommends **one specific coding mission** in your own repository, verifies it with platform-run tests, and feeds the verified code back into the graph as new evidence.
 
-The Topic Graph is the reasoning core. It answers four questions that no list of tutorials can:
+The Topic Graph answers four questions that a list of tutorials cannot:
 
-1. **What do I already know?** Depth per topic, graded from real code (`DepthAssessment`).
-2. **What does this topic rest on?** Prerequisites via `BUILDS_ON`.
-3. **What is next to it?** Adjacent topics via `RELATED_TOPIC`, grouped by community detection.
-4. **What should I do next?** The nearest topic whose prerequisites I satisfy, anchored to a file in my repo.
+1. **What do I know?** A `DepthAssessment` per topic, backed by real file changes, with a confidence and an authenticity verdict.
+2. **What does this topic rest on?** Prerequisites through `BUILDS_ON` edges, each with a written reason.
+3. **What is adjacent?** `RELATED_TOPIC` edges and algorithmic communities.
+4. **What should I do next?** A `NextMove` anchored to a real file and a failure visible in your code, turned into a `Mission` with acceptance criteria.
 
-When you complete a mission and the platform's tests pass, the verified code becomes **new evidence** in the graph.
-
-> Pathway understands what you've built, finds the topic you are ready for, gives you a real coding task, and learns from your verified progress.
+> **Graph for structure, LLM for judgment.** FalkorDB supplies topics, edges, ranks, evidence and traversals. LLM agents classify, judge and write. Every LLM output passes validators that check it against the graph before it is stored.
 
 | Typical growth tools | Pathway |
 |---|---|
-| Self-rated skills or quiz scores | Topic depth derived from **real file changes** |
-| "Top 10 tutorials" lists | **One mission** anchored to a file in *your* repo |
-| Flat skill lists | A **prerequisite graph**: ordering comes from `BUILDS_ON` traversal |
-| Checkbox completion | Completion must **pass platform-run tests** |
-| Opaque scoring | **Graph algorithms**: PageRank, betweenness, label propagation, WCC |
+| Self-rated skills or quiz scores | Depth derived from **real file changes** (`DepthAssessment` → `BACKED_BY` → `FileChange`) |
+| "Top 10 tutorials" | **One mission** anchored to a file in *your* repo |
+| Flat skill lists | A **prerequisite graph** with reasons on every edge |
+| Checkbox completion | A mission counts only when criteria are **verified against the diff** and CI is acceptable |
+| Opaque scoring | **FalkorDB algorithms** (PageRank, betweenness, label propagation, WCC) plus stored query traces |
 
 ---
 
@@ -55,144 +53,146 @@ When you complete a mission and the platform's tests pass, the verified code bec
 1. [How Pathway understands a topic (worked example)](#-how-pathway-understands-a-topic)
 2. [Architecture](#%EF%B8%8F-architecture)
 3. [The Topic Graph](#%EF%B8%8F-the-topic-graph)
-4. [Graph algorithms and why topic relationships matter](#-graph-algorithms-and-why-topic-relationships-matter)
-5. [How the graph decides the next move](#-how-the-graph-decides-the-next-move)
-6. [The feedback loop at topic level](#-the-feedback-loop-at-topic-level)
-7. [Agent pipeline](#-agent-pipeline)
-8. [Chat agent tools](#-chat-agent-tools)
-9. [Evidence layer: GitHub MCP server and sync pipeline](#-evidence-layer-github-mcp-server-and-sync-pipeline)
-10. [3D Skill City](#%EF%B8%8F-3d-skill-city)
-11. [Tech stack](#-tech-stack)
-12. [Setup instructions](#-setup-instructions)
-13. [Troubleshooting](#%EF%B8%8F-troubleshooting)
-14. [Roadmap](#%EF%B8%8F-roadmap)
-15. [Design principles](#-design-principles)
+4. [Topic discovery and depth assessment](#-topic-discovery-and-depth-assessment)
+5. [Graph algorithms and traversals](#-graph-algorithms-and-traversals)
+6. [Goal Agent: from graph to NextMove](#-goal-agent-from-graph-to-nextmove)
+7. [Mission Agent and verification](#-mission-agent-and-verification)
+8. [The feedback loop at topic level](#-the-feedback-loop-at-topic-level)
+9. [Chat agent](#-chat-agent)
+10. [Evidence layer: capabilities, detectors, experiences](#-evidence-layer-capabilities-detectors-experiences)
+11. [Journey view and 3D Skill City](#%EF%B8%8F-journey-view-and-3d-skill-city)
+12. [GitHub MCP server and sync pipeline](#-github-mcp-server-and-sync-pipeline)
+13. [Tech stack](#-tech-stack)
+14. [Setup instructions](#-setup-instructions)
+15. [Troubleshooting](#%EF%B8%8F-troubleshooting)
+16. [Limitations](#-limitations)
+17. [Roadmap](#%EF%B8%8F-roadmap)
+18. [Design principles](#-design-principles)
 
 ---
 
 ## 🧭 How Pathway understands a topic
 
-Most READMEs list nodes and edges. This section follows **one topic** through the whole system.
+This section follows **one topic** from evidence to mission.
 
-> **About the numbers.** The example below traces a sample developer whose work centers on Redis-backed background jobs. Topic slugs, scores and file paths are representative of the shape of real output. Reproduce them on your own account with the queries in each step, then compare. Every query shown is the one the system runs.
+> **What is real and what is illustrative.** The mechanisms, queries, function names, fields and rules below are the ones in the code. The topic slugs, scores, file paths and quoted lines are **illustrative values** for a developer who built BullMQ workers. Topics are **discovered per developer** by the Depth Analyzer, so slugs differ between developers. Capabilities, detector rules and completion criteria are **seeded** and identical for everyone. Replace the example values with output from your own run (see [step 7 of setup](#7-reproduce-the-topic-trace-on-your-own-data)).
 
-**Goal set by the developer:** *"I want to build reliable background job systems."*
-
-### Step 1: The topic and what it rests on (`BUILDS_ON`)
-
-```mermaid
-flowchart BT
-    JQ["job-queues<br/>(target topic)"] -->|BUILDS_ON required| RD[redis-data-structures]
-    JQ -->|BUILDS_ON required| AP[async-processing]
-    JQ -->|BUILDS_ON helpful| RB[retry-and-backoff]
-    IDEM[idempotent-operations] -->|BUILDS_ON required| JQ
-    DL[distributed-locking] -->|BUILDS_ON required| RD
-    JQ -.->|RELATED_TOPIC| DL
-    JQ -.->|RELATED_TOPIC| OBS[job-observability]
-```
-
-```cypher
-MATCH path = (t:Topic {slug: 'job-queues'})-[r:BUILDS_ON*1..4]->(f:Topic)
-WITH f, min(length(path)) AS hops
-RETURN f.slug AS prerequisite, hops
-```
-
-| Prerequisite | Hops | Strength |
-|---|---|---|
-| `redis-data-structures` | 1 | required |
-| `async-processing` | 1 | required |
-| `retry-and-backoff` | 1 | helpful |
-
-### Step 2: What the developer actually knows (`DepthAssessment`)
-
-```cypher
-MATCH (:Developer {id: $dev})-[k:KNOWS_TOPIC]->(t:Topic)
-WHERE t.slug IN ['redis-data-structures','async-processing','retry-and-backoff','job-queues']
-RETURN t.slug AS topic, k.level AS level, k.level_rank AS rank
-```
-
-| Topic | Level | Rank |
-|---|---|---|
-| `redis-data-structures` | proficient | 3 |
-| `async-processing` | proficient | 3 |
-| `retry-and-backoff` | surface | 1 |
-| `job-queues` | working | 2 |
-
-### Step 3: Why that level? The evidence behind one assessment
-
-```cypher
-MATCH (:Developer {id: $dev})-[:ASSESSED]->(da:DepthAssessment)-[:OF_TOPIC]->(:Topic {slug:'job-queues'})
-OPTIONAL MATCH (da)-[:BACKED_BY]->(fc:FileChange)
-RETURN da.level, da.score, da.confidence, da.authenticity, da.verdict,
-       da.rationale, da.strengths_json, da.gaps_json,
-       collect({path: fc.path, commit: fc.commit_sha}) AS evidence
-```
-
-```text
-topic:        job-queues
-level:        working   (rank 2, score 34, confidence: medium)
-authenticity: genuine_implementation
-strengths:    queue + worker wired end to end; job payload validation
-gaps:         no deduplication; no lock or idempotency key around job handlers
-evidence:     src/queues/email.queue.ts        @ <commit permalink>
-              src/workers/email.worker.ts      @ <commit permalink>
-rationale:    Producer and worker are implemented with a real queue library and
-              concurrency settings. Handlers can run twice on retry with no guard,
-              so reliability is only partly demonstrated.
-```
-
-Every field is inspectable: the level has a score band, the score has a rationale, and the rationale points at real file changes through `BACKED_BY`.
-
-### Step 4: The decision (Goal Agent → `NextMove`)
-
-The Goal Agent does not guess. It receives the graph facts above and picks the nearest topic that the developer is *ready* for:
-
-```cypher
-// Candidate topics: all prerequisites known at 'working' or better, topic itself not yet proficient
-MATCH (cand:Topic)-[b:BUILDS_ON]->(pre:Topic)
-OPTIONAL MATCH (:Developer {id: $dev})-[kp:KNOWS_TOPIC]->(pre)
-OPTIONAL MATCH (:Developer {id: $dev})-[kc:KNOWS_TOPIC]->(cand)
-WITH cand,
-     collect({pre: pre.slug, strength: b.strength, rank: coalesce(kp.level_rank, 0)}) AS prereqs,
-     coalesce(kc.level_rank, 0) AS own_rank
-WHERE own_rank < 3
-  AND all(p IN prereqs WHERE p.strength <> 'required' OR p.rank >= 2)
-RETURN cand.slug, own_rank, cand.foundation_rank
-ORDER BY cand.foundation_rank DESC LIMIT 5
-```
-
-| Candidate | Own rank | Why it qualifies |
-|---|---|---|
-| `idempotent-operations` | 0 | Requires `job-queues` (working), met |
-| `distributed-locking` | 0 | Requires `redis-data-structures` (proficient), met |
-
-`idempotent-operations` directly closes the gap recorded in Step 3, so the Goal Agent emits:
-
-```text
-NextMove
-  title:     Make email jobs safe to retry
-  focuses:   idempotent-operations      (FOCUSES_ON)
-  advances:  idempotent_operations      (ADVANCES, Capability)
-  closes:    gap in job-queues          (CLOSES_GAP_IN)
-  starts_at: src/workers/email.worker.ts (STARTS_AT, FileChange)
-  backed_by: Demonstrations from Step 3  (BACKED_BY)
-  done_when: a retried job produces exactly one side effect
-```
-
-### Step 5: The Mission
-
-The Mission Agent turns the `NextMove` into an implementation-ready task in the developer's own repository, with 3 platform-run acceptance criteria. At least 2 of them name the required library and assert the interaction, so a trivial in-memory `Map` cannot pass. The stored `explanation_json` keeps the **real queries from Steps 1 to 4** as a trace, so the reason for the recommendation can be audited later.
+**Goal typed by the developer:** *"make my background jobs reliable"*
 
 ```mermaid
 flowchart LR
-    T[Topic: job-queues] --> DA[DepthAssessment: working<br/>gap: no idempotency]
-    T --> PRE[Prerequisites met:<br/>redis, async]
-    DA --> NM[NextMove:<br/>idempotent-operations]
-    PRE --> NM
-    NM --> M[Mission at<br/>email.worker.ts]
-    M --> SB[Sandbox tests]
-    SB -->|pass| VD[Verified Demonstration]
+    CODE[(FileChange<br/>added_code, imports, symbols)] --> DET[Detector rules<br/>SIGNAL_RULES]
+    DET --> DEM[Demonstration<br/>job_queue_workers: 2 hardening behaviours]
+    DEM -->|OF_CAPABILITY| CAP[Capability<br/>job_queues]
+    CAP -->|MAPS_TO weight, reason| TOP[Topic<br/>background_job_processing]
+    TOP -->|BUILDS_ON required| RD[Topic redis_data_structures]
+    TOP -->|BUILDS_ON required| AP[Topic asynchronous_programming]
+    TOP -->|RELATED_TOPIC| OBS[Topic observability]
+    TOP --> DA[DepthAssessment<br/>working, genuine_implementation]
+    DA --> GG[Goal graph<br/>retrieve, rank, read code]
+    GG --> NM[NextMove<br/>dead-letter handling]
+    NM --> M[Mission<br/>3 criteria, contract]
+    M --> V{Verified?}
+    V -->|yes| VD[Demonstration source=mission]
+    VD -->|EVIDENCE_FOR_TOPIC| TOP
+    VD -.->|marks stale| DA
 ```
+
+### Step 1: what the topic rests on
+
+The topic and its prerequisites come from the shared taxonomy. Edges carry `strength`, `reason`, `confidence`, `basis`, `build_id`, `model`. The walk is a breadth-first traversal over `BUILDS_ON` edges held in memory (one cached read of the taxonomy), up to 3 hops for prerequisites and 2 for "unlocks".
+
+```ts
+const lg = await readTopicLearningGraph(graph, developerId, "background_job_processing");
+// lg.prerequisites, lg.unlocks, lg.related, lg.capabilityPaths, lg.readiness
+```
+
+| Prerequisite | Hops | Strength | Edge reason (excerpt) | Developer level | Met |
+|---|---|---|---|---|---|
+| `redis_data_structures` | 1 | required | the queue stores jobs in Redis lists and sorted sets | proficient | yes |
+| `asynchronous_programming` | 1 | required | workers process jobs concurrently off the request path | proficient | yes |
+| `error_handling_and_retries` | 1 | helpful | failed jobs need classification before a retry policy applies | surface | no (not blocking: helpful) |
+
+`readiness.ready` is true when no **required** prerequisite on a required path is below `working`. Edges with `basis = "llm_inferred"` or `"evidence_overlap"` are labelled; none is anonymous.
+
+### Step 2: what the developer actually knows
+
+```cypher
+MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment {topic_slug: $slug})
+RETURN a.level, a.score, a.confidence, a.authenticity, a.verdict, a.rationale,
+       a.evidence_band, a.dimensions_json, a.stale
+```
+
+```text
+topic:         background_job_processing
+level:         working   (score 34, band 20-39)      baseline: working (31)
+confidence:    medium    authenticity: genuine_implementation
+evidence:      8 files, 6 commits, 1 repository      band: moderate
+safeguards:    retry policy, bounded worker concurrency
+rationale:     Observed: S1 builds a Worker with attempts and backoff options and a
+               concurrency limit. Observed: D1 is a job_queue_workers detection at
+               implementation depth. Inferred: retry settings were tuned after C3 (fix).
+               Associated: redis is present as a dependency only.
+               [Confidence medium: 8 files, 6 commits, 1 repository; 3 of 4 evidence
+               kinds; no related tests seen; single-repository evidence cannot be high]
+gaps:          no failed-job handling observed
+```
+
+The rationale separates `Observed:`, `Inferred:` and `Associated:` statements. Only observed statements, each citing a ref (`S1` code sample, `D1` detection, `E1` experience, `C1` commit), count as evidence. Every cited ref maps to real graph nodes through `BACKED_BY`.
+
+### Step 3: what "done well" means for this capability
+
+`COMPLETION_CRITERIA` (seeded as `TechniqueSpec` / `Safeguard` nodes) defines what a successful implementation of each technique contains. For `job_queue_workers`:
+
+| Safeguard (modifier label) | Required | Observed in this developer's code |
+|---|---|---|
+| retry policy | yes | yes |
+| bounded worker concurrency | yes | yes |
+| failed-job / dead-letter handling | yes | **no** |
+| job de-duplication | no | no |
+
+`evaluateCapabilityCompletion("job_queues", demos)` reports the technique as **not met**: depth was reached, but a required safeguard was never observed. That missing safeguard is the real, checkable gap that the next steps work from.
+
+### Step 4: the decision (Goal graph, then Goal Agent)
+
+`buildGoalGraph` retrieves a neighbourhood and `planGoal` asks the LLM to choose **one** move. The graph never chooses.
+
+```text
+resolution:  method=full_text, seeds=[background_job_processing]
+retrieval:   RELATED_TOPIC up to 2 hops + same-cluster topics, depth per topic,
+             MAPS_TO capability coverage (demonstrations per capability),
+             evidence E1..En with real code excerpts, newest file versions
+ranking:     Personalized PageRank (restart on seeds) orders the retrieved nodes
+LLM draft:   focus=background_job_processing, capability=job_queues, reuseId=E1
+             observedInCode: <12-140 char verbatim line from E1's code>
+             failureScenario: a job that exhausts its attempts is dropped and
+                              nothing records or surfaces it
+validators:  quote must be verbatim in the code, failure must be concrete (40+ chars),
+             no "nice-to-have" reasoning, files must exist in the evidence,
+             no repeat of a previous or verified mission
+```
+
+The accepted draft is stored by `storeNextMove`:
+
+```text
+(Goal)-[:PROPOSES]->(NextMove {title, summary, done_when, details_json})
+(NextMove)-[:FOCUSES_ON]->(Topic)   (NextMove)-[:ADVANCES]->(Capability)
+(NextMove)-[:STARTS_AT]->(FileChange)
+(NextMove)-[:BACKED_BY {ref}]->(Demonstration | FileChange | DepthAssessment)
+(NextMove)-[:LEVERAGES|CLOSES_GAP_IN]->(Topic)
+```
+
+A topic can be claimed as a strength only if the move cites evidence that belongs to that topic; otherwise the link is dropped and reported in `rejected`.
+
+### Step 5: the mission
+
+The Mission Agent turns the saved move into an implementation-ready task: at most 5 files, exactly 3 acceptance criteria written as test cases, a `contract` of decisions the developer must not guess (library, exported names, key format, TTL, error behavior), and a verbatim `grounding.observedNow` fragment from the pinned code. At least 2 criteria must name the required library and assert the interaction with it, so a trivial local stub cannot pass. The developer writes implementation only; the platform writes and runs the tests.
+
+`Mission.explanation_json` stores the real queries that loaded the saved move (relationship pattern, Cypher, row counts, timings). Nothing in that trace is reconstructed afterwards.
+
+### Step 6: closing the loop
+
+When a mission is **verified** (see [Mission Agent and verification](#-mission-agent-and-verification)), the platform writes a `Demonstration {source: "mission"}`, links it to the topic with `EVIDENCE_FOR_TOPIC {source: "mission_verified"}`, and flags the topic's `DepthAssessment` as `stale`. Only that topic needs to be re-graded. Details in [the feedback loop](#-the-feedback-loop-at-topic-level).
 
 ---
 
@@ -201,31 +201,36 @@ flowchart LR
 ```mermaid
 flowchart LR
     GH[(GitHub)] <-->|GitHub MCP server<br/>Docker, stdio| SYNC[Sync pipeline]
-    SYNC --> EV[(Evidence<br/>Commit / FileChange / Demonstration)]
+    SYNC --> EV[(Evidence<br/>Commit / FileChange)]
     EV --> DB[(FalkorDB)]
 
-    subgraph B[Topic graph + agents - core reasoning]
-        DA[Depth Analyzer] --> TG[Topic graph<br/>BUILDS_ON / RELATED_TOPIC]
-        TG --> GA[Goal Agent] --> MA[Mission Agent]
+    subgraph E[Evidence build]
+        DET[Detectors + learning pipeline] --> DEMO[Demonstration / Experience<br/>HAS_CAPABILITY roll-up]
+    end
+
+    subgraph T[Topic graph + agents - core reasoning]
+        DA[Depth Analyzer<br/>discover, gather, judge] --> TG[Topic graph<br/>BUILDS_ON / RELATED_TOPIC<br/>+ DepthAssessment]
+        TG --> GG[Goal graph retrieval<br/>PPR + code excerpts] --> GA[Goal Agent] --> MA[Mission Agent]
         MA --> V{Validators}
-        V -->|rejected: retry up to 3x| MA
+        V -->|rejected: repair up to 3x| MA
         V -->|accepted| M[Mission] --> SB[Sandbox tests]
-        SB -->|pass| VE[Verified Demonstration]
-        TG <--> CH[Chat Agent<br/>16 graph tools]
+        SB -->|verified| VE[Mission Demonstration]
+        TG <--> CH[Chat Agent<br/>5 tools over 16 graph tools]
     end
 
-    subgraph A[Skill graph - independent view]
-        SK[Skill analysis<br/>rule-based signals on real code] --> SG[Skill + SkillCategory graph]
-        SG --> API1["GET /api/graph/summary<br/>GET /api/skills/:slug"] --> CITY["3D Skill City<br/>React Three Fiber"]
+    subgraph S[Skill graph - independent view]
+        SK[Skill classification<br/>rule-based] --> SG[Skill + SkillCategory graph] --> CITY[3D Skill City]
     end
 
+    DB --> DET
     DB --> DA
     DB --> SK
+    DEMO --> DB
     VE --> DB
-    GH -.->|GitHub MCP: inspect repo at pinned commit| MA
+    GH -.->|inspect repo at pinned commit| MA
 ```
 
-> The two views are **independent consumers of the same evidence**. The chat agent, goal agent and mission agent read the **Topic graph**. The 3D city reads only the **Skill graph**. Neither calls the other.
+> The **Skill graph** (3D city) is independent of the **Topic graph**. Both read the same evidence. The Journey view reads the **capability** layer.
 
 ---
 
@@ -247,53 +252,72 @@ flowchart TB
         D1[Developer] --> FC[FileChange / Commit / Repository]
         FC --> DEM[Demonstration / Experience]
     end
-    subgraph L2[2. Capability taxonomy]
+    subgraph L2[2. Capability taxonomy - seeded]
         CAP[Capability<br/>SPECIALIZES / PREREQUISITE_OF / RELATED_TO]
+        TS[TechniqueSpec / Safeguard]
     end
-    subgraph L3[3. Topic taxonomy and depth]
+    subgraph L3[3. Topic taxonomy and depth - discovered]
         TOP[Topic<br/>BUILDS_ON / RELATED_TOPIC]
-        DA2[DepthAssessment]
+        APP[Approach]
+        DA2[DepthAssessment / DepthSnapshot]
     end
     subgraph L4[4. Goal and mission]
         GOAL[Goal] --> NM[NextMove] --> MIS[Mission] --> EVAL[Evaluation]
     end
     DEM -->|OF_CAPABILITY| CAP
+    CAP -->|HAS_TECHNIQUE_SPEC| TS
     TOP -->|MAPS_TO| CAP
+    TOP -->|HAS_APPROACH| APP
     DA2 -->|OF_TOPIC| TOP
     DA2 -->|BACKED_BY| FC
-    GOAL -->|REQUIRES| CAP
+    DEM -->|EVIDENCE_FOR_TOPIC| TOP
+    DEM -->|DEMONSTRATES_APPROACH| APP
     NM -->|FOCUSES_ON| TOP
     NM -->|ADVANCES| CAP
     NM -->|STARTS_AT| FC
-    EVAL -.->|passing mission creates| DEM
+    EVAL -.->|verified mission creates| DEM
 ```
 
-### Layer 3 first: Topics and depth (the heart of the graph)
+**Seeded vs. discovered.** Capabilities (20 learnable, 8 domains), detector rules (21), technique specs and safeguards are defined in code and written by `ensureCapabilityGraph`, which is stamped with a definitions version and re-seeds only when the definitions change. **Topics are not seeded.** They are proposed from your evidence by the Depth Analyzer, validated against it, and shared in one taxonomy across developers. No developer data is stored on a `Topic`.
+
+### Layer 3: Topics, approaches and depth
 
 ```mermaid
 erDiagram
-    Topic }o--o{ Topic : "BUILDS_ON (strength, basis)"
-    Topic }o--o{ Topic : "RELATED_TOPIC (basis)"
-    Topic }o--o{ Capability : "MAPS_TO (agent_validated)"
+    Topic }o--o{ Topic : "BUILDS_ON (strength, reason, confidence, basis)"
+    Topic }o--o{ Topic : "RELATED_TOPIC (reason, confidence, basis)"
+    Topic }o--o{ Capability : "MAPS_TO (weight, reason, basis)"
+    Topic ||--o{ Approach : HAS_APPROACH
     Developer ||--o{ DepthAssessment : ASSESSED
     DepthAssessment }o--|| Topic : OF_TOPIC
+    DepthAssessment }o--o{ Approach : "USES_APPROACH (depth, authenticity)"
     DepthAssessment }o--o{ FileChange : BACKED_BY
-    DepthAssessment }o--o{ Approach : USES_APPROACH
-    Developer }o--o{ Topic : "KNOWS_TOPIC (level, level_rank)"
+    DepthAssessment }o--o{ Demonstration : BACKED_BY
+    Developer ||--o{ DepthSnapshot : HAD_SNAPSHOT
+    DepthSnapshot }o--|| Topic : SNAPSHOT_OF
+    Developer }o--o{ Topic : "KNOWS_TOPIC (level, score, confidence)"
+    Demonstration }o--o{ Topic : "EVIDENCE_FOR_TOPIC (reason, confidence, source)"
+    Demonstration }o--o{ Approach : "DEMONSTRATES_APPROACH (reason, confidence, source)"
 ```
 
-`Topic` properties: `id`, `slug`, `name`, `domain` (`frontend | backend | database | infrastructure | ai_ml | mobile | general`), `description`, `aliases_text`, plus **algorithm results written back onto the node**:
+`Topic` properties: `id` (`topic:<slug>`), `slug`, `name`, `domain` (`frontend | backend | database | infrastructure | ai_ml | mobile | general`), `description`, `aliases_text`, `stub`, plus **algorithm results written onto the node**:
 
 | Property | Written by |
 |---|---|
-| `foundation_rank` | `algo.pageRank` |
+| `foundation_rank` | `algo.pageRank` over `BUILDS_ON` (falls back to `RELATED_TOPIC`) |
 | `bridge_score` | `algo.betweenness` |
-| `cluster_id` | `algo.labelPropagation` |
+| `cluster_id` | `algo.labelPropagation` over `RELATED_TOPIC` |
 | `component_id` | `algo.WCC` |
 
-**Edge semantics.** `(advanced)-[:BUILDS_ON]->(prerequisite)`: the target should be understood *before* the source. `strength` is `required` (cannot be learned without it) or `helpful`. `basis` is `llm_inferred`, `evidence_overlap`, or `curated`, so no edge is anonymous.
+**Edge semantics.** `(advanced)-[:BUILDS_ON]->(prerequisite)`: the target should be understood *before* the source. `strength` is `required` or `helpful`. `RELATED_TOPIC` is stored symmetric. Writers enforce:
 
-**`DepthAssessment`** (one per developer and topic) carries `level`, `level_rank`, `score`, `confidence`, `authenticity`, `verdict`, `rationale`, `strengths_json`, `gaps_json`, `evidence_refs_json`, `files`, `commits`, `repos`, `active_days`, `first_seen`, `last_seen`.
+- `BUILDS_ON` must stay a **DAG**; an edge that would close a cycle with any existing `BUILDS_ON` is rejected.
+- Every edge needs a **specific rationale** (a real sentence of 8+ words that says why); templates such as "X builds on Y" are rejected.
+- A `RELATED_TOPIC` between topics already linked by `BUILDS_ON` is rejected.
+- A later assertion replaces the stored rationale only when it is at least as confident.
+- A foundation the model names without an assessment is stored as an **unassessed stub** topic, so the edge is not lost.
+
+**`DepthAssessment`** (one per developer and topic) carries `level`, `level_rank`, `score`, `baseline_score`, `confidence`, `authenticity`, `verdict`, `rationale`, `strengths_json`, `gaps_json`, `safeguards_json`, `implementations_json`, `approaches_json`, `evidence_json`, `stats_json`, `spec_json`, `dimensions_json`, `evidence_band`, `is_current`, `stale`, `fallback`, `model`, `build_id`, plus counts and `first_seen` / `last_seen`. One immutable `DepthSnapshot` per build keeps history when the current assessment is replaced.
 
 | Depth level | Rank | Score band |
 |---|---|---|
@@ -303,9 +327,9 @@ erDiagram
 | `proficient` | 3 | 40 – 64 |
 | `deep` | 4 | 65 – 100 |
 
-**Authenticity** (was it built, or just present?): `genuine_implementation`, `working_usage`, `incidental`, `boilerplate`, `insufficient_evidence`.
+**Authenticity** (was it built, or only present?): `genuine_implementation`, `working_usage`, `incidental`, `boilerplate`, `insufficient_evidence`. **Confidence** (`high | medium | low`) describes the *evidence*, not the skill. It is stored separately from depth, along with an **evidence band** (`none | sparse | moderate | rich`) and informational dimensions (implementation complexity, approach coverage, safeguards, independent implementations, repeated application, recency).
 
-### Layer 1: Evidence (what the developer actually did)
+### Layer 1: Evidence
 
 ```mermaid
 erDiagram
@@ -313,7 +337,7 @@ erDiagram
     Developer ||--o{ FileChange : AUTHORED_CODE
     Developer ||--o{ Demonstration : DEMONSTRATED
     Developer ||--o{ Experience : EXPERIENCED
-    Developer }o--o{ Capability : "HAS_CAPABILITY (level)"
+    Developer }o--o{ Capability : "HAS_CAPABILITY (level, counts)"
     Developer }o--o{ Skill : HAS_SKILL
     FileChange ||--o{ Demonstration : PRODUCED
     Demonstration }o--|| Capability : OF_CAPABILITY
@@ -328,39 +352,10 @@ erDiagram
     Experience }o--|| Repository : OCCURS_IN
     Experience }o--o{ FileChange : EVIDENCED_BY
     Experience }o--o{ Demonstration : SUPPORTED_BY
-    SkillCategory ||--o{ Skill : CONTAINS
-    Skill }o--o{ Repository : DEMONSTRATED_IN
+    Experience }o--o{ EngineeringContext : IN_CONTEXT
 ```
 
-| Node | Key properties |
-|---|---|
-| `Developer` | `id`, `topic_depth_summary_json` (headline and pattern from the last analysis) |
-| `Commit`, `FileChange` | `id`, authored timestamps, `added_code`, language |
-| `Repository` | `id`, name |
-| `Demonstration` | `id`, `technique`, `summary`, `depth`, `depth_rank`, `path`, `commit_sha`, `permalink`, `source` (`"mission"` for mission-verified evidence), `mission_id` |
-| `Experience` | `id`, `fingerprint` (dedupe key) |
-
-> **Verified vs. inferred.** Only edges produced from the developer's own code (`HAS_CAPABILITY`, `DEMONSTRATED`) count as evidence. Structural edges are `basis = "declared"`; anything guessed from goal text or similarity is `basis = "inferred"` and can never satisfy a prerequisite.
-
-### Layer 2: Capability taxonomy (what can be demonstrated)
-
-```mermaid
-erDiagram
-    Capability ||--o{ Capability : SPECIALIZES
-    Capability }o--o{ Capability : "PREREQUISITE_OF (weight, reason)"
-    Capability }o--o{ Capability : "RELATED_TO (weight)"
-    Capability ||--o{ TechniqueSpec : HAS_TECHNIQUE_SPEC
-    TechniqueSpec ||--o{ Safeguard : HAS_SAFEGUARD
-    Concept }o--|| Capability : CANDIDATE_FOR
-```
-
-| Kind | Rule |
-|---|---|
-| **Learnable capability** (`parentId != null`) | Specific, evidence-checkable (e.g. `distributed_locking`, `job_queues`, `idempotent_operations`). Can be demonstrated, required by a goal, and recommended. |
-| **Domain** (`parentId = null`) | Groups learnable capabilities via `SPECIALIZES` (e.g. `concurrency_control`, `async_processing`). Never a prerequisite. |
-| **Concept** | Created from goal text, `basis = "inferred"`. Never demonstrated, never gates a prerequisite. |
-
-Topics connect to capabilities through `MAPS_TO`: **Topics order the learning, Capabilities are what a mission can prove.**
+> **Verified vs. inferred.** Only edges produced from the developer's own code count as evidence. Structural edges are `basis = "declared"`; anything guessed from goal text or similarity is `basis = "inferred"` and can never satisfy a prerequisite. `Topic -[:MAPS_TO]-> Capability` is taxonomy: it selects which demonstrations to read and is **never proof of skill**.
 
 ### Layer 4: Goal, NextMove, Mission, Evaluation
 
@@ -368,11 +363,10 @@ Topics connect to capabilities through `MAPS_TO`: **Topics order the learning, C
 erDiagram
     Developer ||--o{ Goal : HAS_GOAL
     Developer ||--o{ Mission : ASSIGNED
-    Goal }o--o{ Capability : "REQUIRES (priority)"
-    Goal }o--o{ Concept : MENTIONS
     Goal ||--o| NextMove : PROPOSES
     Goal ||--o{ Mission : HAS_MISSION
-    NextMove }o--o{ Topic : "TARGETS / FOCUSES_ON / LEVERAGES / CLOSES_GAP_IN"
+    Goal }o--o{ Topic : TARGETS
+    NextMove }o--o{ Topic : "FOCUSES_ON / LEVERAGES / CLOSES_GAP_IN"
     NextMove }o--|| Capability : ADVANCES
     NextMove }o--o| FileChange : STARTS_AT
     NextMove }o--o{ Demonstration : "BACKED_BY (ref)"
@@ -388,52 +382,32 @@ erDiagram
 | Node | Key properties |
 |---|---|
 | `Goal` | `id`, `developer_id`, `wish`, `resolved_by` |
-| `NextMove` | `title`, `summary`, `done_when`, `details_json` (challenge, decision, steps) |
-| `Mission` | `status` (`proposed → in_progress → submitted → …` or `abandoned`), `repository`, `branch`, `base_commit`, `start_path`, `capability_id`, `focus_slug`, `spec_json`, `pin_json`, `explanation_json` |
-| `Evaluation` | `verdict`, `head_commit`, `ci_state`, `summary`, `results_json`, `scope_warnings_json`, `changed_files_json` |
+| `NextMove` | `title`, `summary`, `done_when`, `details_json` (decision, challenge, startingPoint, steps) |
+| `Mission` | `status`, `verification_state`, `repository`, `branch`, `base_commit`, `start_path`, `capability_id`, `focus_slug`, `spec_json`, `pin_json`, `explanation_json`, `fork_repository`, `work_branch` |
+| `Evaluation` | `verdict`, `head_commit`, `ci_state`, `results_json`, `scope_warnings_json`, `changed_files_json`, `verified`, `verification_reasons_json` |
 
-**Design notes**
-
-- A `Mission` stores a **full snapshot** of the move it came from, because planning a new move replaces the goal's `NextMove`.
-- `explanation_json` stores a **trace of the real queries** that ran while loading the move (pattern, Cypher, params, row counts). Nothing is reconstructed afterwards.
-
-### Separate view: the Skill graph (powers the 3D city)
-
-Independent of the Topic graph. It is built from the same file-change evidence using rule-based signals (a definitive path such as `Dockerfile`, or a real import or API call in the added code, counts as strong evidence; a language-only match counts as weak).
-
-```mermaid
-erDiagram
-    Developer ||--o{ Skill : "HAS_SKILL (depth_score, level, trend, confidence, evidence_quality, commits_count, repos_count, recency_days)"
-    SkillCategory ||--o{ Skill : CONTAINS
-    Skill }o--o{ Skill : "CO_OCCURS"
-    Skill }o--o{ Repository : USED_IN
-```
-
-| Property on `HAS_SKILL` | Meaning |
-|---|---|
-| `depth_score` | 0 to 100 score, with an evidence-quality multiplier |
-| `level` | `novice`, `familiar`, `proficient`, `advanced`, `expert` |
-| `trend` | `rising`, `steady`, `cooling`, `dormant` |
-| `confidence` | `low`, `medium`, `high` |
-| `files_touched`, `strong_files`, `commits_count`, `repos_count`, `recency_days` | Evidence counts behind the score |
-
-The taxonomy also declares `implies` (Next.js implies React) and `related` skills, which feed the "learn next" suggestions.
+A `Mission` keeps a **full snapshot** of the move it came from, because planning a new move replaces the goal's `NextMove`. Mission `status` moves through `proposed → in_progress → submitted → completed | needs_work`, or `abandoned`.
 
 ### Indexes
 
 ```cypher
-CREATE INDEX FOR (n:Developer) ON (n.id)
 CREATE INDEX FOR (n:Topic) ON (n.id)
-CREATE INDEX FOR (n:Capability) ON (n.id)
+CREATE INDEX FOR (n:Topic) ON (n.slug)
+CREATE INDEX FOR (n:Approach) ON (n.id)
 CREATE INDEX FOR (n:DepthAssessment) ON (n.id)
 CREATE INDEX FOR (n:DepthAssessment) ON (n.developer_id)
 CREATE INDEX FOR (n:DepthAssessment) ON (n.topic_slug)
+CREATE INDEX FOR (n:DepthSnapshot) ON (n.id)
+CREATE INDEX FOR (n:Developer) ON (n.id)
+CREATE INDEX FOR (n:Capability) ON (n.id)
 CREATE INDEX FOR (n:Demonstration) ON (n.id)
-CREATE INDEX FOR (n:Experience) ON (n.fingerprint)
+CREATE INDEX FOR (n:Experience) ON (n.id)
 CREATE INDEX FOR (n:Goal) ON (n.id)
--- plus Commit, FileChange, Repository, Approach, Concept, Problem, Technique, Technology ...
+-- plus Commit, FileChange, Repository, Technique, Technology, TechniqueSpec, Safeguard ...
 
 CALL db.idx.fulltext.createNodeIndex('Topic', 'name', 'description', 'aliases_text')
+CALL db.idx.fulltext.createNodeIndex('Capability', 'name', 'description', 'keywords')
+CALL db.idx.fulltext.createNodeIndex('Demonstration', 'summary', 'snippet', 'commit_subject')
 
 -- created by sync ingestion
 CALL db.idx.fulltext.createNodeIndex('Commit', 'message')
@@ -444,67 +418,72 @@ CALL db.idx.fulltext.createNodeIndex('Issue', 'title', 'body')
 
 ---
 
-## 🧮 Graph algorithms and why topic relationships matter
+## 🔬 Topic discovery and depth assessment
 
-Ordering and ranking come from **graph position**, not from an LLM-invented score.
+The Depth Analyzer (`analyzeDeveloperDepth`) turns evidence into topics and judges each one.
 
-| Question | FalkorDB feature | Stored as / tool |
+```mermaid
+flowchart TD
+    A[Evidence atlas<br/>packages, signals, vocabulary,<br/>co-occurrence clusters, capabilities,<br/>experiences, skills, repositories] --> B[Discover topics<br/>LLM proposes, code validates]
+    B --> C[Gap-fill topics for<br/>uncovered capabilities]
+    C --> D[Gather topic evidence<br/>graph queries + in-memory matching]
+    D --> E[Baseline depth<br/>deterministic prior]
+    E --> F[LLM judge<br/>cites S/D/E/C refs]
+    F --> G[Reconcile<br/>guard-rails cap the level]
+    G --> H[Relate pass<br/>BUILDS_ON proposals with reasons]
+    H --> I[Persist + refresh<br/>FalkorDB metrics]
+```
+
+1. **Evidence atlas.** One read of the developer's authored file changes (keyset-paginated), capabilities, experiences, skills, repositories and demonstrations. Packages, signals and vocabulary are counted; a deterministic label-propagation groups atoms that are used together.
+2. **Discovery, grounded.** The LLM may only use packages, signals and capability ids copied from the atlas, and keywords found in the atlas vocabulary. Anything else is discarded and reported. A topic with no remaining supporting atom is dropped. The `domain` must be one of the controlled domains; otherwise a deterministic `inferDomain` classifies it. Capability coverage is computed and gaps are filled from the capability list.
+3. **Gather.** For each topic: matched files (packages, signals, symbol and path keywords), scaffold-commit detection, maturation (revisited files, follow-up fix/perf/refactor commits), declared-but-never-imported packages, hardening behaviours, code samples, demonstrations (read via `MAPS_TO`, with text-only matches capped at `usage`) and a footprint (commits, repositories, directories) used to relate topics by real overlap.
+4. **Baseline.** `computeBaselineDepth` sums capped components (volume, breadth, commits, sustained work, repositories, own implementation, hardening, maturation, tests, approach diversity) and applies caps (scaffold-heavy evidence ×0.6, one commit ≤ 25, one file ≤ 20). Every reduction is listed in `caps`.
+5. **Judge.** The LLM judges depth, authenticity and confidence from cited refs and may ask for more evidence by naming real packages or keywords (verified with an in-memory probe and a full-text probe on `FileChange.added_code`).
+6. **Reconcile (guard-rails).** The model may not exceed the baseline by more than one level; counts alone cannot exceed `working` without own code, hardening, revisits or tests; `deep` needs a built mechanism; authenticity caps the level (for example `boilerplate` cannot exceed `surface`); confidence is capped by how strong **and varied** the evidence is. Without an LLM the level never exceeds `proficient` and confidence is `low`. Every applied guard-rail is appended to the rationale.
+7. **Relate.** A separate pass proposes prerequisite links among the final topics; each must carry a specific reason and pass the DAG and rationale checks. Evidence-overlap `RELATED_TOPIC` edges are derived from shared commits, directories, capabilities and packages.
+8. **Persist.** Strict writes (a missed `MATCH` aborts before stale cleanup), `ASSESSED`, `OF_TOPIC`, `USES_APPROACH`, `BACKED_BY`, `KNOWS_TOPIC`, `DepthSnapshot`, evidence links, then `refreshTopicGraphMetrics`.
+
+The LLM layer goes through one shared governor per model (requests and tokens per minute, 429 handling), with a concurrency pool and a circuit breaker that pauses 30 seconds after repeated failures. Judgements and discoveries are cached per developer and fingerprint, so unchanged code is not re-judged.
+
+`reanalyzeTopicDepth` recomputes **one** topic from its stored `spec_json`; `relinkTopicTaxonomy` rebuilds relations from stored specs without calling the LLM.
+
+---
+
+## 🧮 Graph algorithms and traversals
+
+Ordering and ranking come from graph position, not an LLM-invented score.
+
+| Question | How it is computed | Stored as / used by |
 |---|---|---|
-| What are my foundations? | `algo.pageRank('Topic', 'BUILDS_ON')` (falls back to `RELATED_TOPIC` if no `BUILDS_ON` edges) | `foundation_rank` · `rank_foundations` |
-| What connects my skills? | `algo.betweenness` | `bridge_score` · `find_bridges` |
-| What do I work on together? | `algo.labelPropagation` over `RELATED_TOPIC` | `cluster_id` · `knowledge_communities` |
+| What are my foundations? | `algo.pageRank('Topic', 'BUILDS_ON')` (falls back to `RELATED_TOPIC`) | `foundation_rank` |
+| What connects my skills? | `algo.betweenness` over `BUILDS_ON` + `RELATED_TOPIC` | `bridge_score` |
+| What do I work on together? | `algo.labelPropagation` over `RELATED_TOPIC` (10 iterations) | `cluster_id` |
 | Which areas are disconnected? | `algo.WCC` | `component_id` |
-| How do topic X and Y connect? | `shortestPath((a)-[:BUILDS_ON\|RELATED_TOPIC*1..6]->(b))` | `connect_topics` |
-| How do I get to X? | `BUILDS_ON*1..4` variable-length traversal | `learning_path_to_topic` |
-| What is ready for me? | `BUILDS_ON` traversal + `KNOWS_TOPIC` join | `recommend_next_topics` |
-| What capability is still missing for my goal? | `[:SPECIALIZES\|PREREQUISITE_OF\|RELATED_TO*1..4]` from goal-required capabilities | Goal frontier |
+| How do topics X and Y connect? | Cypher `shortestPath` over `BUILDS_ON\|RELATED_TOPIC*1..6`, tried in both directions | path with hop types |
+| What must I learn before X? | Breadth-first walk of `BUILDS_ON` in memory, up to 3 hops, each hop carrying its edge reason | `readTopicLearningGraph` |
+| What does X unlock? | The same walk in reverse, up to 2 hops | `readTopicLearningGraph` |
+| What is ready for me? | Topics below the cut-off level whose required prerequisites are met, ordered by readiness, `foundation_rank`, unlock count, current score | `readLearningFrontier` |
+| Which evidence ties a topic to code? | `Topic -[:MAPS_TO]-> Capability <-[:OF_CAPABILITY]- Demonstration` for one developer, plus `EVIDENCE_FOR_TOPIC` | `readTopicGraphEvidence` |
 
-Metrics are refreshed safely: each metric is computed, written, and **only then** are stale values of that metric removed, so a failed run leaves the previous ranks intact.
+Metrics refresh safely: each metric is computed, written, and **only then** are stale values of that metric removed, so a failed run leaves the previous ranks intact. The result reports `status` (`ok | partial | failed | empty_graph`), the algorithms that ran and any failures. The taxonomy is small (hundreds of topics), so it is read once, cached for a short TTL, and traversed in memory; writers invalidate the cache.
 
-### What each relationship buys you
+### What relationships buy you
 
-**1. Prerequisite traversal exposes a missing foundation.** A developer targets `distributed-locking`. The traversal finds a required prerequisite they have never touched:
+**1. A prerequisite walk exposes a missing foundation.** `readTopicLearningGraph` marks a prerequisite `blocking` when it is required, on a required path, and below `working`. `readiness.learningOrder` lists blocking foundations deepest first, which is the order to learn them in.
 
-```cypher
-MATCH path = (t:Topic {slug: $target})-[:BUILDS_ON*1..4]->(f:Topic)
-WITH f, min(length(path)) AS hops
-OPTIONAL MATCH (:Developer {id: $dev})-[k:KNOWS_TOPIC]->(f)
-RETURN f.slug AS slug, hops, coalesce(k.level, 'none') AS level
-ORDER BY hops
-```
+**2. Shortest path connects two topics.** `connect_topics` returns the route and the type of every hop, so an association (`RELATED_TOPIC`) is never presented as a prerequisite (`BUILDS_ON`).
 
-| Slug | Hops | Level | Reading |
-|---|---|---|---|
-| `redis-data-structures` | 1 | proficient | ready |
-| `atomic-operations` | 1 | **none** | **missing foundation: start here** |
-
-The recommendation is `atomic-operations`, not `distributed-locking`. A flat skill list cannot say this.
-
-**2. Shortest-path traversal connects two topics.**
-
-```cypher
-MATCH (a:Topic {slug: 'async-processing'}), (b:Topic {slug: 'idempotent-operations'})
-MATCH p = shortestPath((a)-[:BUILDS_ON|RELATED_TOPIC*1..6]-(b))
-RETURN [n IN nodes(p) | n.slug] AS route, length(p) AS hops
-```
-
-```text
-route: async-processing → job-queues → idempotent-operations   (2 hops)
-```
-
-`connect_topics` uses this to answer "how does what I know lead to X?" with a concrete route.
-
-**3. Related-topic communities reveal adjacent knowledge.** `algo.labelPropagation` over `RELATED_TOPIC` groups topics into clusters. Topics in the same cluster as a strong topic, but with `none` or `surface` depth, are the natural adjacent areas. `algo.WCC` flags a developer whose knowledge sits in disconnected islands.
+**3. Communities reveal adjacent areas.** `labelPropagation` clusters topics; `WCC` flags knowledge that sits in disconnected islands. The goal graph adds same-cluster topics as weak (weight 0.25) neighbours.
 
 <details>
-<summary><b>Prerequisite roadmap query</b></summary>
+<summary><b>Prerequisite roadmap query (Cypher form)</b></summary>
 
 ```cypher
-MATCH path = (t:Topic {slug: $slug})-[:BUILDS_ON*1..4]->(f:Topic)
+MATCH path = (t:Topic {slug: $slug})-[:BUILDS_ON*1..3]->(f:Topic)
 WITH f, min(length(path)) AS hops
 OPTIONAL MATCH (:Developer {id: $dev})-[k:KNOWS_TOPIC]->(f)
-RETURN f.slug AS slug, f.name AS name, hops,
-       coalesce(k.level, "") AS level,
+RETURN f.slug AS slug, hops,
+       coalesce(k.level, "none") AS level,
        coalesce(k.level_rank, -1) AS rank
 ```
 </details>
@@ -519,84 +498,67 @@ CALL algo.labelPropagation({
   maxIterations: 10
 })
 YIELD node, communityId
-RETURN node.slug AS slug, communityId
+RETURN node.id AS id, communityId
 ```
 </details>
 
 ---
 
-## 🎯 How the graph decides the next move
+## 🎯 Goal Agent: from graph to NextMove
 
-The Goal Agent receives structured graph facts and must choose **one** `NextMove`. Each input comes from a specific graph feature:
-
-| Input to the Goal Agent | Source in the graph |
-|---|---|
-| Goal-required capabilities | `Goal -[:REQUIRES]-> Capability`, expanded by `SPECIALIZES / PREREQUISITE_OF / RELATED_TO*1..4` |
-| Candidate topics | `Topic -[:MAPS_TO]-> Capability` |
-| Prerequisites per candidate | `BUILDS_ON*1..4`, split into `required` and `helpful` |
-| Developer's depth per topic | `KNOWS_TOPIC` and `DepthAssessment` |
-| Proof behind that depth | `DepthAssessment -[:BACKED_BY]-> FileChange` |
-| Importance and reach | `foundation_rank` (PageRank), `bridge_score` (betweenness) |
-| Where to start | `STARTS_AT` a real `FileChange` in the developer's repo |
-
-**Readiness rule.** A candidate topic is eligible only when every `required` prerequisite is at `working` or better *by evidence*. Inferred edges can never satisfy a prerequisite. Among eligible candidates, those that close a recorded gap and rank higher by `foundation_rank` win.
-
-The full end-to-end trace is in [How Pathway understands a topic](#-how-pathway-understands-a-topic).
-
----
-
-## 🔁 The feedback loop at topic level
-
-```mermaid
-flowchart LR
-    T[Topic] --> DA[DepthAssessment]
-    DA --> NM[NextMove]
-    NM --> M[Mission]
-    M --> SB[Sandbox tests]
-    SB -->|pass| VD[Verified Demonstration<br/>source = mission]
-    VD -->|OF_CAPABILITY| CAP[Capability]
-    CAP -.->|MAPS_TO| T
-    VD -.->|next analysis run| DA
-```
-
-What happens today:
-
-1. A `NextMove` focuses on a `Topic` and advances a `Capability`.
-2. A `Mission` is generated from it and evaluated in the sandbox.
-3. A passing `Evaluation` writes `(Developer)-[:DEMONSTRATED]->(Demonstration {source:"mission", mission_id})-[:OF_CAPABILITY]->(Capability)`. This is stored evidence, written immediately.
-4. The topic's `DepthAssessment` is refreshed by the **Depth Analyzer on its next analysis run**, which can then see the new mission-verified evidence. The dotted edge above is that deferred step, not an instant recalculation.
-
-Verified work becomes graph evidence in the same run it passes. Topic-level re-grading happens when analysis runs again.
-
----
-
-## 🤖 Agent pipeline
+`planGoal` has two halves. **`buildGoalGraph` retrieves and ranks; the LLM decides; validators check the decision against the graph.**
 
 ```mermaid
 flowchart TD
-    S1[1. Depth Analyzer<br/>file changes to topics, depth, authenticity] --> S2[2. Goal Agent<br/>ONE next move with evidence ids]
-    S2 --> S3[3. Mission Agent<br/>implementation-ready mission]
-    S3 --> VAL[validateMission]
-    VAL --> RC[readContract]
-    RC --> CM[criteriaNameMechanism]
-    CM --> ST[stripTesting]
-    ST --> OUT[(Stored Mission)]
+    W[Wish text or goal topics] --> R[1. Resolve seeds<br/>agent topics, exact name,<br/>domain, full-text]
+    R --> X[2. Expand<br/>RELATED_TOPIC up to 2 hops<br/>+ same-cluster peers]
+    X --> Q[3. Read<br/>depth, capability coverage,<br/>evidence, completed missions]
+    Q --> C[Read code excerpts<br/>of the strongest evidence]
+    Q --> P[4. Personalized PageRank<br/>over the retrieved subgraph]
+    P --> S[5. Signals<br/>strengths, unproven, opportunities]
+    C --> L[LLM chooses ONE move]
+    S --> L
+    L --> F{finalize<br/>validators}
+    F -->|rejected: up to 2 repairs| L
+    F -->|accepted| N[storeNextMove]
 ```
 
-### Mission Agent guarantees
+| Input to the agent | Where it comes from |
+|---|---|
+| Seeds | Topics named by the goal agent (must exist as `Topic` nodes), an exact `Topic` name/slug match, a whole-area `domain`, or the `Topic` full-text index; a vague wish is mapped to existing slugs by a small LLM call, never invented |
+| Neighbourhood | `RELATED_TOPIC` up to 2 hops (one query per hop, so each edge keeps its reason) plus topics sharing `cluster_id` |
+| Developer depth | `Developer -[:ASSESSED]-> DepthAssessment -[:OF_TOPIC]-> Topic` (level, authenticity, approaches, gaps, safeguards, what was built) |
+| Capability coverage | `Topic -[:MAPS_TO]-> Capability` with the count of this developer's demonstrations per capability (zero means "no evidence found", not "cannot do it") |
+| Evidence | Demonstrations linked by `EVIDENCE_FOR_TOPIC` (confidence ≥ 0.3), demonstrations reached through `MAPS_TO`, code cited by assessments (`BACKED_BY`), and files matching the topic's own packages and keywords. Older file versions are marked superseded and the newest change to the same file is added |
+| Code | `FileChange.added_code` excerpts for the strongest evidence. **The agent may quote only this code** |
+| History | The previous `NextMove` of the goal and the verified missions on these topics, so nothing is repeated |
+| Ranking | Personalized PageRank (restart on seeds, damping 0.85), computed in TypeScript over the retrieved topic, assessment, capability, demonstration, file and repository nodes. It orders context; it does not choose the goal |
+
+**Validation (`finalize`).** The draft must pick evidence that has code behind it; its `observedInCode` must be a verbatim fragment of that code (a real line is substituted if it is not); the failure must be concrete, at least 40 characters, and not rest on practice, flexibility or "the code lacks an option"; steps must be specific; `doneWhen` must be checkable; named files must exist in the evidence; the move must not repeat a technique already demonstrated, the previous move, or a verified mission; and it may not mention earlier work when no history exists. Rejected output is repaired up to twice with the exact reasons. Transport failures (timeouts, 429s, 5xx) are retried separately and never spend repair attempts.
+
+**Statuses.** `planned`, `needs_clarification`, `needs_evidence` (no readable code behind the neighbourhood), `llm_unavailable` (nothing is invented without an LLM) and `generation_failed` (with `stage: "transport" | "validation"`).
+
+The decision trace (`DecisionTrace`) is built from the graph in code, not by the LLM: topic route from the seeds with relationship types and reasons, the assessment, capability and evidence on each path, neighbours of the focus topic, the code that is reused, and the alternative the agent considered.
+
+---
+
+## 🛠️ Mission Agent and verification
 
 <img width="1525" height="692" alt="mission-1" src="https://github.com/user-attachments/assets/46fc1b66-30c0-41ec-bcea-6289377d7fa6" />
 
-- **At most 5 files**, all implementation; `modifyPaths` includes the start file
-- **Exactly 3 acceptance criteria**, each an observable test case the platform runs
-- **3 to 5 steps**: step 1 opens the start file, the last commits and pushes
-- **`grounding.observedNow`**: a verbatim 12-140 char fragment of the real code
-- **`contract`**: library, exported names, key format, TTL, lifecycle, error behavior
-- **Criteria prove the mechanism**: at least 2 name the required library and assert the interaction, so a trivial local `Map` cannot pass
+`planMission` receives the saved `NextMove`, the capability it advances, the evidence, and a fresh **inspection of the repository** at a pinned commit (package root, package manager, test runner, nearby files, a gap probe over dependencies, the start file and paths). It does not change the goal, focus or capability.
 
-The developer **never writes tests**. The platform generates them from the criteria and runs them in a sandbox, so verification is independent of the person being verified.
+**Guarantees**
 
-### Self-repairing generation loop
+- At most **5 files**, all implementation; `modifyPaths` includes the start file; any new non-test file is in `createPaths`
+- Exactly **3 acceptance criteria**, each a test case the platform runs (given / when / then)
+- **3 to 5 steps**: step 1 opens the start file, the last commits and pushes; no step mentions tests
+- `grounding.observedNow`: a verbatim 12 to 140 character fragment of the current code
+- `contract`: library, exported names, key format, TTL, lifecycle, error behavior (3 to 8 concrete decisions)
+- At least 2 criteria name the required library and assert the interaction with it
+- The mission must keep the saved capability and name the mechanism the Goal Agent selected
+- Earlier and verified missions are listed so none is repeated
+- The developer **never writes tests**; the platform writes and runs them in a sandbox
 
 ```mermaid
 sequenceDiagram
@@ -614,142 +576,87 @@ sequenceDiagram
     Note over A,V: No LLM configured: status = llm_unavailable, nothing is invented
 ```
 
-### Grounding: the gap probe
+### Three different facts, kept apart
 
-Before the agent may claim "your code lacks X", Pathway checks `package.json` dependencies, the start file text, and file paths. If anything matches, the agent must describe what the code actually shows instead of claiming a gap.
+`Mission.verification_state`:
 
----
-
-## 🧰 Chat agent tools
-
-16 typed tools, each declaring `name`, `description`, `whenToUse`, the FalkorDB `features` it uses, and a parameter schema. That one declaration feeds the **planner**, the **argument validator** (`parseToolArgs` clamps numbers, enforces enums, drops unknown keys), and the **UI**.
-
-| Tool | Graph capability |
+| State | Meaning |
 |---|---|
-| `profile_overview` | DepthAssessment roll-up, PageRank/betweenness ordering |
-| `strongest_topics` | Depth levels and graph position |
-| `find_gaps` | Gaps relative to graph structure |
-| `recommend_next_topics` | `BUILDS_ON` traversal + `KNOWS_TOPIC` join |
-| `learning_path_to_topic` | `BUILDS_ON*1..4` traversal |
-| `rank_foundations` | `algo.pageRank` |
-| `find_bridges` | `algo.betweenness` |
-| `knowledge_communities` | `algo.labelPropagation` |
-| `connect_topics` | `shortestPath` between topics |
-| `explore_neighborhood` | Neighborhood queries |
-| `connectivity_check` | Structural connectivity |
-| `explain_topic` | Topic detail and context |
-| `compare_topics` | Side-by-side structural comparison |
-| `search_topics` | Full-text index on `Topic` |
-| `audit_authenticity` | Genuine vs. superficial usage |
-| `recent_activity` | `last_seen` reads: active vs. gone quiet |
+| `assigned` | The developer was given the task (proposed, in progress, submitted) |
+| `evaluated` | The code was assessed; the outcome may still be `needs_work` |
+| `verified` | **Every** criterion is met **and** verified against the diff, CI did not fail or stay pending, and a demonstration was extracted |
 
-> The chat agent reads the **Topic graph** only.
-
-Every call runs through `runTool` with a **20 s timeout** and returns a `ToolRun` with the result, latency, and a plain-language `how[]` trail. Tools return structured UI blocks (`roadmap`, `ranking`, `groups`, `timeline`, `stats`, `callout`): the LLM narrates, the graph supplies the facts.
+`verifyEvaluation` is a pure function: verdict `completed`, at least one criterion, all met, all verified (the quote was found in the diff and the check's preconditions held), `ciState` not `failure` or `pending`, and a demonstration present. Only `verified` writes a demonstration and reaches the topic pipeline. A `completed` verdict alone is not proof of a capability.
 
 ---
 
-## 🔌 Evidence layer: GitHub MCP server and sync pipeline
-
-The Topic Graph is only as good as its evidence. Everything below feeds `FileChange` and `Commit` nodes that `DepthAssessment` points back to.
-
-### GitHub MCP server
-
-Pathway reaches GitHub **only through the official [GitHub MCP server](https://github.com/github/github-mcp-server)** (Model Context Protocol). There is no hand-written GitHub REST client: the backend starts the server as a short-lived Docker container and talks to it over stdio with the MCP client SDK.
+## 🔁 The feedback loop at topic level
 
 ```mermaid
 flowchart LR
-    SYNC[Sync pipeline] --> CALL[MCP client<br/>@modelcontextprotocol/client]
-    AGENT[Agent-side repo access<br/>mission inspection] --> CALL
-    CALL -->|stdio| DOCKER[docker run -i --rm<br/>ghcr.io/github/github-mcp-server]
-    DOCKER -->|GitHub API| GH[(GitHub)]
+    T[Topic] --> DA[DepthAssessment]
+    DA --> NM[NextMove]
+    NM --> M[Mission]
+    M --> SB[Sandbox tests + CI]
+    SB --> VF{verifyEvaluation}
+    VF -->|verified| VD[Demonstration source=mission<br/>depth_rank 2]
+    VD -->|OF_CAPABILITY| CAP[Capability roll-up grows]
+    VD -->|EVIDENCE_FOR_TOPIC<br/>mission_verified, 0.8| T
+    VD -.->|DepthAssessment.stale = true| DA
+    DA -.->|reanalyzeTopicDepth| DA2[Updated assessment]
+    VF -->|no longer verified| RT[Retract demonstration<br/>mark topic stale]
 ```
 
-**Read-only tool allow-list.** The container is started with `GITHUB_TOOLS`, so only these tools exist for the session:
+What `recordEvaluation` does:
 
-| MCP tool | Used for |
+1. Stores an `Evaluation` and updates the mission's `status` and `verification_state`.
+2. **Verified:** creates `Demonstration {id: "demo:<missionId>", source: "mission", depth_rank: 2}` with `DEMONSTRATED` and `OF_CAPABILITY`, links it to the topic with `EVIDENCE_FOR_TOPIC {source: "mission_verified", confidence: 0.8, reason}`, and sets `DepthAssessment.stale = true` with a reason and timestamp. Mission demonstrations survive `cleanupStale` and are included in the capability roll-up on the next evidence build.
+3. **A later submission that is no longer verified** deletes that demonstration and marks the topic stale, so earlier credit is retracted.
+4. It returns a `MissionTopicUpdate` (`developerId`, `topicSlug`, `capabilityId`, `demonstrationId` or `null` when retracted, `linked`) so the caller can re-grade **only that topic**.
+
+`readStaleTopicAssessments` lists the topics flagged stale, and `reanalyzeTopicDepth` recomputes one topic from its stored spec and the current evidence. The depth update is therefore **targeted and deferred**: the flag is set immediately when a mission verifies, and the new `DepthAssessment` appears when the topic is re-graded. A mission does not set depth directly, and a single mission never claims more than `working`-level evidence.
+
+---
+
+## 🤖 Chat agent
+
+The chat agent reads the **Topic graph**. It exposes **5 public tools** that wrap **16 underlying graph tools**, each declaring its name, `whenToUse`, the FalkorDB features it uses and a parameter schema. One declaration feeds the planner, the argument validator (`parseToolArgs` clamps numbers, enforces enums, drops unknown keys) and the UI.
+
+| Public tool | Wraps (graph capability) |
 |---|---|
-| `get_me` | Resolve the signed-in developer |
-| `search_repositories` | Discover the developer's repositories |
-| `list_commits` | Find the developer's commits (initial window or incremental) |
-| `get_commit` | Fetch the full patch and per-file diffs of a commit |
-| `get_file_contents` | README, manifests and config files; repo inspection at a commit |
-| `list_pull_requests` | Pull requests per repository |
-| `pull_request_read` | Optional PR detail and changed files |
-| `search_issues` | Issues the developer opened and pull requests they reviewed |
+| `skill_overview` | `profile_overview`, `strongest_topics`, `search_topics` (full-text), `audit_authenticity`, `recent_activity` |
+| `gap_analysis` | `find_gaps`, `recommend_next_topics` (prerequisite walk + `KNOWS_TOPIC` join), `learning_path_to_topic` |
+| `topic_deep_dive` | `explain_topic`, `compare_topics` |
+| `topic_connections` | `connect_topics` (`shortestPath`), `explore_neighborhood` |
+| `graph_structure` | `rank_foundations` (PageRank), `find_bridges` (betweenness), `knowledge_communities` (label propagation), `connectivity_check` (WCC) |
 
-**Design notes**
+**How a question is answered**
 
-- **One file per tool.** `get-commit.ts`, `list-commits.ts`, and so on are thin wrappers around a single `GithubMcpCall` function, so sync code and agents share them.
-- **Token never goes on the command line.** Docker is passed `-e GITHUB_PERSONAL_ACCESS_TOKEN` and the value comes from the process environment.
-- **Two entry points.** `syncDeveloperGithubData` opens one session for a whole sync. `withGithubMcp(token, tools, fn)` opens a scoped session with its own tool list and closes it afterwards, for agent-side repository access. The scoped helper pins the server image (`v1.11.0`).
-- **SHA-aware file reads.** `get_file_contents` only resolves branch and tag names as `ref`, so a 40-hex commit id is moved to the `sha` argument automatically.
-- **Raw vs. parsed results.** `clientCall` returns the raw MCP result for the sync parser. `withGithubMcp` returns `{ ok, data, text }`.
+1. **Plan.** A keyword router handles recognisable questions without a model call; an LLM planner runs only for vague ones or greetings.
+2. **Round 1.** Up to 3 tools run in parallel, each with a 20 second timeout.
+3. **Round 2.** A follow-up runs only when round 1 leaves a concrete open question (for example, a gap was flagged, so the upper topic is explained and its prerequisite path is checked). It is chosen by code from the first results, within a cap of 5 tool runs.
+4. **Findings, paths and actions are built from tool output, never by the LLM.** Gap findings are ranked by the depth of the parent topic, then proximity, then foundation weight, and each keeps its own graph path.
+5. **Compose.** The LLM writes 2 to 4 sentences from the supplied facts. `sanitizeAnswer` rejects prose that claims hop counts, direct prerequisites or skill comparisons that no real path or fact supports, and falls back to the tool summaries.
 
-### GitHub sync pipeline
+The response keeps four ideas apart: **proficiency** (how deep the skill is), **confidence** (strength of the evidence), **graph importance** (PageRank lift, structure only) and **gap priority** (why one gap comes first). Heuristic estimates are labelled as estimates, and a tool's reliability is lowered when any of its graph queries failed. Every response includes the plain-language trail of what each tool did.
 
-Sync turns a developer's GitHub activity into graph evidence. It is incremental, rate-limit aware, and idempotent (every write is a `MERGE`).
+---
 
-```mermaid
-flowchart TD
-    A[connecting<br/>start MCP session] --> B[fetching_repos<br/>search_repositories]
-    B --> C[per repository<br/>list_commits: initial window or since last sync]
-    C --> D[get_commit<br/>full patch per file]
-    D --> E[classify and parse<br/>roles, hunks, symbols, imports, dependency changes]
-    E --> F[repo context<br/>README, manifests, config via get_file_contents]
-    F --> G[pull requests + activity<br/>list_pull_requests, search_issues]
-    G --> H[commit budget applied]
-    H --> I[writing<br/>batched MERGE into FalkorDB]
-    I --> J[learning pipeline<br/>Demonstrations from this batch's file changes]
-    J --> K[checkpoint last_synced_at]
-    K --> L[sync_complete + stats]
-```
+## 🧰 Evidence layer: capabilities, detectors, experiences
 
-Progress events (`connecting`, `repos_found`, `repo_started`, `commits_discovered`, `sync_progress`, `writing`, `learning_complete`, `sync_complete`, and others) are streamed to the UI.
+This layer feeds everything above.
 
-**What gets extracted from every commit**
+**Capabilities.** 20 learnable capabilities in 8 domains (concurrency, async processing, reliability, caching, real-time, API design and security, data layer, frontend delivery), for example `distributed_locking`, `job_queues`, `idempotent_operations`, `retry_backoff`, `application_caching`, `graph_modeling`. Domains only group learnable capabilities through `SPECIALIZES`; they are never prerequisites. Few `PREREQUISITE_OF` edges are declared (for example `api_design` before `webhook_handling` and `rate_limiting`), and every learnable capability has an explicit dependency entry with a reason, including a written reason when it has none. The graph is validated for cycles, depth, unknown ids, category endpoints and capabilities that no detector can demonstrate.
 
-| Evidence | Examples |
-|---|---|
-| File role | `source`, `test`, `migration`, `schema`, `style`, `markup`, `config`, `infra`, `dependency_manifest` |
-| Diff structure | Hunks, touched scopes, additions and deletions, renames |
-| Code signals | Symbols added, modified and removed; imports added and removed; relative imports; comment lines; max indent depth |
-| Dependencies | Added, removed and changed packages parsed from `package.json`, `pyproject.toml`, `requirements.txt`, `go.mod`, `Cargo.toml`, `Gemfile`, `composer.json` |
-| Repo context | README, manifest and config files, root entries, tooling, dependency map (refreshed every 7 days by default) |
+**Detector rules (21).** A rule is a composition, not a keyword: `allOf` groups (AND of ORs) over **added, non-comment, non-test** lines, optional `excludeIf`, an anchor line, and **modifiers** (hardening behaviours actually observed, optionally within a line window of the anchor). Depth is set by the rule tier, and every two modifiers raise it one step (`usage → implementation → strong`).
 
-Lockfiles, `node_modules/`, `dist/`, generated and minified files, images and docs are filtered out, so only authored source evidence reaches the graph. Stored patches are capped (60k chars of diff and 40k of added code per file by default) to keep MCP traffic and graph size small.
+**Demonstrations.** One per rule match, with technique, modifiers, depth, file, line range, a snippet, a GitHub permalink and the engineering layer. A model may propose additional claims, but a Demonstration is rebuilt from the real added lines: the range must be valid and contain added lines, the quote must appear verbatim, modifiers are empty, `ruleId` is `llm_discovery:<capability>`, and depth never exceeds `implementation`, so these can never satisfy a completion safeguard.
 
-**What sync writes to FalkorDB**
+**Roll-up.** `HAS_CAPABILITY` carries `level` (`insufficient_evidence | usage | repeated_usage | implementation | strong`), recency, counts, first/last seen and top techniques. There is no blended score. Verified-mission demonstrations are included.
 
-```mermaid
-erDiagram
-    Developer ||--o{ Repository : CONTRIBUTED_TO
-    Developer ||--o{ Commit : MADE
-    Developer ||--o{ FileChange : AUTHORED_CODE
-    Developer ||--o{ PullRequest : AUTHORED
-    Developer ||--o{ Issue : OPENED
-    Developer ||--o{ ReviewedPullRequest : REVIEWED
-    Commit }o--|| Repository : IN_REPOSITORY
-    Commit ||--o{ FileChange : CHANGED
-    Commit }o--o| PullRequest : IN_PR
-    FileChange }o--|| Repository : IN_REPOSITORY
-    PullRequest }o--|| Repository : IN_REPOSITORY
-    PullRequest ||--o{ File : CHANGED
-    Issue }o--|| Repository : IN_REPOSITORY
-```
+**Experiences.** Demonstrations of the same capability and technique are grouped (deterministically, without an LLM) into developer-scoped `Experience` nodes with counts across commits, repositories and days, linked to a problem statement (from commit subjects), technique, technologies, repositories and engineering context.
 
-**Built for real accounts**
-
-- **Incremental.** A per-repository `last_synced_at` checkpoint plus a 7-day overlap window, so reruns only fetch what is new.
-- **Budgeted onboarding.** First sync is capped (60 commits per repository, 400 total, last 365 days by default), newest first.
-- **Rate-limit aware.** Each call retries up to 3 times with exponential backoff and jitter. On a GitHub rate limit the sync stops retrying, skips the remaining calls, and reports `rateLimited` instead of hanging. Repositories that failed discovery are not checkpointed, so the next run picks them up.
-- **Resilient enrichment.** The learning stage is separate: if the LLM provider is down, the GitHub data is still saved and a `learning_failed` event is emitted.
-- **Bounded concurrency.** Repositories, commits and PR details are fetched with configurable concurrency.
-- **Clean graph.** Evidence outside the history window, excluded repositories (`GITHUB_EXCLUDE_REPOS`) and inactive repository links are pruned.
-- **Safe Cypher.** Labels and properties interpolated into index queries pass an identifier allow-list.
-- **Run stats.** Each sync returns repositories, commits discovered and processed, files changed, source and test files, patches stored, hunks, symbols, imports, dependency changes, GitHub retries, and final graph node and relationship counts.
-
-**Built-in evidence analytics**
+**Completion criteria.** `COMPLETION_CRITERIA` defines, per technique, a minimum depth and safeguards that must (required) or should (optional) be observed. A technique is met only from demonstrations of **its own rule**; a capability is complete when at least one of its techniques is met.
 
 ```cypher
 // Files that are frequently changed together (co-change coupling)
@@ -772,44 +679,141 @@ ORDER BY commits DESC LIMIT 50
 
 ---
 
-## 🏙️ 3D Skill City
+## 🏙️ Journey view and 3D Skill City
+
+**Journey.** `readJourney` is a read-only account of what was detected, built from traversals and explained in plain English with the developer's real numbers: capabilities with level and techniques, the demonstrations that triggered each (file, line range, permalink), strengths by deterministic rules (`core` = a hardened mechanism in 2+ commits, `solid` = mechanism detected, `emerging` = repeated use only; thin evidence is flagged `tentative`), domains, a monthly timeline, per-repository summary and a coverage check that says whether any history was unreadable. Missing evidence always means "not seen", never "cannot do it".
+
+**3D Skill City.** An interactive view built with **React Three Fiber**, driven entirely by the **Skill graph**, which is independent of the Topic graph.
 
 <img width="1535" height="690" alt="graph" src="https://github.com/user-attachments/assets/cd872edd-baf8-4a9e-ba09-f69bd23cdd55" />
-
-An interactive 3D view of the developer's skills, built with **React Three Fiber**. It is driven entirely by the **Skill graph** and has no connection to the chat agent or the Topic graph.
 
 ```mermaid
 flowchart LR
     HUB((Developer<br/>hub)) ---|bridge| B1[Building = SkillCategory]
     HUB ---|bridge| B2[Building = SkillCategory]
     B1 --> F1[Floor = Skill<br/>ranked by depthScore]
-    F1 --> D1[Furniture, sign, trend glyph,<br/>5-dot depth meter, activity bars]
+    F1 --> D1[Sign, trend glyph,<br/>5-dot depth meter, activity bars]
 ```
 
 | Visual | Graph data |
 |---|---|
-| **Hub** at the centre | The `Developer` |
-| **Building** on a ring around the hub | A `SkillCategory` (ring radius grows with the number of categories) |
-| **Floor** inside a building (top skills by score, capped) | A `Skill` via `(SkillCategory)-[:CONTAINS]->(Skill)` |
-| Floor order (highest on top) | `HAS_SKILL.depth_score`, then depth rank |
-| 5-dot depth meter | Skill level: `novice → familiar → proficient → advanced → expert` |
-| Trend badge on the sign (▲ rising, ▼ cooling, zz dormant) | `HAS_SKILL.trend` |
-| Bar chart on the monitor | Monthly activity (`activity[].count`, last 12 months) |
-| Package flying along a bridge | A category arriving while the graph regenerates (streamed over SSE) |
-| **Skill Insights panel** | Strongest, rising, cooling, thin evidence, and "learn next" (adjacent skills via `CO_OCCURS` / `implies`) |
-| **Skill Evidence panel** | The commits and files that prove a skill (`/api/skills/:slug`) |
+| **Hub** | The `Developer` |
+| **Building** on a ring | A `SkillCategory` (ring radius grows with the number of categories) |
+| **Floor** (top skills, capped) | A `Skill` via `(SkillCategory)-[:CONTAINS]->(Skill)` |
+| Floor order | `HAS_SKILL.depth_score`, then depth rank |
+| 5-dot depth meter | `novice → familiar → proficient → advanced → expert` |
+| Trend badge | `HAS_SKILL.trend` (rising, steady, cooling, dormant) |
+| Monitor bars | Monthly activity (last 18 months) |
+| **Skill Insights** | Strongest, rising, cooling, thin evidence, and "learn next" from `related` and `implies` |
+| **Skill Evidence** | The files that prove a skill (`/api/skills/:slug`) |
 
-**Camera.** An overview shot of the whole city, and a "dollhouse" fly-to when a building is selected so every floor is visible. Orbit, pan and zoom via `OrbitControls`.
-
-**Endpoints used by the city**
+Skills are classified by rule (a definitive path such as `Dockerfile` or a real import or call in the added code is strong evidence; a language-only match is weak). Depth blends capped components for volume, breadth, commits, repositories and sustained use, multiplied by an evidence-quality factor. Edges: `HAS_SKILL`, `CO_OCCURS` (from the same commit), `IMPLIES`, `ADJACENT_TO`, `USED_IN`.
 
 | Route | Purpose |
 |---|---|
 | `GET /api/graph/summary` | Categories, skills and insights for the city |
-| `GET /api/graph/regenerate` | Rebuilds the skill graph, streaming progress over SSE (`area_ready` per building) |
+| `GET /api/graph/regenerate` | Rebuilds the skill graph, streamed over SSE (`area_ready` per building) |
 | `GET /api/skills/:slug` | Skill detail with commit-level proof |
-| `GET /api/skills/graph`, `/insights`, `/taxonomy` | Skill graph, insights, and the skill taxonomy |
-| `GET /api/graph/debug-intelligence` | Counts of skills, capabilities, demonstrations, and relationships |
+| `GET /api/skills/graph`, `/insights`, `/taxonomy` | Skill graph, insights, taxonomy |
+| `GET /api/graph/debug-intelligence` | Counts of skills, capabilities, demonstrations, relationships |
+
+---
+
+## 🔌 GitHub MCP server and sync pipeline
+
+Pathway reaches GitHub **only through the official [GitHub MCP server](https://github.com/github/github-mcp-server)**. There is no hand-written GitHub REST client: the backend starts the server as a short-lived Docker container and talks to it over stdio with the MCP client SDK.
+
+```mermaid
+flowchart LR
+    SYNC[Sync pipeline] --> CALL[MCP client<br/>@modelcontextprotocol/client]
+    AGENT[Agent-side repo access<br/>mission inspection] --> CALL
+    CALL -->|stdio| DOCKER[docker run -i --rm<br/>ghcr.io/github/github-mcp-server]
+    DOCKER -->|GitHub API| GH[(GitHub)]
+```
+
+**Read-only tool allow-list.** The container is started with `GITHUB_TOOLS`, so only these tools exist for the session:
+
+| MCP tool | Used for |
+|---|---|
+| `get_me` | Resolve the signed-in developer |
+| `search_repositories` | Discover repositories (pushed within the history window) |
+| `list_commits` | Find the developer's commits |
+| `get_commit` | Fetch the full patch and per-file diffs |
+| `get_file_contents` | README, manifests, config, directory listings; repo inspection at a commit |
+| `list_pull_requests` | Pull requests per repository |
+| `pull_request_read` | Optional PR detail, reviews and changed files |
+| `search_issues` | Issues opened and pull requests reviewed |
+
+**Design notes**
+
+- **One file per tool.** The tool wrappers share a single `GithubMcpCall` function, so sync code and agents use the same calls.
+- **Token never goes on the command line.** Docker is passed `-e GITHUB_PERSONAL_ACCESS_TOKEN` and the value comes from the process environment.
+- **Two entry points.** `syncDeveloperGithubData` opens one session for a whole sync (image tag `latest`). `withGithubMcp(token, tools, fn)` opens a scoped session with its own tool list for agent-side repository access and pins `v1.11.0`.
+- **SHA-aware file reads.** A 40-hex commit id is moved to the `sha` argument automatically.
+
+### Sync pipeline
+
+Incremental, rate-limit aware, idempotent (every write is a `MERGE`).
+
+```mermaid
+flowchart TD
+    A[connecting<br/>start MCP session] --> B[fetching_repos<br/>search_repositories]
+    B --> C[per repository<br/>list_commits: initial window or since checkpoint]
+    C --> D[get_commit<br/>full patch per file]
+    D --> E[classify and parse<br/>roles, hunks, symbols, imports, dependency changes]
+    E --> F[repo context<br/>README, manifests, config]
+    F --> G[pull requests + activity]
+    G --> H[commit budget applied]
+    H --> I[writing<br/>batched MERGE into FalkorDB]
+    I --> J[learning pipeline<br/>this batch's file changes]
+    J --> K[checkpoint last_synced_at]
+    K --> L[sync_complete + stats]
+```
+
+**What is extracted from every commit**
+
+| Evidence | Examples |
+|---|---|
+| File role | `source`, `test`, `migration`, `schema`, `style`, `markup`, `config`, `infra`, `dependency_manifest` |
+| Diff structure | Hunks, touched scopes, additions and deletions, renames |
+| Code signals | Symbols added, modified, removed; imports added and removed; relative imports; comment lines; max indent depth; counted signals such as `caching`, `queues_workers`, `llm_ai`, `graph_db` |
+| Dependencies | Added, removed and changed packages from `package.json`, `pyproject.toml`, `requirements.txt`, `go.mod`, `Cargo.toml`, `Gemfile`, `composer.json` |
+| Commit | Subject, conventional type and scope, breaking and revert flags, PR number |
+| Repo context | README, manifest and config files, root entries, tooling flags, dependency map (refreshed every 7 days by default) |
+
+Lockfiles, `node_modules/`, `dist/`, generated and minified files, images and docs are filtered out. Stored patches are capped (60k chars of diff and 40k of added code per file by default).
+
+**What sync writes**
+
+```mermaid
+erDiagram
+    Developer ||--o{ Repository : CONTRIBUTED_TO
+    Developer ||--o{ Commit : MADE
+    Developer ||--o{ FileChange : AUTHORED_CODE
+    Developer ||--o{ PullRequest : AUTHORED
+    Developer ||--o{ Issue : OPENED
+    Developer ||--o{ ReviewedPullRequest : REVIEWED
+    Commit }o--|| Repository : IN_REPOSITORY
+    Commit ||--o{ FileChange : CHANGED
+    Commit }o--o| PullRequest : IN_PR
+    FileChange }o--|| Repository : IN_REPOSITORY
+    PullRequest }o--|| Repository : IN_REPOSITORY
+    PullRequest ||--o{ File : CHANGED
+    Issue }o--|| Repository : IN_REPOSITORY
+```
+
+**Built for real accounts**
+
+- **Incremental.** A per-repository `last_synced_at` checkpoint plus a 7-day overlap window.
+- **Budgeted onboarding.** First sync is capped (60 commits per repository, 400 total, 365 days by default), newest first.
+- **Rate-limit aware.** Each call retries up to 3 times with exponential backoff and jitter. On a GitHub rate limit the sync stops retrying, skips remaining calls and reports `rateLimited`. Repositories whose discovery or commits failed are not checkpointed, so the next run picks them up.
+- **Resilient enrichment.** The learning stage is separate: if the LLM provider is down, the GitHub data is still saved and a `learning_failed` event is emitted. Commit enrichment is written only after learning succeeds.
+- **Bounded concurrency.** Repositories, commits and PR details use configurable concurrency.
+- **Clean graph.** Evidence outside the history window, excluded repositories (`GITHUB_EXCLUDE_REPOS`) and inactive repository links are pruned.
+- **Safe Cypher.** Labels and properties interpolated into index queries pass an identifier allow-list.
+- **Run stats.** Repositories, commits discovered and processed, files changed, source and test files, patches stored, hunks, symbols, imports, dependency changes, retries, and final graph node and relationship counts.
+
+Progress events (`connecting`, `repos_found`, `repo_started`, `commits_discovered`, `sync_progress`, `writing`, `learning_complete`, `learning_failed`, `rate_limited`, `sync_complete`, and others) are streamed to the UI.
 
 ---
 
@@ -819,7 +823,7 @@ flowchart LR
 |---|---|
 | Graph database | **FalkorDB** (Docker), Cypher, built-in graph algorithms |
 | Backend | Node.js, TypeScript (ESM) |
-| AI | LLM agents (Groq, Cerebras, NVIDIA) with validator and repair loops |
+| AI | LLM agents on **Cerebras** (default) and **NVIDIA** (gpt-oss), with validator and repair loops, a shared rate governor and a circuit breaker |
 | Frontend | **React**, **React Three Fiber** + drei (3D Skill City) |
 | API | Express (REST + SSE) |
 | GitHub access | **GitHub MCP server** (Docker, stdio) via the Model Context Protocol client SDK |
@@ -834,8 +838,8 @@ flowchart LR
 
 - **Node.js** 20+ and **npm** (or pnpm / yarn)
 - **Docker** (runs FalkorDB **and** the GitHub MCP server that the backend starts on demand)
-- A **GitHub OAuth app** and a **personal access token** (sign-in and commit history)
-- At least one **LLM API key** (Groq, Cerebras, or NVIDIA); the Mission Agent will not run without one
+- A **GitHub OAuth app** and a **personal access token**
+- A **Cerebras API key** (used by the depth, goal, mission and chat agents); an **NVIDIA API key** is optional
 - A **Daytona API key** (evaluation sandbox for mission tests)
 
 ### 1. Clone
@@ -847,7 +851,7 @@ cd pathway.io
 
 ### 2. Start FalkorDB with Docker
 
-FalkorDB requires Redis 8.0+, which is already bundled in the official `falkordb/falkordb` image, so there is nothing else to install. See the [FalkorDB Getting Started guide](https://docs.falkordb.com/getting-started).
+FalkorDB requires Redis 8.0+, which is already bundled in the official `falkordb/falkordb` image. See the [FalkorDB Getting Started guide](https://docs.falkordb.com/getting-started).
 
 **Quickest start** (no authentication, data is lost when the container is removed):
 
@@ -855,7 +859,7 @@ FalkorDB requires Redis 8.0+, which is already bundled in the official `falkordb
 docker run -p 6379:6379 -p 3000:3000 --rm falkordb/falkordb:latest
 ```
 
-**Recommended: with a persistent volume** (data survives restarts):
+**Recommended: with a persistent volume:**
 
 ```bash
 docker volume create falkordb_data
@@ -880,9 +884,10 @@ docker exec -it falkordb redis-cli PING
 # PONG
 ```
 
-**Pull the GitHub MCP server image.** The backend launches it with `docker run` whenever it syncs or inspects a repository, so Docker must be running and the image available:
+**Pull the GitHub MCP server images.** The backend launches them with `docker run`. The sync session uses the `latest` tag and the scoped agent helper pins `v1.11.0`:
 
 ```bash
+docker pull ghcr.io/github/github-mcp-server:latest
 docker pull ghcr.io/github/github-mcp-server:v1.11.0
 ```
 
@@ -947,39 +952,56 @@ FALKORDB_URL=redis://localhost:6379
 # with a password: redis://:yourpassword@localhost:6379
 
 # --- LLM providers ---
-GROQ_API_KEY=gsk_xxx
-GROQ_MODEL=your_groq_model
 CEREBRAS_API_KEY=csk_xxx
-NVIDIA_API_KEY=nvapi_xxx
+NVIDIA_API_KEY=nvapi_xxx         # optional
+# NVIDIA_MODEL=openai/gpt-oss-20b
 
 # --- Evaluation sandbox ---
 DAYTONA_API_KEY=your_daytona_key
 
 # --- Depth Analyzer LLM throttling ---
 DEPTH_LLM_CONCURRENCY=2          # parallel LLM calls
-DEPTH_LLM_TPM=60000              # tokens-per-minute budget
+DEPTH_LLM_TPM=60000              # tokens-per-minute budget for the shared governor
 DEPTH_LLM_RETRIES=1              # retries per failed call
 DEPTH_LLM_BREAKER=6              # consecutive failures before the circuit breaker opens
 ```
 
 | Variable | Purpose |
 |---|---|
-| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_OAUTH_CALLBACK_URL` | GitHub OAuth app used for sign-in. Create one at **GitHub, Settings, Developer settings, OAuth Apps** and set its callback URL to match. |
-| `GITHUB_PERSONAL_ACCESS_TOKEN` | GitHub token handed to the GitHub MCP server (read-only tools) |
-| `GITHUB_EXCLUDE_REPOS` | Optional list of repositories to leave out of the analysis |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_OAUTH_CALLBACK_URL` | GitHub OAuth app used for sign-in (create one under **GitHub, Settings, Developer settings, OAuth Apps**) |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | Token handed to the GitHub MCP server (read-only tools) |
+| `GITHUB_EXCLUDE_REPOS` | Optional list of repositories to leave out |
 | `SESSION_JWT_SECRET` | Secret used to sign session tokens |
 | `FRONTEND_URL` | Frontend origin (CORS and OAuth redirects) |
 | `FALKORDB_URL` | Connection URL for FalkorDB |
-| `GROQ_API_KEY`, `GROQ_MODEL`, `CEREBRAS_API_KEY`, `NVIDIA_API_KEY` | LLM providers for the agents |
-| `DAYTONA_API_KEY` | Daytona sandbox where the platform runs its generated tests |
-| `DEPTH_LLM_*` | Rate limiting and failure handling for the Depth Analyzer's LLM calls |
+| `CEREBRAS_API_KEY`, `NVIDIA_API_KEY`, `NVIDIA_MODEL` | LLM providers for the agents |
+| `DAYTONA_API_KEY` | Daytona sandbox where generated tests run |
+| `DEPTH_LLM_*` | Rate limiting and failure handling for the Depth Analyzer |
 
-Optional: `LLM_TIMEOUT_MS` (Mission Agent timeout, default `30000`) and `MISSION_DEBUG=1` (log every successful mission query; failures always log).
+<details>
+<summary><b>Optional: agent and analyzer tuning</b></summary>
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DEPTH_LLM_MODEL` | Cerebras default | Model for the depth agent (only known Cerebras models are honoured unless `DEPTH_LLM_ALLOW_ANY_MODEL=true`) |
+| `DEPTH_LLM_TIMEOUT_MS` | `45000` | Per-call timeout |
+| `DEPTH_LLM_JSON_MODE`, `DEPTH_LLM_THINKING` | `true`, `false` | Request options |
+| `DEPTH_JUDGE_CONCURRENCY` | `8` | Topics gathered and judged in parallel |
+| `DEPTH_FILE_PAGE_SIZE` | `1000` | Keyset page size when reading file changes |
+| `DEPTH_DEMO_LIMIT` | `1500` | Demonstrations preloaded per analysis |
+| `DEPTH_TAXONOMY_CACHE_MS` | `15000` | In-process cache for taxonomy reads |
+| `LLM_TIMEOUT_MS` | `25000` | Per-request timeout for the goal agent |
+| `LLM_MAX_RETRIES` | `1` | Transport retries per request (max 5) |
+| `LLM_TOTAL_BUDGET_MS` | `45000` | Total LLM time per goal call including retries |
+| `GOAL_DEADLINE_MS` | `55000` | Overall deadline for `planGoal` |
+| `TOPIC_CHAT_HARD_MS` | `12000` | Hard timeout per chat LLM call |
+| `TOPIC_CHAT_ROUND2` | on | Set `0` to disable the dependent second tool round |
+| `MISSION_DEBUG` | off | Set `1` to log every successful mission query (failures always log) |
+
+</details>
 
 <details>
 <summary><b>Optional: sync tuning</b></summary>
-
-All have sensible defaults.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -989,12 +1011,15 @@ All have sensible defaults.
 | `GITHUB_SYNC_OVERLAP_DAYS` | `7` | Overlap window for incremental syncs |
 | `GITHUB_CONCURRENCY` | `10` | Repositories processed in parallel |
 | `GITHUB_COMMIT_CONCURRENCY` | `12` | Commits fetched in parallel |
+| `GITHUB_PAGE_SIZE` | `100` | Page size for listings |
 | `GITHUB_FETCH_PRS` | `true` | Fetch pull requests |
-| `GITHUB_FETCH_PR_DETAILS` / `GITHUB_FETCH_PR_FILES` | `false` | One extra MCP call per PR, off for fast onboarding |
-| `GITHUB_FETCH_ACTIVITY` | `true` | Issues opened and pull requests reviewed |
+| `GITHUB_FETCH_PR_DETAILS` / `GITHUB_FETCH_PR_FILES` | `false` | Extra MCP calls per PR |
+| `GITHUB_MAX_PR_DETAILS` | `20` | Cap for PR detail fetches |
+| `GITHUB_FETCH_ACTIVITY`, `GITHUB_MAX_ACTIVITY_ITEMS` | `true`, `50` | Issues opened and pull requests reviewed |
 | `GITHUB_MAX_PATCH_CHARS` | `60000` | Diff size stored per file |
 | `GITHUB_MAX_ADDED_CODE_CHARS` | `40000` | Added-code size stored per file |
 | `GITHUB_REPO_CONTEXT_REFRESH_DAYS` | `7` | How often README and manifests are refreshed |
+| `GITHUB_REPAIR_INCOMPLETE_FILECHANGES` | `false` | Re-fetch commits whose file changes are stale |
 | `FALKORDB_BATCH_SIZE` | `500` | Rows per batched write |
 | `FALKORDB_FILECHANGE_BATCH_SIZE` | `40` | FileChange rows per write batch |
 | `GITHUB_SYNC_DEBUG` | `false` | Verbose sync logging |
@@ -1008,7 +1033,7 @@ npm install
 npm run dev
 ```
 
-Backend: **http://localhost:4000**. On first run it creates the indexes and the full-text index on `Topic`, and seeds the capability taxonomy.
+Backend: **http://localhost:4000**. On first run it creates indexes (including the full-text indexes) and seeds the capability taxonomy, technique specs and safeguards.
 
 ### 5. Run the frontend
 
@@ -1018,7 +1043,7 @@ npm install
 npm run dev
 ```
 
-Frontend: **http://localhost:5173**. The 3D Skill City uses `three`, `@react-three/fiber`, and `@react-three/drei`:
+Frontend: **http://localhost:5173**. The 3D Skill City uses `three`, `@react-three/fiber` and `@react-three/drei`:
 
 ```bash
 npm install three @react-three/fiber @react-three/drei
@@ -1027,17 +1052,36 @@ npm install three @react-three/fiber @react-three/drei
 ### 6. Try the full loop
 
 1. Sign in with GitHub and sync your repositories
-2. Run the **analysis** (Depth Analyzer builds `DepthAssessment`s and `KNOWS_TOPIC` edges, then refreshes PageRank, betweenness, communities and WCC)
+2. Run the **analysis** (the Depth Analyzer discovers topics, judges them, writes `DepthAssessment`s and `KNOWS_TOPIC` edges, then refreshes PageRank, betweenness, communities and WCC)
 3. Set a **goal** on the Goal page
 4. Get your **next move**, then your **mission**
 5. Implement it, push your branch, and let the sandbox verify it
-6. Watch the graph grow and the celebration screen appear
+6. Re-grade the focus topic and watch the graph grow
 
 <img width="862" height="491" alt="goal-2" src="https://github.com/user-attachments/assets/edc45e77-ac63-4654-b8b1-20f2e0796935" />
 
 ### 7. Reproduce the topic trace on your own data
 
-Open the FalkorDB Browser at http://localhost:3000 and run the queries from [How Pathway understands a topic](#-how-pathway-understands-a-topic) with your `Developer.id` and a topic slug you have worked on. The `explanation_json` stored on each Mission contains the same queries with their real parameters and row counts.
+Open the FalkorDB Browser at http://localhost:3000 and run, with your `Developer.id` and a topic slug from your profile:
+
+```cypher
+// the assessment and what backs it
+MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment {topic_slug: $slug})
+OPTIONAL MATCH (a)-[b:BACKED_BY]->(x)
+RETURN a.level, a.score, a.confidence, a.authenticity, a.rationale, a.stale,
+       labels(x)[0] AS kind, b.ref AS ref, coalesce(x.path, x.technique) AS evidence
+
+// the capabilities mapped to the topic and your demonstrations for each
+MATCH (t:Topic {slug: $slug})-[m:MAPS_TO]->(c:Capability)
+OPTIONAL MATCH (:Developer {id: $dev})-[:DEMONSTRATED]->(x:Demonstration)-[:OF_CAPABILITY]->(c)
+RETURN c.id, m.weight, m.reason, count(DISTINCT x) AS demonstrations
+
+// the move and mission built from it, with the stored query trace
+MATCH (:Developer {id: $dev})-[:ASSIGNED]->(m:Mission {focus_slug: $slug})
+RETURN m.status, m.verification_state, m.explanation_json
+```
+
+The `explanation_json` on each Mission contains the real queries that loaded the saved move, with parameters and row counts.
 
 ---
 
@@ -1046,27 +1090,45 @@ Open the FalkorDB Browser at http://localhost:3000 and run the queries from [How
 | Problem | Fix |
 |---|---|
 | `ECONNREFUSED 6379` | FalkorDB is not running: `docker ps`, then `docker start falkordb` |
-| MCP connection fails or sync hangs at `connecting` | The backend starts the GitHub MCP server with `docker run`. Make sure Docker is running and pull the image: `docker pull ghcr.io/github/github-mcp-server:v1.11.0` |
-| Sync stops with `rateLimited` | GitHub's rate limit was hit. Progress is checkpointed, so rerun later. Lower `GITHUB_MAX_INITIAL_COMMITS_*` or `GITHUB_COMMIT_CONCURRENCY` to be gentler |
-| `learning_failed` after sync | The LLM provider failed during enrichment. GitHub data is already saved; rerun the sync to learn from it |
-| Empty foundation ranking | No `BUILDS_ON` edges yet: re-run the analysis so metrics refresh |
-| Communities show only "Standalone" | Not enough `RELATED_TOPIC` links; the tool falls back to `Topic.cluster_id` |
-| `llm_unavailable` on mission | Set your LLM API keys (`GROQ_API_KEY`, `CEREBRAS_API_KEY`, `NVIDIA_API_KEY`); Pathway will not invent a mission without an LLM |
-| `generation_failed` | All 3 repair attempts were rejected: read the rejection notes in the logs |
-| "N of M rows matched nothing" in logs | A `MATCH` in a batch write found no node; check that parent nodes were written first |
+| MCP connection fails or sync hangs at `connecting` | The backend starts the GitHub MCP server with `docker run`. Make sure Docker is running and the images are pulled (see step 2) |
+| Sync stops with `rateLimited` | GitHub's rate limit was hit. Progress is checkpointed, so rerun later. Lower `GITHUB_MAX_INITIAL_COMMITS_*` or `GITHUB_COMMIT_CONCURRENCY` |
+| `learning_failed` after sync | The LLM provider failed during enrichment. GitHub data is already saved; rerun the sync |
+| Depth analysis reports `llmCircuitOpen` | Repeated LLM failures opened the breaker for 30 seconds. Topics fall back to counts-only estimates (level capped at `proficient`, confidence `low`) until the provider recovers; re-run with `force` |
+| Metrics status `empty_graph` | Fewer than 2 topics or no `BUILDS_ON` / `RELATED_TOPIC` edges yet: re-run the analysis, or `relinkTopicTaxonomy` |
+| Communities show only "Standalone" | Not enough `RELATED_TOPIC` links; the tools fall back to `Topic.cluster_id` |
+| `needs_clarification` on a goal | The wording could not be tied reliably to any `Topic`. Name a topic from your graph |
+| `needs_evidence` on a goal | No readable, non-test code is linked to that topic or its neighbourhood. Sync or analyse the relevant repositories |
+| `llm_unavailable` | Set `CEREBRAS_API_KEY`; Pathway will not invent a goal or mission without an LLM |
+| `generation_failed` | Check `failure.stage`: `transport` means the provider failed after retries; `validation` means all repair attempts were rejected (see the rejection notes in the logs) |
+| "N of M rows matched nothing" in logs | A `MATCH` in a batch write found no node; parent nodes must be written first. Strict writes abort before stale cleanup |
+| Assessment marked `stale` | A mission changed the topic's evidence. Re-grade it with `reanalyzeTopicDepth` |
 | Port 3000 already in use | Remap the FalkorDB Browser with `-p 3001:3000` |
-| Tool timed out | Tools are capped at 20 s: check graph size and DB health |
+| Tool timed out | Chat tools are capped at 20 s: check graph size and DB health |
+
+---
+
+## ⚖️ Limitations
+
+- **Detectors are heuristics.** Capabilities and demonstrations come from deterministic patterns over added lines. A match does not prove the code is good, and good work written in an unrecognised way is not seen.
+- **Topics are model-discovered.** They are validated against your evidence, but the topic list, domains and `BUILDS_ON` edges are model proposals with stored rationales and confidences, not curated truth. Edges are labelled by `basis`.
+- **Levels are Pathway's own thresholds**, not an industry standard. Confidence describes the evidence, not the skill.
+- **Missing evidence means "not seen".** Work outside GitHub, in unsynced private repositories, or outside the history window is not represented.
+- **The Goal Agent decides, not the graph.** The graph retrieves, ranks and validates; Personalized PageRank orders context and is not a recommendation score. Only the chosen move is saved, so alternatives are not recorded beyond the one the agent weighed.
+- **Mission verification** trusts the diff-check and CI state; a single mission never claims more than `working`-level evidence.
+
 
 ---
 
 ## 💡 Design principles
 
-1. **Graph for structure, LLM for judgment**: ordering and readiness come from algorithms
-2. **Topics order the learning, capabilities prove it**: `BUILDS_ON` decides what is next, verified demonstrations decide what is done
-3. **Ground every claim**: verbatim code, gap probes, evidence ids, stored query traces
-4. **Independent verification**: platform tests run against developer code
-5. **Evidence over assertion**: only verified edges count; inferred edges are labeled
-6. **Self-describing tools**: adding a graph tool is a single file
+1. **Graph for structure, LLM for judgment**: ordering, readiness and ranks come from algorithms; classification and writing come from models
+2. **Topics order the learning, capabilities prove it**: `BUILDS_ON` says what is next, verified demonstrations say what is done
+3. **Ground every claim**: verbatim code quotes, cited refs, gap probes, stored query traces
+4. **Validate model output against the graph**: unknown slugs, ids, files and quotes are rejected, not trusted
+5. **Independent verification**: platform tests run against developer code, and completion needs verified criteria plus acceptable CI
+6. **Evidence over assertion**: only code-backed edges count; inferred edges are labelled and never satisfy a prerequisite
+7. **Keep four ideas apart**: proficiency, confidence, graph importance and gap priority never share a field
+8. **Self-describing tools**: adding a chat graph tool is a single declaration
 
 ---
 
