@@ -240,10 +240,12 @@ flowchart LR
 The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe.
 
 <p align="center">
-  <img src="docs/images/evidence-trail.png" alt="Evidence trail in the FalkorDB Browser" width="900"/>
+<img width="1535" height="735" alt="falkordb" src="https://github.com/user-attachments/assets/0ae6ca91-5a38-4bce-b393-672dbf3192b4" />
   <br/>
   <sub><b>The real graph in FalkorDB Browser:</b> one developer's demonstrations, the capabilities they prove, and the file changes behind them.</sub>
 </p>
+
+
 
 ```mermaid
 flowchart TB
