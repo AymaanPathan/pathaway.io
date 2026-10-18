@@ -128,9 +128,10 @@ flowchart LR
 | `GET /api/graph/debug-intelligence` | Counts of skills, capabilities, demonstrations, and relationships |
 
 ---
-<img width="712" height="606" alt="overview" src="https://github.com/user-attachments/assets/74659a6a-3f07-46b3-bfb2-cae9953b861a" />
 
 ## 🕸️ Graph data model
+
+<img width="712" height="606" alt="overview" src="https://github.com/user-attachments/assets/74659a6a-3f07-46b3-bfb2-cae9953b861a" />
 
 The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is an idempotent `MERGE` keyed on `id`, so re-running any stage is safe. It has four connected layers for the agents, plus an independent Skill graph for the 3D city:
 
