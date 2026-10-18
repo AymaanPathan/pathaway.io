@@ -662,10 +662,16 @@ const sameWord = (a: string, b: string) => {
   );
 };
 
-/** Exact name first, then token match ("rest api" -> REST API design, "backoffs" -> Retry with backoff). */
 function mentionedTopics(message: string, topics: DevTopic[]): string[] {
   const lower = message.toLowerCase();
   const words = tokens(message);
+
+  /* how many topic names contain each word, so a rare long word can identify a topic alone */
+  const freq = new Map<string, number>();
+  for (const t of topics)
+    for (const n of new Set(tokens(t.name)))
+      freq.set(n, (freq.get(n) ?? 0) + 1);
+
   return topics
     .map((t) => {
       const names = [t.name.toLowerCase(), t.slug.replace(/_/g, " ")];
@@ -681,17 +687,29 @@ function mentionedTopics(message: string, topics: DevTopic[]): string[] {
         .filter((i) => i >= 0);
       const need =
         nt.length === 1 ? 1 : Math.max(2, Math.ceil(nt.length * 0.6));
-      if (hits.length < need) return { slug: t.slug, at: Infinity };
-      return {
-        slug: t.slug,
-        at: Math.max(0, lower.indexOf(words[Math.min(...hits)])),
-      };
+
+      if (hits.length >= need)
+        return {
+          slug: t.slug,
+          at: Math.max(0, lower.indexOf(words[Math.min(...hits)])),
+        };
+
+      /* one long word that appears in only this topic's name is enough */
+      const uniq = nt
+        .map((n) => ({ n, i: words.findIndex((w) => sameWord(w, n)) }))
+        .find((x) => x.i >= 0 && x.n.length >= 6 && freq.get(x.n) === 1);
+      if (uniq)
+        return {
+          slug: t.slug,
+          at: Math.max(0, lower.indexOf(words[uniq.i])),
+        };
+
+      return { slug: t.slug, at: Infinity };
     })
     .filter((x) => Number.isFinite(x.at))
     .sort((a, b) => a.at - b.at)
     .map((x) => x.slug);
 }
-
 function routeByRules(
   message: string,
   topics: DevTopic[],
@@ -789,7 +807,11 @@ function isMiss(r: ToolRun): boolean {
       NOT_FOUND.test(`${b.title ?? ""} ${b.text ?? ""}`),
   );
 }
-
+const fixHops = (s: string): string =>
+  s.replace(
+    /\b(\d+) hop\(s\)/gi,
+    (_, n) => `${n} ${n === "1" ? "hop" : "hops"}`,
+  );
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
 /** Caveats that must travel with a result so the answer never over-claims. */
@@ -1272,7 +1294,7 @@ function buildInvestigation(runs: AgentRun[], topics: DevTopic[]) {
           id: mainId,
           tool: r.tool,
           kind: "result",
-          claim: r.result.summary,
+          claim: fixHops(r.result.summary),
           evidence: uniqueEvidence(evidenceLines(r)),
           reliability: resultReliability(r),
           limitations: r.limitations.length ? r.limitations : undefined,
@@ -1559,7 +1581,7 @@ function buildInsight(
 
 const COMPOSE_SYSTEM = `You write the chat reply for Pathway's topic assistant. The interface already shows tables, rankings, lists, evidence and graph paths built from the tool results, so DO NOT repeat every item.
 Write 2 to 4 plain sentences that interpret the result for the developer: the key takeaway, one notable detail, and one concrete next step. Name in plain words which graph analysis produced the key finding (for example "the betweenness ranking" or "the BUILDS_ON traversal"). Use ONLY the supplied facts. Never invent topics, levels, numbers or relationships. Address the developer as "you". No markdown, no bullet lists, no headings.
-Keep four ideas apart and never use one word for two of them: proficiency (how deep the developer's skill is), confidence (how strong the evidence behind a rating is; low confidence means thin evidence, NOT wrong code), graph importance (how central a topic is, not a skill), gap priority (why one gap comes first). If a proficiency is marked "estimate", say it is an estimate. Hop language comes ONLY from the "relationships" list: use its labels exactly and never infer or count hops from any other fact. If a relationship is not listed, do not call it direct or multi-hop. Never write tool names like explain_topic; say "the topic explanation" instead.
+Keep four ideas apart PageRank and betweenness describe the shared topic map, never the developer's code or skill. Never say one topic is "more skilled" or "equally skilled" than another, and never compare skill when proficiency is marked "estimate"; compare levels only as reported. and never use one word for two of them: proficiency (how deep the developer's skill is), confidence (how strong the evidence behind a rating is; low confidence means thin evidence, NOT wrong code), graph importance (how central a topic is, not a skill), gap priority (why one gap comes first). If a proficiency is marked "estimate", say it is an estimate. Hop language comes ONLY from the "relationships" list: use its labels exactly and never infer or count hops from any other fact. If a relationship is not listed, do not call it direct or multi-hop. Never write tool names like explain_topic; say "the topic explanation" instead.
 Each result may carry "limitations". If a limitation affects the conclusion, state it plainly in one clause. Never turn a limitation into a claim: for example never say no gaps exist when a result says it could not be verified, and never call a topic weak when its foundation is merely unassessed.
 If the developer asked about something the graph has no topic for, say so plainly in one sentence and use the closest topics the tools did return.
 Also give:
@@ -1657,6 +1679,15 @@ function sanitizeAnswer(answer: string, paths: GraphPath[]): string | null {
   if (/multi-?hop/i.test(out) && !hasMulti) return null;
   for (const m of out.matchAll(/\b(\d+)[- ]hops?\b/gi))
     if (!allowed.has(Number(m[1]))) return null;
+
+  if (
+    /equally skilled|more skilled|less skilled|stronger than|better at/i.test(
+      out,
+    )
+  )
+    return null;
+  if (/(page ?rank|betweenness)[^.]*\b(code|files|commits)\b/i.test(out))
+    return null;
   return out;
 }
 
@@ -1675,10 +1706,9 @@ async function compose(
   const usable = good.length ? good : runs.filter((r) => r.ok && r.result);
   const caveat = usable.flatMap((r) => r.limitations)[0];
   const fallback = usable.length
-    ? `${usable.map((r) => r.result!.summary).join(" ")}${caveat ? ` Note: ${caveat}` : ""}`.slice(
-        0,
-        800,
-      )
+    ? fixHops(
+        `${usable.map((r) => r.result!.summary).join(" ")}${caveat ? ` Note: ${caveat}` : ""}`,
+      ).slice(0, 800)
     : "I couldn't find anything in your graph for that. Try a topic name from the constellation, or ask what you're strongest at.";
 
   if (!usable.length)

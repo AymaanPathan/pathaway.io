@@ -1,19 +1,8 @@
-import { auditAuthenticityTool } from "./audit-authenticity.tool.js";
-import { compareTopicsTool } from "./compare-topics.tool.js";
-import { connectTopicsTool } from "./connect-topics.tool.js";
-import { connectivityCheckTool } from "./connectivity-check.tool.js";
-import { exploreNeighborhoodTool } from "./explore-neighborhood.tool.js";
-import { explainTopicTool } from "./explain-topic.tool.js";
-import { findBridgesTool } from "./find-bridges.tool.js";
-import { findGapsTool } from "./find-gaps.tool.js";
-import { knowledgeCommunitiesTool } from "./knowledge-communities.tool.js";
-import { learningPathToTopicTool } from "./learning-path-to-topic.tool.js";
-import { profileOverviewTool } from "./profile-overview.tool.js";
-import { rankFoundationsTool } from "./rank-foundations.tool.js";
-import { recentActivityTool } from "./recent-activity.tool.js";
-import { recommendNextTopicsTool } from "./recommend-next-topics.tool.js";
-import { searchTopicsTool } from "./search-topics.tool.js";
-import { strongestTopicsTool } from "./strongest-topics.tool.js";
+import { gapAnalysisTool } from "./gap-analysis.tool.js";
+import { graphStructureTool } from "./graph-structure.tool.js";
+import { skillOverviewTool } from "./skill-overview.tool.js";
+import { topicConnectionsTool } from "./connect-topics.tool.js";
+import { topicDeepDiveTool } from "./topic-deep-dive.tool.js";
 import { clamp, queryHealth, type QueryHealth } from "./shared.js";
 import type { Row, ToolContext, ToolResult, TopicTool } from "./types.js";
 
@@ -21,23 +10,16 @@ export type { DevTopic, ToolContext, ToolResult, TopicTool } from "./types.js";
 export type { UiBlock, TopicItem } from "./ui.js";
 export { createToolContext } from "./context.js";
 
+/**
+ * The five public tools. The planner and router only ever see these.
+ * The older single-purpose tool files stay on disk: these five call them.
+ */
 export const ALL_TOOLS: TopicTool[] = [
-  profileOverviewTool,
-  strongestTopicsTool,
-  findGapsTool,
-  recommendNextTopicsTool,
-  learningPathToTopicTool,
-  rankFoundationsTool,
-  findBridgesTool,
-  knowledgeCommunitiesTool,
-  connectivityCheckTool,
-  connectTopicsTool,
-  exploreNeighborhoodTool,
-  explainTopicTool,
-  compareTopicsTool,
-  searchTopicsTool,
-  auditAuthenticityTool,
-  recentActivityTool,
+  skillOverviewTool,
+  topicDeepDiveTool,
+  topicConnectionsTool,
+  gapAnalysisTool,
+  graphStructureTool,
 ];
 
 export const TOOL_BY_NAME = new Map(ALL_TOOLS.map((t) => [t.name, t]));
@@ -159,11 +141,18 @@ function buildHow(tool: TopicTool, args: Row, result: ToolResult): string[] {
     steps.push(`Designed to read: ${tool.features.join(", ")}.`);
   }
 
+  /* the five public tools wrap older ones; say which one actually ran */
+  const via = facts.sourceTool;
+  if (typeof via === "string" && via && via !== tool.name) {
+    steps.push(`Ran the ${via.replace(/_/g, " ")} analysis.`);
+  }
+
   const keyed = Object.entries(facts)
     .filter(
       ([k, v]) =>
         k !== "algorithm" &&
         k !== "source" &&
+        k !== "sourceTool" &&
         v != null &&
         !(Array.isArray(v) && v.length === 0),
     )
