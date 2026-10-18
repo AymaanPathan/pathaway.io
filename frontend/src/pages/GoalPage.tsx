@@ -40,7 +40,8 @@ const MISSION_ROUTE = "/mission";
 // redirects to the mission page with the saved goal id; the mission page
 // creates (or reopens) the mission for it.
 // Result comes from router state ({ state: { result } }) or sessionStorage.
-// Needs explanation.graph.{topicNodes, links, context, ranking} from the route.
+// Needs explanation.graph.{topicNodes, links, context, ranking} and
+// explanation.trace from the route.
 // ============================================================
 
 type Level = "none" | "surface" | "working" | "proficient" | "deep";
@@ -100,6 +101,65 @@ type TLink = {
 };
 type CNode = { key: string; kind: string; label: string; score: number };
 type CEdge = { from: string; to: string; type: string; weight: number };
+
+// ---- decision trace (graph-backed explanation of the choice) ----
+type TStep = {
+  kind: string;
+  label: string;
+  slug: string;
+  level: Level;
+  detail: string;
+  edgeType: string;
+  edgeReason: string;
+  relevance: number;
+};
+type TPath = {
+  evidenceId: string;
+  role: string;
+  hops: number;
+  steps: TStep[];
+};
+type TNeighbour = {
+  slug: string;
+  name: string;
+  domain: string;
+  linkType: string;
+  reason: string;
+  weight: number;
+  level: Level;
+  assessed: boolean;
+  relevance: number;
+};
+type TBuilt = {
+  id: string;
+  repository: string;
+  path: string;
+  permalink: string;
+  technique: string;
+  depth: string;
+  commit: string;
+  what: string;
+  excerpt: string;
+};
+type TAlt = {
+  option: string;
+  whyNot: string;
+  tradeoff: string;
+  evidence: Array<{ id: string; path: string }>;
+};
+type Trace = {
+  seeds: string[];
+  paths: TPath[];
+  neighbours: TNeighbour[];
+  built: TBuilt[];
+  builds: { reused: string; changes: string; newBehavior: string };
+  chosen: { title: string; why: string; evidenceIds: string[] };
+  alternatives: TAlt[];
+  progression: { existing: string[]; change: string; verified: string };
+  basis: { observed: string; inferred: string; missing: string };
+  verifyFirst: string;
+};
+
 type Goal = {
   id: string | null;
   title: string;
@@ -118,6 +178,7 @@ type Explanation = {
   };
   evidence: Evidence[];
   alternatives: Array<{ option: string; whyNot: string }>;
+  trace: Trace | null;
   graph: {
     seeds: string[];
     topics: number;
@@ -186,6 +247,100 @@ function normOps(v: unknown): Op[] {
     .filter((o) => o.id);
 }
 
+function normTrace(v: unknown): Trace | null {
+  const t = rec(v);
+  if (!v || !Object.keys(t).length) return null;
+  const b = rec(t.builds);
+  const c = rec(t.chosen);
+  const p = rec(t.progression);
+  const basis = rec(t.basis);
+  return {
+    seeds: strs(t.seeds),
+    paths: arr<unknown>(t.paths)
+      .map(rec)
+      .map((x) => ({
+        evidenceId: str(x.evidenceId),
+        role: str(x.role, "cited"),
+        hops: num(x.hops),
+        steps: arr<unknown>(x.steps)
+          .map(rec)
+          .map((s) => ({
+            kind: str(s.kind, "topic"),
+            label: str(s.label),
+            slug: str(s.slug),
+            level: lvl(s.level),
+            detail: str(s.detail),
+            edgeType: str(s.edgeType),
+            edgeReason: str(s.edgeReason),
+            relevance: num(s.relevance),
+          }))
+          .filter((s) => s.label),
+      }))
+      .filter((x) => x.steps.length > 0),
+    neighbours: arr<unknown>(t.neighbours)
+      .map(rec)
+      .map((n) => ({
+        slug: str(n.slug),
+        name: str(n.name, str(n.slug)),
+        domain: str(n.domain),
+        linkType: str(n.linkType, "RELATED_TOPIC"),
+        reason: str(n.reason),
+        weight: num(n.weight, 0.5),
+        level: lvl(n.level),
+        assessed: n.assessed === true,
+        relevance: num(n.relevance),
+      }))
+      .filter((n) => n.slug),
+    built: arr<unknown>(t.built)
+      .map(rec)
+      .map((e) => ({
+        id: str(e.id),
+        repository: str(e.repository),
+        path: str(e.path),
+        permalink: str(e.permalink),
+        technique: str(e.technique),
+        depth: str(e.depth),
+        commit: str(e.commit),
+        what: str(e.what),
+        excerpt: str(e.excerpt),
+      }))
+      .filter((e) => e.id),
+    builds: {
+      reused: str(b.reused),
+      changes: str(b.changes),
+      newBehavior: str(b.newBehavior),
+    },
+    chosen: {
+      title: str(c.title),
+      why: str(c.why),
+      evidenceIds: strs(c.evidenceIds),
+    },
+    alternatives: arr<unknown>(t.alternatives)
+      .map(rec)
+      .map((a) => ({
+        option: str(a.option),
+        whyNot: str(a.whyNot),
+        tradeoff: str(a.tradeoff),
+        evidence: arr<unknown>(a.evidence)
+          .map(rec)
+          .map((e) => ({ id: str(e.id), path: str(e.path) }))
+          .filter((e) => e.id),
+      }))
+      .filter((a) => a.option),
+    progression: {
+      existing: strs(p.existing),
+      change: str(p.change),
+      verified: str(p.verified),
+    },
+    basis: {
+      observed: str(basis.observed),
+      inferred: str(basis.inferred),
+      missing: str(basis.missing),
+    },
+    verifyFirst: str(t.verifyFirst),
+  };
+}
+
 function normExplanation(v: unknown): Explanation {
   const ex = rec(v);
   const u = rec(ex.understoodAs);
@@ -230,6 +385,7 @@ function normExplanation(v: unknown): Explanation {
       .map(rec)
       .map((a) => ({ option: str(a.option), whyNot: str(a.whyNot) }))
       .filter((a) => a.option),
+    trace: normTrace(ex.trace),
     graph: g
       ? {
           seeds: strs(g.seeds),
@@ -508,6 +664,7 @@ const opsOf = (ops: Op[], ids: string[]) =>
 // ============================================================
 
 const NAV: Array<[string, string]> = [
+  ["why", "Why this goal"],
   ["reach", "How we reached it"],
   ["topics", "Topic graph"],
   ["graph", "FalkorDB"],
@@ -643,10 +800,10 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function SectionNav() {
+function SectionNav({ hasTrace }: { hasTrace: boolean }) {
   return (
     <nav aria-label="Sections" className="flex flex-wrap gap-2">
-      {NAV.map(([id, label]) => (
+      {NAV.filter(([id]) => id !== "why" || hasTrace).map(([id, label]) => (
         <a
           key={id}
           href={`#${id}`}
@@ -657,6 +814,492 @@ function SectionNav() {
         </a>
       ))}
     </nav>
+  );
+}
+
+// ============================================================
+// 1b. WHY THIS GOAL (decision trace)
+// ============================================================
+
+function Block({
+  n,
+  title,
+  hint,
+  children,
+}: {
+  n: number;
+  title: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      style={{ ...border, backgroundColor: "#fff", boxShadow: shadow(3) }}
+      className="rounded-2xl p-4 sm:p-5"
+    >
+      <div className="flex items-center gap-2.5">
+        <span
+          style={{
+            ...border,
+            fontFamily: DISPLAY_FONT,
+            backgroundColor: YELLOW,
+          }}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[13px] font-bold"
+        >
+          {n}
+        </span>
+        <h3
+          style={{ fontFamily: DISPLAY_FONT }}
+          className="text-[19px] font-bold leading-tight"
+        >
+          {title}
+        </h3>
+      </div>
+      {hint && (
+        <p className="mt-1.5 max-w-[75ch] text-[12.5px] leading-relaxed text-neutral-600">
+          {hint}
+        </p>
+      )}
+      <div className="mt-4">{children}</div>
+    </div>
+  );
+}
+
+const STEP_FILL: Record<string, string> = {
+  assessment: LAVENDER,
+  capability: MINT,
+  evidence: CREAM,
+};
+
+const ROLE_LABEL: Record<string, string> = {
+  reused: "Existing code the move extends",
+  cited: "Evidence cited by the decision",
+  alternative: "Evidence behind an alternative",
+};
+
+function PathRow({ p }: { p: TPath }) {
+  return (
+    <li
+      style={{ border: `1.5px solid ${LINE}` }}
+      className="rounded-xl bg-white p-3"
+    >
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        <span
+          style={{ ...border, fontFamily: MONO, backgroundColor: LAVENDER }}
+          className="rounded-full px-2 text-[11px] font-bold"
+        >
+          {p.evidenceId}
+        </span>
+        <Chip fill={p.role === "reused" ? LIGHT_GREEN : "#fff"}>
+          {ROLE_LABEL[p.role] ?? p.role}
+        </Chip>
+        <Chip>
+          {p.hops} {pick(p.hops, "hop", "hops")} from your topic
+        </Chip>
+      </div>
+      <div className="flex flex-wrap items-center gap-y-2">
+        {p.steps.map((s, i) => {
+          const fill =
+            s.kind === "topic" ? LEVEL_META[s.level].fill : STEP_FILL[s.kind];
+          return (
+            <span key={i} className="inline-flex items-center">
+              {i > 0 && (
+                <span
+                  title={s.edgeReason || undefined}
+                  className="mx-1.5 inline-flex items-center gap-1"
+                >
+                  <ArrowRight size={12} aria-hidden />
+                  {s.edgeType && (
+                    <span
+                      style={{ fontFamily: MONO }}
+                      className="text-[9.5px] font-bold text-neutral-600"
+                    >
+                      {s.edgeType}
+                    </span>
+                  )}
+                </span>
+              )}
+              <span
+                title={s.detail || s.label}
+                style={{
+                  backgroundColor: fill ?? "#fff",
+                  color:
+                    s.kind === "topic" && s.level === "deep" ? "#fff" : INK,
+                  border: `1.5px ${s.level === "none" && s.kind !== "evidence" && s.kind !== "capability" ? "dashed" : "solid"} ${INK}`,
+                }}
+                className="inline-block max-w-[260px] truncate rounded-lg px-2 py-1 text-[11.5px] font-semibold"
+              >
+                {trunc(s.label, 44)}
+                {s.kind === "topic" && s.detail === "seed topic" ? " ●" : ""}
+              </span>
+            </span>
+          );
+        })}
+      </div>
+    </li>
+  );
+}
+
+function ThreeCols({ items }: { items: Array<[string, string, string]> }) {
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+      {items.map(([label, text, fill]) => (
+        <div
+          key={label}
+          style={{ ...border, backgroundColor: fill }}
+          className="rounded-2xl p-3"
+        >
+          <Label>{label}</Label>
+          <p className="mt-1 text-[13px] leading-relaxed">
+            <Inline text={text} />
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function WhyThisGoal({ goal, ex }: { goal: Goal; ex: Explanation }) {
+  const t = ex.trace;
+  if (!t) return null;
+
+  const reused = t.paths.filter((p) => p.role === "reused");
+  const other = t.paths.filter((p) => p.role !== "reused");
+  const pg = t.progression;
+
+  return (
+    <Section
+      id="why"
+      eyebrow="Decision trace"
+      title="Why this goal?"
+      blurb="Every claim below is read from your graph: the path from your topic to the code, what you already built, what the move reuses, and the alternatives that were weighed."
+    >
+      <div className="space-y-5">
+        {/* 1. Graph reasoning */}
+        <Block
+          n={1}
+          title="Graph reasoning"
+          hint={`${t.seeds.join(", ") || goal.focus.name} → related topics → your assessments → code evidence. Arrows show the relationship type; hover a node or arrow for detail.`}
+        >
+          {t.paths.length === 0 ? (
+            <p className="text-[13px] text-neutral-600">
+              No graph path was recorded for this goal.
+            </p>
+          ) : (
+            <>
+              <ul className="space-y-2.5">
+                {[...reused, ...other].map((p) => (
+                  <PathRow key={`${p.role}-${p.evidenceId}`} p={p} />
+                ))}
+              </ul>
+            </>
+          )}
+
+          {t.neighbours.length > 0 && (
+            <div className="mt-4">
+              <Label>Topics linked to {goal.focus.name}</Label>
+              <ul className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                {t.neighbours.map((n) => (
+                  <li
+                    key={n.slug}
+                    style={{ border: `1.5px solid ${LINE}` }}
+                    className="rounded-xl px-3 py-1.5 text-[12px] leading-snug"
+                  >
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <b>{n.name}</b>
+                      <span
+                        style={{ fontFamily: MONO }}
+                        className="text-[10.5px] text-neutral-500"
+                      >
+                        {n.linkType}
+                      </span>
+                      <LevelChip level={n.level} />
+                      {!n.assessed && <Chip dashed>not assessed</Chip>}
+                    </div>
+                    {n.reason && (
+                      <div className="mt-0.5 text-neutral-600">
+                        {trunc(n.reason, 130)}
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {(
+              [
+                ["Observed in the data", t.basis.observed, MINT],
+                ["Inferred by the agent", t.basis.inferred, LAVENDER],
+                [
+                  "No evidence yet",
+                  t.basis.missing || "Nothing flagged as missing.",
+                  "#fff",
+                ],
+              ] as Array<[string, string, string]>
+            ).map(([label, text, fill]) => (
+              <div
+                key={label}
+                style={{
+                  ...border,
+                  backgroundColor: fill,
+                  borderStyle: label === "No evidence yet" ? "dashed" : "solid",
+                }}
+                className="rounded-2xl p-3"
+              >
+                <Label>{label}</Label>
+                <p className="mt-1 text-[12.5px] leading-relaxed">
+                  <Inline text={text} />
+                </p>
+              </div>
+            ))}
+          </div>
+        </Block>
+
+        {/* 2. What you've already built */}
+        <Block
+          n={2}
+          title="What you've already built"
+          hint="The existing code this move starts from. Open the source to check it yourself."
+        >
+          {t.built.length === 0 ? (
+            <p className="text-[13px] text-neutral-600">
+              No existing code was recorded for this move.
+            </p>
+          ) : (
+            <ul className="space-y-3">
+              {t.built.map((b) => (
+                <li
+                  key={b.id}
+                  style={{ border: `1.5px solid ${LINE}` }}
+                  className="rounded-xl p-3"
+                >
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span
+                      style={{
+                        ...border,
+                        fontFamily: MONO,
+                        backgroundColor: LAVENDER,
+                      }}
+                      className="rounded-full px-2 text-[11px] font-bold"
+                    >
+                      {b.id}
+                    </span>
+                    {b.depth && <Chip>{b.depth}</Chip>}
+                    {b.repository && <Chip fill={CREAM}>{b.repository}</Chip>}
+                  </div>
+                  {b.what && (
+                    <p className="mt-1.5 text-[13px] font-semibold leading-snug">
+                      {b.what}
+                    </p>
+                  )}
+                  <div className="mt-1 flex items-center justify-between gap-2">
+                    <span
+                      style={{ fontFamily: MONO }}
+                      className="min-w-0 truncate text-[11px] text-neutral-500"
+                      title={b.path}
+                    >
+                      {b.path}
+                    </span>
+                    {b.permalink && (
+                      <a
+                        href={b.permalink}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label={`Open ${b.id} on GitHub`}
+                        className="pw-btn shrink-0"
+                      >
+                        <ExternalLink size={14} aria-hidden />
+                      </a>
+                    )}
+                  </div>
+                  {b.commit && (
+                    <p className="mt-0.5 text-[11.5px] text-neutral-500">
+                      Commit: {trunc(b.commit, 120)}
+                    </p>
+                  )}
+                  {b.excerpt && (
+                    <pre
+                      style={{
+                        fontFamily: MONO,
+                        backgroundColor: PAPER,
+                        border: `1.5px solid ${LINE}`,
+                      }}
+                      className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg p-2.5 text-[11px] leading-snug"
+                    >
+                      {b.excerpt}
+                    </pre>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Block>
+
+        {/* 3. What the next move builds */}
+        <Block
+          n={3}
+          title="What the next move builds"
+          hint="Reuse before adding: the move extends what exists instead of starting a second mechanism."
+        >
+          <ThreeCols
+            items={[
+              ["Reused", t.builds.reused, LIGHT_GREEN],
+              ["Changes", t.builds.changes, YELLOW],
+              ["New behaviour", t.builds.newBehavior, SOFT_CORAL],
+            ]}
+          />
+          {t.verifyFirst && (
+            <div
+              style={{
+                ...border,
+                borderStyle: "dashed",
+                backgroundColor: CREAM,
+              }}
+              className="mt-3 rounded-2xl px-4 py-2.5"
+            >
+              <Label>Check first</Label>
+              <p className="mt-0.5 text-[12.5px] leading-relaxed">
+                <Inline text={t.verifyFirst} />
+              </p>
+            </div>
+          )}
+        </Block>
+
+        {/* 4. Why this goal over alternatives */}
+        <Block
+          n={4}
+          title="Why this goal over alternatives"
+          hint="What each option would give and cost, and the evidence behind it. This states what the evidence supports, not that the choice is the only good one."
+        >
+          <div
+            style={{ ...border, backgroundColor: LIGHT_GREEN }}
+            className="rounded-2xl p-3.5"
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Chip fill={GREEN} color="#fff">
+                Chosen
+              </Chip>
+              {t.chosen.evidenceIds.map((id) => (
+                <span
+                  key={id}
+                  style={{ fontFamily: MONO }}
+                  className="text-[11px] font-bold"
+                >
+                  {id}
+                </span>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[14px] font-bold leading-snug">
+              {t.chosen.title}
+            </p>
+            <p className="mt-1 text-[12.5px] leading-relaxed">
+              <Inline text={t.chosen.why} />
+            </p>
+          </div>
+
+          <ul className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {t.alternatives.map((a, i) => (
+              <li
+                key={i}
+                style={{ ...border, backgroundColor: "#fff" }}
+                className="rounded-2xl p-3.5"
+              >
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Chip>Alternative</Chip>
+                  {a.evidence.length === 0 ? (
+                    <Chip dashed>no evidence linked</Chip>
+                  ) : (
+                    a.evidence.map((e) => (
+                      <span
+                        key={e.id}
+                        title={e.path}
+                        style={{
+                          ...border,
+                          fontFamily: MONO,
+                          backgroundColor: LAVENDER,
+                        }}
+                        className="rounded-full px-2 text-[11px] font-bold"
+                      >
+                        {e.id}
+                      </span>
+                    ))
+                  )}
+                </div>
+                <p className="mt-1.5 text-[13px] font-bold leading-snug">
+                  {a.option}
+                </p>
+                {a.tradeoff && (
+                  <p className="mt-1 text-[12px] leading-snug text-neutral-700">
+                    <b>Trade-off:</b> {a.tradeoff}
+                  </p>
+                )}
+                <p className="mt-1 text-[12px] leading-snug text-neutral-600">
+                  <b>Not taken:</b> {a.whyNot}
+                </p>
+              </li>
+            ))}
+            {t.alternatives.length === 0 && (
+              <li className="text-[13px] text-neutral-600">
+                No alternatives were recorded.
+              </li>
+            )}
+          </ul>
+        </Block>
+
+        {/* 5. Expected progression */}
+        <Block
+          n={5}
+          title="Expected progression"
+          hint="What exists today, what the task changes, and what will be verified."
+        >
+          <div className="grid grid-cols-1 items-stretch gap-2 lg:grid-cols-[1fr_auto_1fr_auto_1fr]">
+            <div
+              style={{ ...border, backgroundColor: LIGHT_GREEN }}
+              className="rounded-2xl p-3"
+            >
+              <Label>Already exists</Label>
+              <ul className="mt-1 list-disc space-y-1 pl-4 text-[12.5px] leading-snug">
+                {pg.existing.map((x, i) => (
+                  <li key={i}>
+                    <Inline text={x} />
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <ArrowRight
+              size={18}
+              aria-hidden
+              className="hidden self-center lg:block"
+            />
+            <div
+              style={{ ...border, backgroundColor: YELLOW }}
+              className="rounded-2xl p-3"
+            >
+              <Label>Proposed change</Label>
+              <p className="mt-1 text-[12.5px] leading-snug">
+                <Inline text={pg.change} />
+              </p>
+            </div>
+            <ArrowRight
+              size={18}
+              aria-hidden
+              className="hidden self-center lg:block"
+            />
+            <div
+              style={{ ...border, backgroundColor: LAVENDER }}
+              className="rounded-2xl p-3"
+            >
+              <Label>Verified outcome</Label>
+              <p className="mt-1 text-[12.5px] leading-snug">
+                <Inline text={pg.verified} />
+              </p>
+            </div>
+          </div>
+        </Block>
+      </div>
+    </Section>
   );
 }
 
@@ -1984,15 +2627,30 @@ function Algos({ ex }: { ex: Explanation }) {
 // ============================================================
 
 function EvidenceAndRejected({ goal, ex }: { goal: Goal; ex: Explanation }) {
+  // when the decision trace is present, alternatives are shown there with
+  // their evidence and trade-offs, so this section only lists evidence
+  const showRejected = !ex.trace;
   return (
-    <div className="grid grid-cols-1 gap-10 lg:grid-cols-2 lg:gap-8">
+    <div
+      className={
+        showRejected
+          ? "grid grid-cols-1 gap-10 lg:grid-cols-2 lg:gap-8"
+          : "grid grid-cols-1 gap-10"
+      }
+    >
       <Section
         id="evidence"
         eyebrow="Evidence"
         title="Cited code"
         blurb="Code from your repositories the goal is based on."
       >
-        <ul className="space-y-2.5">
+        <ul
+          className={
+            showRejected
+              ? "space-y-2.5"
+              : "grid grid-cols-1 gap-2.5 lg:grid-cols-2"
+          }
+        >
           {ex.evidence.map((e) => (
             <li
               key={e.id}
@@ -2050,29 +2708,31 @@ function EvidenceAndRejected({ goal, ex }: { goal: Goal; ex: Explanation }) {
         </ul>
       </Section>
 
-      <Section
-        eyebrow="Weighed"
-        title="Not chosen"
-        blurb="Other moves the agent considered, and why it passed."
-      >
-        <ul className="space-y-2.5">
-          {ex.alternatives.map((a, i) => (
-            <li
-              key={i}
-              style={{ ...border, backgroundColor: "#fff" }}
-              className="rounded-2xl p-3"
-            >
-              <p className="text-[13px] font-bold leading-snug">{a.option}</p>
-              <p className="mt-1 text-[12px] leading-snug text-neutral-600">
-                {a.whyNot}
-              </p>
-            </li>
-          ))}
-          {ex.alternatives.length === 0 && (
-            <li className="text-[13px] text-neutral-600">None recorded.</li>
-          )}
-        </ul>
-      </Section>
+      {showRejected && (
+        <Section
+          eyebrow="Weighed"
+          title="Not chosen"
+          blurb="Other moves the agent considered, and why it passed."
+        >
+          <ul className="space-y-2.5">
+            {ex.alternatives.map((a, i) => (
+              <li
+                key={i}
+                style={{ ...border, backgroundColor: "#fff" }}
+                className="rounded-2xl p-3"
+              >
+                <p className="text-[13px] font-bold leading-snug">{a.option}</p>
+                <p className="mt-1 text-[12px] leading-snug text-neutral-600">
+                  {a.whyNot}
+                </p>
+              </li>
+            ))}
+            {ex.alternatives.length === 0 && (
+              <li className="text-[13px] text-neutral-600">None recorded.</li>
+            )}
+          </ul>
+        </Section>
+      )}
     </div>
   );
 }
@@ -2138,20 +2798,21 @@ export default function GoalPage() {
   const [result, setResult] = useState<Result | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fromState = rec(location.state).result;
-    if (fromState) {
-      const r = normalize(fromState);
-      if (r) {
-        store(fromState);
-        setResult(r);
-        setLoading(false);
-        return;
+    useEffect(() => {
+      const st = rec(location.state);
+      const fromState = st.result ?? st.goal;
+      if (fromState) {
+        const r = normalize(fromState);
+        if (r) {
+          store(fromState);
+          setResult(r);
+          setLoading(false);
+          return;
+        }
       }
-    }
-    setResult(readStored());
-    setLoading(false);
-  }, [location.state]);
+      setResult(readStored());
+      setLoading(false);
+    }, [location.state]);
 
   const shell = (body: ReactNode) => (
     <div
@@ -2226,8 +2887,9 @@ export default function GoalPage() {
     <main className="mx-auto w-full max-w-[1100px] space-y-14 px-4 py-8 sm:px-8 lg:py-10">
       <div className="space-y-4">
         <Hero goal={goal} ex={ex} />
-        <SectionNav />
+        <SectionNav hasTrace={!!ex.trace} />
       </div>
+      <WhyThisGoal goal={goal} ex={ex} />
       <Reach goal={goal} ex={ex} />
       <TopicGraph ex={ex} />
       <FalkorSection goal={goal} ex={ex} />

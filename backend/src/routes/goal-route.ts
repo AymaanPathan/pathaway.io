@@ -63,8 +63,13 @@ function explain(plan: GoalPlan) {
     })),
     // what the data showed, what the agent concluded, what has no evidence
     basis: task?.decision.basis ?? null,
-    alternatives: task?.decision.considered ?? [],
+    alternatives: (task?.decision.considered ?? []).map((c) => ({
+      option: c.option,
+      whyNot: c.whyNot,
+    })),
     challenge: task?.challenge ?? null,
+    // graph-backed decision trace: paths, reused code, alternatives, progression
+    trace: task?.trace ?? null,
     graph: plan.graph
       ? {
           seeds: plan.graph.seeds,
@@ -186,6 +191,10 @@ goalRouter.post("/api/goal", requireAuth, async (req: AuthedRequest, res) => {
           buildsOnSlugs: t.decision.buildsOnSlugs,
           gapSlugs: t.decision.gapSlugs,
           basis: t.decision.basis,
+          reuses: t.decision.reuses,
+          builds: t.decision.builds,
+          whyOverAlternatives: t.decision.whyOverAlternatives,
+          progression: t.decision.progression,
         },
         evidenceIds: t.evidenceIds,
         saved: plan.stored?.stored ?? false,

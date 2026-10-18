@@ -146,6 +146,7 @@ export interface DeveloperDepth {
   built: Array<{ what: string; path: string }>;
   /** the assessor's reasoning for the level */
   rationale: string;
+  estimated: boolean;
 }
 
 export type TopicRole = "seed" | "related" | "cluster";
@@ -203,6 +204,9 @@ export interface EvidenceItem {
   isTest: boolean;
   /** lowercase words (package names, keywords) used to find the relevant lines in the code */
   hints: string[];
+  createdAt: string;
+  /** a newer authored change to the same file exists; this item then gets no code excerpt */
+  superseded: boolean;
 }
 
 /** Real code behind one piece of evidence, so the agent reads what was actually built. */
@@ -732,6 +736,7 @@ const MISSING_DEPTH: DeveloperDepth = {
   safeguards: [],
   built: [],
   rationale: "",
+  estimated: false,
 };
 
 async function readDepth(
@@ -756,7 +761,8 @@ async function readDepth(
              coalesce(a.repos, 0) AS repos, coalesce(a.last_seen, "") AS last_seen,
              coalesce(a.safeguards_json, "[]") AS safeguards,
              coalesce(a.implementations_json, "[]") AS implementations,
-             coalesce(a.rationale, "") AS rationale
+             coalesce(a.rationale, "") AS rationale,
+                      coalesce(a.fallback, false) AS fallback
       `,
       { dev: developerId, slugs },
     ),
@@ -815,6 +821,7 @@ async function readDepth(
         .slice(0, 5)
         .map((o) => ({ what: str(o.what).slice(0, 200), path: str(o.path) })),
       rationale: str(r.rationale).slice(0, 400),
+      estimated: r.fallback === true || r.fallback === "true",
     });
   }
   return out;
@@ -1066,12 +1073,17 @@ async function readEvidence(
 
   const add = (
     slug: string,
-    rest: Omit<EvidenceItem, "id" | "topicSlug" | "hints">,
+    rest: Omit<
+      EvidenceItem,
+      "id" | "topicSlug" | "hints" | "createdAt" | "superseded"
+    >,
   ) =>
     items.push({
       id: `E${items.length + 1}`,
       topicSlug: slug,
       hints: hintsBy.get(slug) ?? [],
+      createdAt: "",
+      superseded: false,
       ...rest,
     });
 
@@ -1193,7 +1205,91 @@ async function readEvidence(
       });
     }
   }
-  return items;
+  return markSuperseded(graph, developerId, items);
+}
+
+/**
+ * Finds evidence whose file was changed again later. The older item keeps its
+ * place in the list but loses its code excerpt (see readCode), and the newest
+ * change to that file is added as its own evidence item, so the agent starts
+ * from the file as it is now, not as it was.
+ */
+async function markSuperseded(
+  graph: Graph,
+  developerId: string,
+  items: EvidenceItem[],
+): Promise<EvidenceItem[]> {
+  const files = items.filter((e) => e.fileChangeId && e.path);
+  if (!files.length) return items;
+  const rows = await query(
+    graph,
+    "newest file versions",
+    `
+    MATCH (:Developer {id: $dev})-[:AUTHORED_CODE]->(fc:FileChange)
+    WHERE fc.path IN $paths
+      AND coalesce(fc.is_test, false) = false
+      AND coalesce(fc.created_at, "") <> ""
+    OPTIONAL MATCH (r:Repository) WHERE r.id = fc.repository_id
+    OPTIONAL MATCH (c:Commit) WHERE c.id = fc.repository_id + ":commit:" + fc.commit_sha
+    RETURN fc.id AS id, fc.path AS path,
+           coalesce(r.full_name, r.name, "") AS repository,
+           fc.created_at AS created_at,
+           coalesce(fc.commit_sha, "") AS sha,
+           coalesce(c.subject, "") AS subject
+    ORDER BY created_at DESC
+    LIMIT 400
+    `,
+    { dev: developerId, paths: uniq(files.map((e) => e.path)) },
+  );
+  if (!rows?.length) return items;
+
+  const keyOf = (repo: string, path: string) => `${repo}|${path}`;
+  const timeOf = new Map<string, string>();
+  const newest = new Map<string, Row>();
+  for (const r of rows) {
+    timeOf.set(str(r.id), str(r.created_at));
+    const key = keyOf(str(r.repository), str(r.path));
+    const cur = newest.get(key);
+    if (!cur || str(r.created_at) > str(cur.created_at)) newest.set(key, r);
+  }
+
+  const have = new Set(items.map((e) => e.fileChangeId).filter(Boolean));
+  const base = items.length;
+  const added: EvidenceItem[] = [];
+  for (const e of items) {
+    const own = timeOf.get(e.fileChangeId);
+    const top = newest.get(keyOf(e.repository, e.path));
+    if (!own || !top) continue;
+    e.createdAt = own;
+    const topId = str(top.id);
+    if (topId === e.fileChangeId || str(top.created_at) <= own) continue;
+    e.superseded = true;
+    if (have.has(topId) || added.length >= 4) continue;
+    have.add(topId);
+    const sha = str(top.sha);
+    added.push({
+      id: `E${base + added.length + 1}`,
+      topicSlug: e.topicSlug,
+      hints: e.hints,
+      capabilityId: e.capabilityId,
+      capability: e.capability,
+      demonstrationId: "",
+      technique: "",
+      summary: `Latest authored change to this file, newer than ${e.id}. Judge what the file does today from this one, not from the older version.`,
+      depth: "",
+      repository: e.repository,
+      path: e.path,
+      commitSha: sha,
+      commitSubject: str(top.subject).slice(0, 160),
+      permalink: githubLink(e.repository, sha, e.path),
+      fileChangeId: topId,
+      hardening: [],
+      isTest: false,
+      createdAt: str(top.created_at),
+      superseded: false,
+    });
+  }
+  return [...items, ...added];
 }
 
 const MAX_CODE = 8;
@@ -1237,7 +1333,9 @@ async function readCode(
   evidence: EvidenceItem[],
   seedSlugs: Set<string>,
 ): Promise<CodeContext[] | null> {
-  const usable = evidence.filter((e) => !e.isTest && e.fileChangeId);
+  const usable = evidence.filter(
+    (e) => !e.isTest && e.fileChangeId && !e.superseded,
+  );
   const ordered = [
     ...usable.filter((e) => seedSlugs.has(e.topicSlug)),
     ...usable.filter((e) => !seedSlugs.has(e.topicSlug)),
@@ -2005,7 +2103,7 @@ export async function storeNextMove(
       title: move.title.trim().slice(0, 200),
       summary: move.summary.trim().slice(0, 1200),
       done_when: (move.doneWhen ?? "").trim().slice(0, 400),
-      details: JSON.stringify(move.details ?? {}).slice(0, 8000),
+      details: JSON.stringify(move.details ?? {}).slice(0, 16000),
       dev,
       now,
     },
@@ -2167,6 +2265,7 @@ export function briefForAgent(result: GoalGraphResult): Row {
       hops: t.hops,
       relevance: t.relevance,
       assessed: t.depth.assessed,
+      assessmentEstimated: t.depth.estimated,
       level: t.depth.level,
       authenticity: t.depth.authenticity || null,
       confidence: t.depth.confidence || null,
@@ -2233,6 +2332,11 @@ export function briefForAgent(result: GoalGraphResult): Row {
         name: s.name,
         nearStrengths: s.nearStrengths,
       })),
+    },
+    history: {
+      previousMoveForThisGoal: Boolean(result.previousMove),
+      verifiedMissions: result.completedMoves.length,
+      note: "This is ALL the history that exists. If verifiedMissions is 0 and previousMoveForThisGoal is false, nothing was done before. Never say a move was previous, earlier or already addressed.",
     },
     previousMove: result.previousMove,
     completedMoves: result.completedMoves.slice(0, 20).map((m) => ({

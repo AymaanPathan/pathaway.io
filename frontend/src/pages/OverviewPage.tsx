@@ -24,9 +24,10 @@ import {
   Send,
   ShieldCheck,
   Sparkles,
+  Target,
   X,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   AiMessage,
   Blocks,
@@ -57,7 +58,7 @@ const LINE = "#E4E0D4";
 const CARD = "#F1ECDC";
 const WHITE = "#FFFFFF";
 
-const GUTTER = "px-5 sm:px-6";
+const GUTTER = "px-4 sm:px-5";
 const border = { border: `2px solid ${INK}` };
 const shadow = (n = 3) => `${n}px ${n}px 0 0 ${INK}`;
 const clamp = (n: number): CSSProperties => ({
@@ -903,24 +904,24 @@ function EvidenceGraph({
 
   return (
     <div
-      className="rounded-2xl"
+      className="min-w-0 rounded-2xl"
       style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(3) }}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3 px-4 pt-4">
-        <div>
+      <div className="flex flex-wrap items-start justify-between gap-2 px-3 pt-3">
+        <div className="min-w-0">
           <h3
-            className="text-[18px] font-bold"
+            className="text-[15px] font-bold"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             Evidence graph
           </h3>
-          <p className="mt-0.5 text-[12px] font-semibold text-neutral-600">
+          <p className="mt-0.5 text-[11px] font-semibold text-neutral-600">
             {visibleNodes.length - 1} connected nodes, up to {maxHop} step
             {maxHop === 1 ? "" : "s"} from {asString(detail.topic?.name)}. Tap
             any node.
           </p>
         </div>
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex flex-wrap gap-1">
           {Object.entries(kindCounts).map(([k, n]) => {
             const off = hiddenKinds.has(k);
             return (
@@ -929,7 +930,7 @@ function EvidenceGraph({
                 type="button"
                 onClick={() => toggleKind(k)}
                 aria-pressed={!off}
-                className="press inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+                className="press inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-bold"
                 style={{
                   backgroundColor: off ? CARD : WHITE,
                   opacity: off ? 0.55 : 1,
@@ -937,7 +938,7 @@ function EvidenceGraph({
                 }}
               >
                 <span
-                  className="h-2.5 w-2.5 rounded-full"
+                  className="h-2 w-2 rounded-full"
                   style={{
                     backgroundColor: kindMeta(k).color,
                     border: `1.5px solid ${INK}`,
@@ -950,17 +951,17 @@ function EvidenceGraph({
         </div>
       </div>
 
-      <div className="mt-2 overflow-x-auto">
+      <div className="mt-1 overflow-x-auto">
         <div
-          className="relative mx-auto w-full min-w-[720px]"
+          className="relative mx-auto w-full min-w-[560px]"
           style={{
             aspectRatio: `${EGO_W} / ${EGO_H}`,
-            maxWidth: (EGO_W / EGO_H) * 520,
+            maxWidth: (EGO_W / EGO_H) * 440,
           }}
         >
           {loading && (
-            <div className="absolute left-4 top-2 z-10 flex items-center gap-2 text-[12px] font-bold">
-              <RefreshCw size={13} className="animate-spin" /> reading the
+            <div className="absolute left-3 top-2 z-10 flex items-center gap-2 text-[11px] font-bold">
+              <RefreshCw size={12} className="animate-spin" /> reading the
               graph…
             </div>
           )}
@@ -1054,7 +1055,7 @@ function EvidenceGraph({
                       x={(x1 + x2) / 2}
                       y={(y1 + y2) / 2 - 6}
                       textAnchor="middle"
-                      fontSize="11"
+                      fontSize="13"
                       fontWeight={700}
                       fontFamily={BODY_FONT}
                       style={{
@@ -1143,9 +1144,9 @@ function EvidenceGraph({
                   {showLabel && (
                     <text
                       x={p.x}
-                      y={n.hop === 0 ? p.y + r + 20 : p.y + r + 14}
+                      y={n.hop === 0 ? p.y + r + 22 : p.y + r + 16}
                       textAnchor="middle"
-                      fontSize={n.hop === 0 ? 16 : n.hop === 1 ? 12 : 11}
+                      fontSize={n.hop === 0 ? 19 : n.hop === 1 ? 14 : 13}
                       fontWeight={n.hop === 0 ? 800 : 700}
                       fontFamily={n.hop === 0 ? DISPLAY_FONT : BODY_FONT}
                       style={{
@@ -1167,7 +1168,7 @@ function EvidenceGraph({
 
           {hoverNode && hp && (
             <div
-              className="pointer-events-none absolute z-20 max-w-[240px] rounded-xl px-2.5 py-1.5 text-[12px] leading-4"
+              className="pointer-events-none absolute z-20 max-w-[220px] rounded-xl px-2.5 py-1.5 text-[11px] leading-4"
               style={{
                 left: `${(hp.x / EGO_W) * 100}%`,
                 top: `${(hp.y / EGO_H) * 100}%`,
@@ -1192,15 +1193,15 @@ function EvidenceGraph({
       </div>
 
       <div
-        className="px-4 pb-4 pt-3"
+        className="max-h-[220px] overflow-y-auto px-3 pb-3 pt-2.5"
         style={{ borderTop: `2px solid ${INK}`, backgroundColor: PAPER }}
       >
         {activeNode ? (
           <div
-            className="flex flex-wrap items-start justify-between gap-3"
+            className="flex flex-wrap items-start justify-between gap-2"
             style={{ animation: "oslide .25s ease-out both" }}
           >
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <Chip
                   text={kindMeta(activeNode.kind).label}
@@ -1212,20 +1213,20 @@ function EvidenceGraph({
                   }
                 />
                 <span
-                  className="text-[15px] font-bold"
+                  className="break-words text-[14px] font-bold"
                   style={{ fontFamily: DISPLAY_FONT }}
                 >
                   {activeNode.label}
                 </span>
               </div>
               {activeNode.note && (
-                <p className="mt-1 max-w-2xl text-[13px] leading-5 text-neutral-900">
+                <p className="mt-1 max-w-2xl break-words text-[12px] leading-5 text-neutral-900">
                   {cut(activeNode.note, 240)}
                 </p>
               )}
               <ul className="mt-1.5 space-y-0.5">
                 {activeEdges.slice(0, 6).map((e) => (
-                  <li key={e.id} className="text-[12px] leading-4">
+                  <li key={e.id} className="break-words text-[11px] leading-4">
                     <b>{nameOf(e.source)}</b>{" "}
                     <span
                       className="rounded-full px-1.5 text-[10px] font-bold"
@@ -1263,7 +1264,7 @@ function EvidenceGraph({
                   href={activeNode.permalink}
                   target="_blank"
                   rel="noreferrer"
-                  className="hard inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-bold"
+                  className="hard inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] font-bold"
                   style={{ backgroundColor: GREEN, color: WHITE, ...border }}
                 >
                   View the code
@@ -1272,7 +1273,7 @@ function EvidenceGraph({
             </div>
           </div>
         ) : (
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-[12px] font-semibold">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-semibold">
             <span className="flex items-center gap-1.5">
               <span className="h-0.5 w-5" style={{ backgroundColor: INK }} />{" "}
               arrow = depends on / uses / backed by
@@ -1292,6 +1293,199 @@ function EvidenceGraph({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ========================================================================== */
+/* GOAL BOX: send a goal, wait for /api/goal, then go to /goal                */
+/* ========================================================================== */
+
+type GoalSuggestion = { slug: string; label: string };
+
+function GoalBox() {
+  const navigate = useNavigate();
+  const [wish, setWish] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [secs, setSecs] = useState(0);
+  const [msg, setMsg] = useState<{
+    kind: "error" | "info";
+    text: string;
+  } | null>(null);
+  const [suggestions, setSuggestions] = useState<GoalSuggestion[]>([]);
+
+  /* a simple seconds counter while the agent works (the API gives one answer at the end) */
+  useEffect(() => {
+    if (!busy) {
+      setSecs(0);
+      return;
+    }
+    const t = window.setInterval(() => setSecs((s) => s + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [busy]);
+
+  const submit = async (opts?: { wish?: string; topics?: string[] }) => {
+    if (busy) return;
+    const text = (opts?.wish ?? wish).trim();
+    if (text.length > 0 && text.length < 3) {
+      setMsg({ kind: "error", text: "Write at least 3 characters." });
+      return;
+    }
+    setMsg(null);
+    setSuggestions([]);
+    setBusy(true);
+    try {
+      const body: Obj = { wish: text };
+      if (opts?.topics?.length) body.topics = opts.topics;
+      const r = await call("/api/goal", "POST", body);
+      const status = asString(r.data.status);
+
+      if (r.ok && status === "goal") {
+        // done: go to the goal page, and hand over the result so it can show instantly
+        navigate("/goal", { state: { result: r.data } });
+        return;
+      }
+      if (status === "needs_clarification") {
+        const list = asArray<unknown>(r.data.suggestions)
+          .map((s): GoalSuggestion => {
+            if (typeof s === "string")
+              return { slug: s.toLowerCase(), label: humanize(s) };
+            const o = (s ?? {}) as Obj;
+            const slug = asString(o.slug ?? o.id ?? o.topic);
+            return {
+              slug,
+              label: asString(o.name ?? o.label ?? o.title, humanize(slug)),
+            };
+          })
+          .filter((s) => s.slug);
+        setSuggestions(list.slice(0, 6));
+        setMsg({
+          kind: "info",
+          text: asString(
+            r.data.message,
+            "I could not tie that to a topic in your graph.",
+          ),
+        });
+        return;
+      }
+      setMsg({
+        kind: "error",
+        text: asString(
+          r.data.message ?? r.data.error,
+          `Could not set the goal (${r.status}).`,
+        ),
+      });
+    } catch {
+      setMsg({ kind: "error", text: "Network error. Please try again." });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="min-w-0 rounded-2xl p-3.5"
+      style={{ backgroundColor: PAPER, ...border, boxShadow: shadow(3) }}
+    >
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span
+          className="flex items-center gap-1.5 text-[14px] font-bold"
+          style={{ fontFamily: DISPLAY_FONT }}
+        >
+          <Target size={15} /> Set a goal
+        </span>
+        <span className="text-[12px] font-semibold text-neutral-600">
+          Tell Pathway what you want to get better at. It reads your graph and
+          plans your next move.
+        </span>
+      </div>
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+        className="mt-2.5 flex flex-wrap items-center gap-2"
+      >
+        <input
+          value={wish}
+          onChange={(e) => setWish(e.target.value)}
+          maxLength={500}
+          disabled={busy}
+          placeholder="e.g. I want to get stronger at client state management"
+          aria-label="Your goal"
+          className="min-w-0 flex-1 basis-[240px] rounded-full bg-white px-4 py-2 text-[13px] font-semibold outline-none disabled:opacity-60"
+          style={border}
+        />
+        <button
+          type="submit"
+          disabled={busy}
+          className="hard inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-[13px] font-bold disabled:opacity-60"
+          style={{ backgroundColor: YELLOW, color: INK, ...border }}
+        >
+          {busy ? (
+            <RefreshCw size={13} className="animate-spin" />
+          ) : (
+            <Send size={13} />
+          )}
+          {busy ? `Planning… ${secs}s` : "Set goal"}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void submit({ wish: "" })}
+          className="press text-[12px] font-bold underline disabled:opacity-50"
+          title="Let Pathway pick a goal from what it knows about you"
+        >
+          Pick one for me
+        </button>
+      </form>
+
+      {busy && (
+        <div
+          className="mt-2.5 h-2 overflow-hidden rounded-full"
+          style={{ backgroundColor: WHITE, border: `1.5px solid ${INK}` }}
+        >
+          <div
+            className="h-full w-full"
+            style={{
+              backgroundColor: YELLOW,
+              backgroundImage:
+                "repeating-linear-gradient(45deg, rgba(16,18,16,.3) 0 6px, transparent 6px 12px)",
+              backgroundSize: "24px 24px",
+              animation: "ostripe .8s linear infinite",
+            }}
+          />
+        </div>
+      )}
+
+      {msg && (
+        <p
+          className="mt-2 break-words text-[12px] font-bold leading-4"
+          style={{ color: msg.kind === "error" ? "#b8392a" : INK }}
+        >
+          {msg.text}
+        </p>
+      )}
+      {suggestions.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <span className="text-[12px] font-bold text-neutral-600">
+            Did you mean:
+          </span>
+          {suggestions.map((s) => (
+            <button
+              key={s.slug}
+              type="button"
+              disabled={busy}
+              onClick={() => void submit({ wish, topics: [s.slug] })}
+              className="press rounded-full px-2.5 py-0.5 text-[12px] font-bold disabled:opacity-50"
+              style={{ backgroundColor: WHITE, ...border }}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1916,7 +2110,6 @@ export default function OverviewPage() {
             meta: (r.data.meta ?? {}) as Obj,
             slugs: asArray<string>(r.data.topics).filter(Boolean),
             local: false,
-            // NEW
             investigation: (r.data.investigation ?? undefined) as
               | Obj
               | undefined,
@@ -1961,17 +2154,19 @@ export default function OverviewPage() {
     return (
       <Screen>
         <div
-          className="rounded-2xl p-7 text-center"
+          className="rounded-2xl p-6 text-center"
           style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(4) }}
         >
           <h1
-            className="text-[22px] font-bold"
+            className="text-[20px] font-bold"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             Couldn't load your topics
           </h1>
-          <p className="mt-2 text-[13px] leading-5 text-neutral-800">{error}</p>
-          <div className="mt-5 flex justify-center">
+          <p className="mt-2 break-words text-[13px] leading-5 text-neutral-800">
+            {error}
+          </p>
+          <div className="mt-4 flex justify-center">
             <Btn
               bg={YELLOW}
               onClick={() => {
@@ -2037,7 +2232,7 @@ export default function OverviewPage() {
 
   return (
     <div
-      className="min-h-screen w-full"
+      className="min-h-screen w-full overflow-x-hidden"
       style={{
         backgroundColor: WHITE,
         color: INK,
@@ -2056,6 +2251,13 @@ export default function OverviewPage() {
         svg g:focus-visible { outline: 2px solid ${INK}; outline-offset: 2px; }
         details > summary { list-style: none; }
         details > summary::-webkit-details-marker { display: none; }
+        /* keep everything inside the chat panel from spilling out sideways */
+        .chatscroll { overflow-x: hidden; overflow-wrap: anywhere; }
+        .chatscroll > * { min-width: 0; max-width: 100%; }
+        .chatscroll pre { white-space: pre-wrap; word-break: break-word; max-width: 100%; overflow-x: auto; }
+        .chatscroll table { display: block; max-width: 100%; overflow-x: auto; }
+        .chatscroll img, .chatscroll svg, .chatscroll video { max-width: 100%; height: auto; }
+        .chatscroll a { word-break: break-all; }
         @keyframes ostripe { to { background-position: 28px 0; } }
         @keyframes oblink { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
         @keyframes oring { 0% { r: 0; opacity: .9; } 100% { r: 46; opacity: 0; } }
@@ -2075,39 +2277,46 @@ export default function OverviewPage() {
         }}
       >
         <div
-          className={`mx-auto flex max-w-[1500px] items-center justify-between py-3 ${GUTTER}`}
+          className={`mx-auto flex max-w-[1360px] items-center justify-between py-2 ${GUTTER}`}
         >
-          <div className="flex items-center gap-5">
+          <div className="flex items-center gap-4">
             <Link to="/" className="flex items-center gap-2">
               <Mark />
               <span
-                className="text-[18px] font-bold tracking-tight"
+                className="text-[16px] font-bold tracking-tight"
                 style={{ fontFamily: DISPLAY_FONT }}
               >
                 pathway.io
               </span>
             </Link>
-            <nav className="hidden items-center gap-1.5 md:flex">
+            <nav className="hidden items-center gap-1 md:flex">
               <span
                 aria-current="page"
-                className="rounded-full px-3.5 py-1.5 text-[13px] font-bold"
+                className="rounded-full px-3 py-1 text-[12px] font-bold"
                 style={{ backgroundColor: YELLOW, ...border }}
               >
                 Overview
               </span>
               <Link
                 to="/graph"
-                className="rounded-full px-3.5 py-1.5 text-[13px] font-bold text-neutral-500"
+                className="rounded-full px-3 py-1 text-[12px] font-bold text-neutral-500"
                 style={{ border: "2px solid transparent" }}
               >
                 Skill graph
               </Link>
               <Link
                 to="/builds"
-                className="rounded-full px-3.5 py-1.5 text-[13px] font-bold text-neutral-500"
+                className="rounded-full px-3 py-1 text-[12px] font-bold text-neutral-500"
                 style={{ border: "2px solid transparent" }}
               >
                 Builds
+              </Link>
+              <Link
+                to="/goal"
+                className="rounded-full px-3 py-1 text-[12px] font-bold text-neutral-500"
+                style={{ border: "2px solid transparent" }}
+              >
+                Goal
               </Link>
             </nav>
           </div>
@@ -2116,16 +2325,16 @@ export default function OverviewPage() {
             disabled={refreshing}
             bg={YELLOW}
           >
-            <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />{" "}
+            <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />{" "}
             Refresh
           </Btn>
         </div>
       </header>
 
-      <main className={`mx-auto w-full max-w-[1500px] pb-20 pt-8 ${GUTTER}`}>
+      <main className={`mx-auto w-full max-w-[1360px] pb-14 pt-5 ${GUTTER}`}>
         {partial.length > 0 && (
           <div
-            className="mb-4 rounded-xl p-3 text-[13px] font-bold"
+            className="mb-3 rounded-xl p-2.5 text-[12px] font-bold"
             style={{ backgroundColor: WHITE, color: "#b8392a", ...border }}
           >
             Some data could not load ({partial.join(", ")}). Hit Refresh to
@@ -2134,7 +2343,7 @@ export default function OverviewPage() {
         )}
         {status.outdated && (
           <div
-            className="mb-4 rounded-xl p-3 text-[13px] font-bold"
+            className="mb-3 rounded-xl p-2.5 text-[12px] font-bold"
             style={{ backgroundColor: YELLOW, ...border }}
           >
             These assessments come from an older analysis version. Re-run the
@@ -2143,13 +2352,13 @@ export default function OverviewPage() {
         )}
 
         {/* 1. HEADLINE */}
-        <section className="mb-8">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <section className="mb-5">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0 lg:max-w-[64%]">
               <Eyebrow>YOUR ENGINEERING KNOWLEDGE GRAPH</Eyebrow>
               <h1
-                className="mt-2 text-[28px] font-bold leading-[1.08] tracking-tight sm:text-[38px]"
-                style={{ fontFamily: DISPLAY_FONT, ...clamp(3) }}
+                className="mt-1.5 break-words text-[22px] font-bold leading-[1.15] tracking-tight sm:text-[28px]"
+                style={{ fontFamily: DISPLAY_FONT, ...clamp(2) }}
                 title={asString(summary?.headline)}
               >
                 {summary?.headline
@@ -2159,18 +2368,21 @@ export default function OverviewPage() {
                     : "No topics yet. Run the analysis to map what you know."}
               </h1>
               {summary?.pattern && (
-                <p className="mt-3 max-w-2xl text-[14px] leading-relaxed text-neutral-600">
+                <p
+                  className="mt-2 max-w-2xl text-[13px] leading-relaxed text-neutral-600"
+                  style={clamp(3)}
+                >
                   {asString(summary.pattern)}
                 </p>
               )}
             </div>
-            <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
               {running ? (
                 <RunMini job={job} step={stepOf(job)} model={model} />
               ) : (
                 <>
                   {status.lastAnalyzedAt && (
-                    <span className="text-[12px] font-semibold text-neutral-600">
+                    <span className="text-[11px] font-semibold text-neutral-600">
                       analyzed {timeAgo(asString(status.lastAnalyzedAt))}
                     </span>
                   )}
@@ -2183,7 +2395,12 @@ export default function OverviewPage() {
             </div>
           </div>
 
-          <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
+          {/* goal module */}
+          <div className="mt-4">
+            <GoalBox />
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
             <Tile
               value={num(stats.topics)}
               label="Topics analyzed"
@@ -2207,9 +2424,9 @@ export default function OverviewPage() {
           </div>
 
           {mixTotal > 0 && (
-            <div className="mt-5 flex items-center gap-4">
+            <div className="mt-4 flex items-center gap-3">
               <div
-                className="flex h-4 flex-1 overflow-hidden rounded-full"
+                className="flex h-3 flex-1 overflow-hidden rounded-full"
                 style={{ backgroundColor: CARD, ...border }}
               >
                 {LEVEL_ORDER.filter((l) => levelMix[l]).map((l, i, arr) => (
@@ -2224,13 +2441,13 @@ export default function OverviewPage() {
                   />
                 ))}
               </div>
-              <div className="hidden shrink-0 items-center gap-4 sm:flex">
+              <div className="hidden shrink-0 items-center gap-3 sm:flex">
                 {LEVEL_ORDER.filter((l) => levelMix[l]).map((l) => (
                   <span
                     key={l}
-                    className="flex items-center gap-1.5 text-[12px] font-bold text-neutral-800"
+                    className="flex items-center gap-1 text-[11px] font-bold text-neutral-800"
                   >
-                    <Dot color={LEVEL_COLOR[l]} />
+                    <Dot color={LEVEL_COLOR[l]} small />
                     {levelMix[l]} {LEVEL_LABEL[l].toLowerCase()}
                   </span>
                 ))}
@@ -2239,7 +2456,7 @@ export default function OverviewPage() {
           )}
           {jobErr && (
             <p
-              className="mt-3 text-[13px] font-bold"
+              className="mt-2 text-[12px] font-bold"
               style={{ color: "#b8392a" }}
             >
               {jobErr}
@@ -2248,30 +2465,30 @@ export default function OverviewPage() {
         </section>
 
         {/* 2. KNOWLEDGE GRAPH + SIDE PANEL */}
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_560px] xl:items-stretch">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_400px] xl:items-start">
           <section
             className="min-w-0 overflow-hidden rounded-2xl"
             style={{ backgroundColor: PAPER, ...border, boxShadow: shadow(4) }}
           >
             <div
-              className="flex flex-col gap-3 px-4 py-3.5"
+              className="flex flex-col gap-2 px-3 py-2.5"
               style={{
                 borderBottom: `2px solid ${INK}`,
                 backgroundColor: WHITE,
               }}
             >
-              <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
                 <h2
-                  className="text-[20px] font-bold"
+                  className="text-[17px] font-bold"
                   style={{ fontFamily: DISPLAY_FONT }}
                 >
                   Knowledge graph
                 </h2>
-                <span className="text-[12px] font-semibold text-neutral-600">
+                <span className="text-[11px] font-semibold text-neutral-600">
                   Size = depth, ring = score. Tap a topic or a line.
                 </span>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <div
                   className="flex rounded-full p-0.5"
                   style={{ backgroundColor: PAPER, ...border }}
@@ -2287,7 +2504,7 @@ export default function OverviewPage() {
                       type="button"
                       onClick={() => setLayoutMode(k)}
                       aria-pressed={layoutMode === k}
-                      className="press rounded-full px-3 py-0.5 text-[12px] font-bold"
+                      className="press rounded-full px-2.5 py-0.5 text-[11px] font-bold"
                       style={{
                         backgroundColor:
                           layoutMode === k ? YELLOW : "transparent",
@@ -2302,7 +2519,7 @@ export default function OverviewPage() {
                   value={colorBy}
                   onChange={(e) => setColorBy(e.target.value)}
                   aria-label="Colour by"
-                  className="rounded-full bg-white px-3 py-1 text-[12px] font-bold outline-none"
+                  className="rounded-full bg-white px-2.5 py-0.5 text-[11px] font-bold outline-none"
                   style={border}
                 >
                   <option value="level">Colour: depth</option>
@@ -2312,12 +2529,13 @@ export default function OverviewPage() {
                 <Btn
                   onClick={() => setShowNeighbors((v) => !v)}
                   bg={showNeighbors ? YELLOW : WHITE}
+                  small
                 >
                   {showNeighbors ? "Hide" : "Show"} unassessed
                 </Btn>
                 {highlight.size > 0 && (
-                  <Btn onClick={() => setHighlight(new Set())} bg={GREEN}>
-                    <X size={12} /> Clear glow
+                  <Btn onClick={() => setHighlight(new Set())} bg={GREEN} small>
+                    <X size={11} /> Clear glow
                   </Btn>
                 )}
               </div>
@@ -2325,7 +2543,7 @@ export default function OverviewPage() {
 
             {nodes.length > 0 && (
               <div
-                className="flex flex-wrap gap-x-5 gap-y-1 px-4 py-2 text-[12px] font-bold text-neutral-700"
+                className="flex flex-wrap gap-x-4 gap-y-0.5 px-3 py-1.5 text-[11px] font-bold text-neutral-700"
                 style={{ borderBottom: `1px solid ${LINE}` }}
               >
                 <span>{num(gstats.assessedNodes)} assessed</span>
@@ -2342,7 +2560,7 @@ export default function OverviewPage() {
               <>
                 <div className="overflow-x-auto">
                   <div
-                    className="relative mx-auto w-full min-w-[680px]"
+                    className="relative mx-auto w-full min-w-[520px]"
                     style={{ aspectRatio: `${GW} / ${GH}` }}
                   >
                     <TopicGraph
@@ -2374,18 +2592,19 @@ export default function OverviewPage() {
                 />
               </>
             ) : (
-              <div className="p-5">
+              <div className="p-4">
                 <Empty text="No topic graph yet. Run the analysis to build it." />
               </div>
             )}
           </section>
 
+          {/* side panel: fixed height, scrolls inside, sticks while you scroll the page on wide screens */}
           <aside
             ref={asideRef}
-            className="relative h-[680px] min-w-0 xl:h-auto xl:min-h-[680px]"
+            className="relative h-[560px] min-w-0 xl:sticky xl:top-[60px] xl:h-[min(680px,calc(100vh-76px))]"
           >
             <section
-              className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl xl:absolute xl:inset-0"
+              className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl"
               style={{
                 backgroundColor: WHITE,
                 ...border,
@@ -2393,7 +2612,7 @@ export default function OverviewPage() {
               }}
             >
               <div
-                className="flex items-center gap-2 px-3 py-2.5"
+                className="flex shrink-0 items-center gap-2 px-2.5 py-2"
                 style={{
                   borderBottom: `2px solid ${INK}`,
                   backgroundColor: PAPER,
@@ -2410,9 +2629,9 @@ export default function OverviewPage() {
                       [
                         "ask",
                         "Ask your graph",
-                        <MessageCircle key="a" size={13} />,
+                        <MessageCircle key="a" size={12} />,
                       ],
-                      ["topic", "Topic", <Layers key="t" size={13} />],
+                      ["topic", "Topic", <Layers key="t" size={12} />],
                     ] as const
                   ).map(([k, label, icon]) => {
                     const active = sideTab === k;
@@ -2424,7 +2643,7 @@ export default function OverviewPage() {
                         aria-selected={active}
                         disabled={k === "topic" && !sel}
                         onClick={() => setSideTab(k)}
-                        className="press inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[13px] font-bold disabled:opacity-40"
+                        className="press inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[12px] font-bold disabled:opacity-40"
                         style={{
                           backgroundColor: active ? YELLOW : "transparent",
                           border: `2px solid ${active ? INK : "transparent"}`,
@@ -2435,8 +2654,8 @@ export default function OverviewPage() {
                     );
                   })}
                 </div>
-                <span className="ml-auto hidden items-center gap-1.5 text-[12px] font-bold text-neutral-700 sm:flex">
-                  <Dot color={GREEN} /> grounded in your graph
+                <span className="ml-auto hidden items-center gap-1.5 text-[11px] font-bold text-neutral-700 sm:flex">
+                  <Dot color={GREEN} small /> grounded in your graph
                 </span>
               </div>
 
@@ -2444,18 +2663,18 @@ export default function OverviewPage() {
                 <>
                   <div
                     ref={chatRef}
-                    className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4"
+                    className="chatscroll min-h-0 flex-1 space-y-3 overflow-y-auto p-3"
                     style={{ backgroundColor: WHITE }}
                   >
                     {messages.map((m) => (
                       <div
                         key={m.id}
-                        className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                        className={`flex min-w-0 ${m.role === "user" ? "justify-end" : "justify-start"}`}
                         style={{ animation: "oslide .25s ease-out both" }}
                       >
                         {m.role === "user" ? (
                           <div
-                            className="max-w-[88%] rounded-2xl px-3.5 py-2 text-[13px] font-semibold leading-5"
+                            className="max-w-[88%] break-words rounded-2xl px-3 py-1.5 text-[12px] font-semibold leading-5"
                             style={{
                               backgroundColor: YELLOW,
                               ...border,
@@ -2465,30 +2684,34 @@ export default function OverviewPage() {
                             {m.text}
                           </div>
                         ) : m.insight?.diagnosis && !m.pending ? (
-                          <ResponsePanel m={m}>
-                            <InsightAnswer
-                              m={m}
-                              onPick={pick}
-                              onFollow={(q) => void send(q)}
-                              onOpen={() => setStage(m)}
-                            />
-                          </ResponsePanel>
+                          <div className="w-full min-w-0 max-w-full overflow-hidden">
+                            <ResponsePanel m={m}>
+                              <InsightAnswer
+                                m={m}
+                                onPick={pick}
+                                onFollow={(q) => void send(q)}
+                                onOpen={() => setStage(m)}
+                              />
+                            </ResponsePanel>
+                          </div>
                         ) : m.blocks ||
                           m.pending ||
                           m.tools ||
                           m.local ||
                           m.followups ? (
-                          <ResponsePanel m={m}>
-                            <AiMessage
-                              m={m}
-                              onPick={pick}
-                              onFollow={(q) => void send(q)}
-                              onOpen={() => setStage(m)}
-                            />
-                          </ResponsePanel>
+                          <div className="w-full min-w-0 max-w-full overflow-hidden">
+                            <ResponsePanel m={m}>
+                              <AiMessage
+                                m={m}
+                                onPick={pick}
+                                onFollow={(q) => void send(q)}
+                                onOpen={() => setStage(m)}
+                              />
+                            </ResponsePanel>
+                          </div>
                         ) : (
                           <div
-                            className="w-full rounded-2xl px-3.5 py-3 text-[13px] leading-[1.65]"
+                            className="w-full break-words rounded-2xl px-3 py-2.5 text-[12px] leading-[1.6]"
                             style={{
                               backgroundColor: PAPER,
                               ...border,
@@ -2502,20 +2725,20 @@ export default function OverviewPage() {
                     ))}
                   </div>
                   <div
-                    className="space-y-2 p-3"
+                    className="shrink-0 space-y-2 p-2.5"
                     style={{
                       borderTop: `2px solid ${INK}`,
                       backgroundColor: PAPER,
                     }}
                   >
                     {messages.length <= 2 && (
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="flex max-h-[92px] flex-wrap gap-1 overflow-y-auto">
                         {prompts.map((p) => (
                           <button
                             key={p}
                             type="button"
                             onClick={() => void send(p)}
-                            className="press rounded-full px-2.5 py-1 text-left text-[12px] font-bold"
+                            className="press max-w-full rounded-full px-2.5 py-1 text-left text-[11px] font-bold leading-4"
                             style={{ backgroundColor: WHITE, ...border }}
                           >
                             {p}
@@ -2535,24 +2758,24 @@ export default function OverviewPage() {
                         onChange={(e) => setDraft(e.target.value)}
                         placeholder="Ask what supports a topic's depth…"
                         aria-label="Ask about your knowledge graph"
-                        className="min-w-0 flex-1 rounded-full bg-white px-4 py-2 text-[13px] font-semibold outline-none"
+                        className="min-w-0 flex-1 rounded-full bg-white px-3.5 py-1.5 text-[12px] font-semibold outline-none"
                         style={border}
                       />
                       <button
                         type="submit"
                         disabled={!draft.trim() || thinking}
                         aria-label="Send"
-                        className="hard flex h-9 w-9 shrink-0 items-center justify-center rounded-full disabled:opacity-40"
+                        className="hard flex h-8 w-8 shrink-0 items-center justify-center rounded-full disabled:opacity-40"
                         style={{ backgroundColor: YELLOW, ...border }}
                       >
-                        <Send size={14} />
+                        <Send size={13} />
                       </button>
                     </form>
                   </div>
                 </>
               ) : (
                 <div
-                  className="min-h-0 flex-1 overflow-y-auto p-4"
+                  className="chatscroll min-h-0 flex-1 overflow-y-auto p-3"
                   style={{ backgroundColor: WHITE }}
                 >
                   {sel && (
@@ -2592,7 +2815,7 @@ export default function OverviewPage() {
 
         {stage?.blocks && stage.blocks.length > 0 && (
           <section
-            className="mt-8 rounded-2xl p-5"
+            className="mt-6 min-w-0 overflow-hidden rounded-2xl p-4"
             style={{
               backgroundColor: PAPER,
               ...border,
@@ -2604,13 +2827,13 @@ export default function OverviewPage() {
               <div className="min-w-0">
                 <Eyebrow>ANSWER</Eyebrow>
                 <h2
-                  className="mt-1 text-[20px] font-bold leading-tight"
+                  className="mt-1 break-words text-[17px] font-bold leading-tight"
                   style={{ fontFamily: DISPLAY_FONT }}
                 >
                   {stage.question}
                 </h2>
                 {stage.text && (
-                  <p className="mt-1 max-w-3xl text-[13px] leading-5 text-neutral-800">
+                  <p className="mt-1 max-w-3xl break-words text-[12px] leading-5 text-neutral-800">
                     {stage.text}
                   </p>
                 )}
@@ -2622,10 +2845,12 @@ export default function OverviewPage() {
                 className="hard shrink-0 rounded-full p-1.5"
                 style={{ backgroundColor: WHITE, ...border }}
               >
-                <X size={14} />
+                <X size={13} />
               </button>
             </div>
-            <Blocks blocks={stage.blocks} onPick={pick} wide />
+            <div className="chatscroll">
+              <Blocks blocks={stage.blocks} onPick={pick} wide />
+            </div>
             {stage.tools && stage.tools.length > 0 && (
               <div
                 className="mt-3 rounded-xl"
@@ -2638,9 +2863,9 @@ export default function OverviewPage() {
         )}
 
         {/* 4. EXPLORE */}
-        <section className="mt-12">
+        <section className="mt-8">
           <div
-            className="flex flex-wrap gap-x-7 gap-y-1"
+            className="flex flex-wrap gap-x-5 gap-y-1"
             style={{ borderBottom: `2px solid ${INK}` }}
             role="tablist"
             aria-label="Explore"
@@ -2652,7 +2877,7 @@ export default function OverviewPage() {
                 role="tab"
                 aria-selected={lens === l.id}
                 onClick={() => setLens(l.id)}
-                className="press -mb-[2px] px-1 pb-2.5 pt-1 text-[14px] font-bold"
+                className="press -mb-[2px] px-1 pb-2 pt-1 text-[13px] font-bold"
                 style={{
                   borderBottom: `4px solid ${lens === l.id ? INK : "transparent"}`,
                   color: lens === l.id ? INK : "#737373",
@@ -2661,7 +2886,7 @@ export default function OverviewPage() {
                 {l.label}
                 {l.id === "hood" && integrityFailed > 0 && (
                   <span
-                    className="ml-1.5 rounded-full px-1.5 text-[11px]"
+                    className="ml-1.5 rounded-full px-1.5 text-[10px]"
                     style={{ backgroundColor: CORAL, color: INK }}
                   >
                     {integrityFailed}
@@ -2673,7 +2898,7 @@ export default function OverviewPage() {
 
           <div
             key={lens}
-            className="pt-5"
+            className="pt-4"
             style={{ animation: "oslide .25s ease-out both" }}
           >
             {lens === "highlights" &&
@@ -2681,19 +2906,19 @@ export default function OverviewPage() {
                 <div>
                   {highlightRows.map((r) => (
                     <Row key={r.key}>
-                      <div className="w-52 shrink-0">
-                        <div className="flex items-center gap-2 text-[13px] font-bold">
+                      <div className="w-44 shrink-0">
+                        <div className="flex items-center gap-2 text-[12px] font-bold">
                           <span
                             className="h-3 w-3 rounded-sm"
                             style={{ backgroundColor: r.color, ...border }}
                           />
                           {r.label}
                         </div>
-                        <div className="mt-0.5 pl-5 text-[12px] text-neutral-600">
+                        <div className="mt-0.5 pl-5 text-[11px] text-neutral-600">
                           {r.hint}
                         </div>
                       </div>
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="flex min-w-0 flex-wrap gap-1.5">
                         {r.list.slice(0, 8).map((t) => (
                           <TopicChip
                             key={asString(t.slug)}
@@ -2712,31 +2937,31 @@ export default function OverviewPage() {
             {lens === "depth" &&
               (domainGroups.length ? (
                 <div
-                  className="rounded-2xl p-5"
+                  className="rounded-2xl p-4"
                   style={{
                     backgroundColor: WHITE,
                     ...border,
                     boxShadow: shadow(3),
                   }}
                 >
-                  <p className="mb-4 text-[13px] leading-5 text-neutral-700">
+                  <p className="mb-3 text-[12px] leading-5 text-neutral-700">
                     Rows are engineering areas, columns are depth. Each topic
                     lands where its evidence puts it.
                   </p>
                   <div className="overflow-x-auto">
                     <div
-                      className="grid min-w-[640px] gap-2"
+                      className="grid min-w-[560px] gap-1.5"
                       style={{
-                        gridTemplateColumns: "140px repeat(4, minmax(0, 1fr))",
+                        gridTemplateColumns: "120px repeat(4, minmax(0, 1fr))",
                       }}
                     >
                       <div />
                       {["surface", "working", "proficient", "deep"].map((l) => (
                         <div
                           key={l}
-                          className="flex items-center gap-1.5 px-1 pb-1 text-[13px] font-bold"
+                          className="flex items-center gap-1.5 px-1 pb-1 text-[12px] font-bold"
                         >
-                          <Dot color={LEVEL_COLOR[l]} /> {LEVEL_LABEL[l]}
+                          <Dot color={LEVEL_COLOR[l]} small /> {LEVEL_LABEL[l]}
                         </div>
                       ))}
                       {domainGroups.map((g) => (
@@ -2752,14 +2977,14 @@ export default function OverviewPage() {
             {lens === "groups" &&
               (activeDim ? (
                 <div>
-                  <div className="mb-3 flex flex-wrap gap-2">
+                  <div className="mb-3 flex flex-wrap gap-1.5">
                     {dims.map((x) => (
                       <button
                         key={asString(x.id)}
                         type="button"
                         onClick={() => setGroupDim(asString(x.id))}
                         aria-pressed={activeDim?.id === x.id}
-                        className="press rounded-full px-3.5 py-1 text-[13px] font-bold"
+                        className="press rounded-full px-3 py-0.5 text-[12px] font-bold"
                         style={{
                           backgroundColor:
                             activeDim?.id === x.id ? YELLOW : WHITE,
@@ -2770,26 +2995,26 @@ export default function OverviewPage() {
                       </button>
                     ))}
                   </div>
-                  <p className="mb-2 text-[13px] leading-5 text-neutral-600">
+                  <p className="mb-2 text-[12px] leading-5 text-neutral-600">
                     {asString(activeDim.method?.why)}
                   </p>
                   {asArray<Obj>(activeDim.groups).map((g) => (
                     <Row key={asString(g.key)}>
-                      <div className="w-52 shrink-0">
+                      <div className="w-44 shrink-0">
                         <div
-                          className="text-[14px] font-bold"
+                          className="text-[13px] font-bold"
                           style={{ fontFamily: DISPLAY_FONT }}
                         >
                           {asString(g.label)}
                         </div>
-                        <div className="text-[12px] text-neutral-600">
+                        <div className="text-[11px] text-neutral-600">
                           {num(g.count)} topics, avg {num(g.averageScore)}
                           {g.internalLinks != null
                             ? `, ${num(g.internalLinks)} links inside`
                             : ""}
                         </div>
                       </div>
-                      <div className="flex flex-wrap gap-1.5">
+                      <div className="flex min-w-0 flex-wrap gap-1.5">
                         {asArray<Obj>(g.topics)
                           .slice(0, 8)
                           .map((t) => (
@@ -2809,14 +3034,14 @@ export default function OverviewPage() {
 
             {lens === "foundations" &&
               (relations ? (
-                <div className="grid gap-8 lg:grid-cols-2">
-                  <div>
-                    <div className="mb-3 text-[14px] font-bold">
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <div className="min-w-0">
+                    <div className="mb-2 text-[13px] font-bold">
                       Strong topics on weak or unverified foundations
                     </div>
-                    <div className="space-y-3">
+                    <div className="space-y-2.5">
                       {asArray<Obj>(relations.foundationGaps).length === 0 && (
-                        <span className="text-[13px] text-neutral-700">
+                        <span className="text-[12px] text-neutral-700">
                           Every foundation of a proficient or deep topic has
                           assessed evidence.
                         </span>
@@ -2831,25 +3056,25 @@ export default function OverviewPage() {
                             borderLeft: `4px solid ${g.severity === "weak" ? CORAL : YELLOW}`,
                           }}
                         >
-                          <div className="text-[12px] font-bold text-neutral-600">
+                          <div className="text-[11px] font-bold text-neutral-600">
                             {g.severity === "weak"
                               ? "Assessed, shallow"
                               : "Not assessed"}
                           </div>
-                          <p className="text-[13px] leading-5">
+                          <p className="text-[12px] leading-5">
                             {asString(g.message)}
                           </p>
                         </button>
                       ))}
                     </div>
                   </div>
-                  <div>
-                    <div className="mb-3 text-[14px] font-bold">
+                  <div className="min-w-0">
+                    <div className="mb-2 text-[13px] font-bold">
                       Topics that build on what you know
                     </div>
-                    <div className="space-y-3">
+                    <div className="space-y-2.5">
                       {asArray<Obj>(relations.frontier).length === 0 && (
-                        <span className="text-[13px] text-neutral-700">
+                        <span className="text-[12px] text-neutral-700">
                           No unassessed topic builds on your assessed ones yet.
                         </span>
                       )}
@@ -2859,10 +3084,10 @@ export default function OverviewPage() {
                           className="pl-3"
                           style={{ borderLeft: `4px solid ${SKY}` }}
                         >
-                          <div className="text-[13px] font-bold">
+                          <div className="text-[12px] font-bold">
                             {asString(f.name)}
                           </div>
-                          <p className="text-[12px] leading-4 text-neutral-700">
+                          <p className="text-[11px] leading-4 text-neutral-700">
                             {asString(f.message)}
                           </p>
                         </div>
@@ -2876,13 +3101,13 @@ export default function OverviewPage() {
 
             {lens === "topics" && (
               <div>
-                <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="mb-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                   <input
                     value={qDraft}
                     onChange={(e) => setQDraft(e.target.value)}
                     placeholder="Search topics…"
                     aria-label="Search topics"
-                    className="rounded-full bg-white px-4 py-1.5 text-[13px] font-semibold outline-none"
+                    className="rounded-full bg-white px-3.5 py-1 text-[12px] font-semibold outline-none"
                     style={border}
                   />
                   <FilterSelect
@@ -2930,30 +3155,33 @@ export default function OverviewPage() {
                         type="button"
                         onClick={() => pick(asString(c.slug))}
                         aria-pressed={sel === c.slug}
-                        className="flex w-full items-center gap-3 px-2 py-3 text-left"
+                        className="flex w-full items-center gap-3 px-2 py-2.5 text-left"
                         style={{
                           borderBottom: `1px solid ${LINE}`,
                           backgroundColor:
                             sel === c.slug ? `${YELLOW}55` : undefined,
                         }}
                       >
-                        <Dot color={LEVEL_COLOR[asString(c.level)] ?? CARD} />
+                        <Dot
+                          color={LEVEL_COLOR[asString(c.level)] ?? CARD}
+                          small
+                        />
                         <span
-                          className="w-56 shrink-0 truncate text-[14px] font-bold"
+                          className="w-44 shrink-0 truncate text-[13px] font-bold"
                           style={{ fontFamily: DISPLAY_FONT }}
                         >
                           {asString(c.name)}
                         </span>
-                        <span className="hidden min-w-0 flex-1 truncate text-[13px] text-neutral-700 md:block">
+                        <span className="hidden min-w-0 flex-1 truncate text-[12px] text-neutral-700 md:block">
                           {asString(c.verdict)}
                         </span>
-                        <span className="ml-auto shrink-0 text-[12px] font-bold text-neutral-600">
+                        <span className="ml-auto shrink-0 text-[11px] font-bold text-neutral-600">
                           {LEVEL_LABEL[asString(c.level)] ?? c.level}, score{" "}
                           {num(c.score)}, {asString(c.confidence)} conf.
                         </span>
                       </button>
                     ))}
-                    <div className="flex items-center justify-between pt-4">
+                    <div className="flex items-center justify-between pt-3">
                       <Btn
                         onClick={() =>
                           setFilters({
@@ -2962,10 +3190,11 @@ export default function OverviewPage() {
                           })
                         }
                         disabled={filters.page === 0}
+                        small
                       >
                         Previous
                       </Btn>
-                      <span className="text-[13px] font-bold text-neutral-700">
+                      <span className="text-[12px] font-bold text-neutral-700">
                         {filters.page * PAGE + 1}–
                         {filters.page * PAGE + items.length} of {total}
                       </span>
@@ -2974,6 +3203,7 @@ export default function OverviewPage() {
                           setFilters({ ...filters, page: filters.page + 1 })
                         }
                         disabled={(filters.page + 1) * PAGE >= total}
+                        small
                       >
                         Next
                       </Btn>
@@ -2987,13 +3217,13 @@ export default function OverviewPage() {
 
             {lens === "paths" && (
               <div>
-                <p className="mb-4 text-[13px] text-neutral-700">
+                <p className="mb-3 text-[12px] text-neutral-700">
                   Pick two topics and the shortest route through the graph
                   appears automatically, with the number of hops. Each hop says
                   whether it is a foundation or just an association.
                 </p>
                 <div className="flex flex-wrap items-center gap-2">
-                  <RouteIcon size={15} />
+                  <RouteIcon size={14} />
                   <TopicSelect
                     value={pathFrom}
                     onChange={setPathFrom}
@@ -3016,6 +3246,7 @@ export default function OverviewPage() {
                         setPathRes(null);
                         setPathErr(null);
                       }}
+                      small
                     >
                       Clear
                     </Btn>
@@ -3024,7 +3255,7 @@ export default function OverviewPage() {
 
                 {pathRes && (
                   <div
-                    className="mt-5"
+                    className="mt-4"
                     style={{ animation: "oslide .25s ease-out both" }}
                   >
                     {(() => {
@@ -3034,14 +3265,14 @@ export default function OverviewPage() {
                         (s) => s.type === "BUILDS_ON",
                       ).length;
                       return (
-                        <div className="mb-3 flex flex-wrap items-center gap-2">
+                        <div className="mb-2 flex flex-wrap items-center gap-2">
                           <Chip
                             text={
                               hops === 1 ? "1 hop, direct link" : `${hops} hops`
                             }
                             background={YELLOW}
                           />
-                          <span className="text-[12px] font-semibold text-neutral-700">
+                          <span className="text-[11px] font-semibold text-neutral-700">
                             {builds} foundation link{builds === 1 ? "" : "s"},{" "}
                             {hops - builds} association
                             {hops - builds === 1 ? "" : "s"}
@@ -3059,7 +3290,7 @@ export default function OverviewPage() {
                           >
                             {seg && (
                               <span
-                                className="rounded-full px-2 py-0.5 text-[11px] font-bold"
+                                className="rounded-full px-2 py-0.5 text-[10px] font-bold"
                                 style={{
                                   backgroundColor:
                                     seg.type === "BUILDS_ON" ? SKY : LAVENDER,
@@ -3085,7 +3316,7 @@ export default function OverviewPage() {
                 )}
                 {pathErr && (
                   <p
-                    className="mt-3 text-[13px] font-bold"
+                    className="mt-3 text-[12px] font-bold"
                     style={{ color: "#b8392a" }}
                   >
                     {pathErr}
@@ -3095,13 +3326,13 @@ export default function OverviewPage() {
             )}
 
             {lens === "hood" && (
-              <div className="space-y-5">
-                <p className="max-w-3xl text-[13px] leading-5 text-neutral-700">
+              <div className="space-y-4">
+                <p className="max-w-3xl text-[12px] leading-5 text-neutral-700">
                   FalkorDB runs graph algorithms over the shared topic map. They
                   describe how topics are structured. Your skill level always
                   comes from your code, never from these scores.
                 </p>
-                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
                   {asArray<Obj>(algos?.algorithms)
                     .filter((a) => a.engine !== "in-process")
                     .map((a) => (
@@ -3114,16 +3345,16 @@ export default function OverviewPage() {
 
                 {integrity && (
                   <div
-                    className="rounded-2xl p-4"
+                    className="rounded-2xl p-3.5"
                     style={{
                       backgroundColor: WHITE,
                       ...border,
                       boxShadow: shadow(3),
                     }}
                   >
-                    <div className="flex items-center gap-2 text-[15px] font-bold">
+                    <div className="flex flex-wrap items-center gap-2 text-[14px] font-bold">
                       <ShieldCheck
-                        size={16}
+                        size={15}
                         color={integrity.passed ? GREEN : CORAL}
                       />
                       Graph health
@@ -3137,16 +3368,16 @@ export default function OverviewPage() {
                         color={integrity.passed ? WHITE : INK}
                       />
                     </div>
-                    <ul className="mt-3 grid gap-2 md:grid-cols-2">
+                    <ul className="mt-2.5 grid gap-2 md:grid-cols-2">
                       {asArray<Obj>(integrity.checks).map((c) => (
                         <li
                           key={asString(c.id)}
-                          className="flex items-start gap-2 text-[12px] leading-4"
+                          className="flex items-start gap-2 text-[11px] leading-4"
                         >
                           <span className="mt-0.5">
                             <Dot color={c.passed ? GREEN : CORAL} small />
                           </span>
-                          <span>
+                          <span className="min-w-0 break-words">
                             <b>{humanize(asString(c.id))}:</b>{" "}
                             {asString(c.detail)}
                           </span>
@@ -3161,7 +3392,7 @@ export default function OverviewPage() {
                     {asArray<string>(model?.scoring?.guardRails).map((g, i) => (
                       <li
                         key={i}
-                        className="pl-3 text-[13px] leading-5 text-neutral-800"
+                        className="pl-3 text-[12px] leading-5 text-neutral-800"
                         style={{ borderLeft: `3px solid ${LINE}` }}
                       >
                         {g}
@@ -3183,10 +3414,10 @@ export default function OverviewPage() {
             block: "start",
           })
         }
-        className="hard fixed bottom-5 right-5 z-30 flex items-center gap-2 rounded-full px-4 py-3 text-[13px] font-bold xl:hidden"
+        className="hard fixed bottom-4 right-4 z-30 flex items-center gap-2 rounded-full px-3.5 py-2.5 text-[12px] font-bold xl:hidden"
         style={{ backgroundColor: YELLOW, ...border }}
       >
-        <MessageCircle size={16} /> Ask
+        <MessageCircle size={15} /> Ask
       </button>
     </div>
   );
@@ -3202,12 +3433,12 @@ function DepthRow({ g, onPick }: { g: Obj; onPick: (slug: string) => void }) {
     <>
       <div className="flex flex-col justify-center px-1">
         <span
-          className="text-[13px] font-bold"
+          className="text-[12px] font-bold"
           style={{ fontFamily: DISPLAY_FONT }}
         >
           {asString(g.label)}
         </span>
-        <span className="text-[11px] text-neutral-600">
+        <span className="text-[10px] text-neutral-600">
           {num(g.count)} topics
         </span>
       </div>
@@ -3216,7 +3447,7 @@ function DepthRow({ g, onPick }: { g: Obj; onPick: (slug: string) => void }) {
         return (
           <div
             key={l}
-            className="flex min-h-[54px] flex-wrap content-center gap-1 rounded-xl p-1.5"
+            className="flex min-h-[46px] flex-wrap content-center gap-1 rounded-xl p-1.5"
             style={{
               backgroundColor: cell.length ? `${LEVEL_COLOR[l]}2A` : PAPER,
               border: `1.5px ${cell.length ? "solid" : "dashed"} ${cell.length ? LEVEL_COLOR[l] : LINE}`,
@@ -3227,7 +3458,7 @@ function DepthRow({ g, onPick }: { g: Obj; onPick: (slug: string) => void }) {
                 key={asString(t.slug)}
                 type="button"
                 onClick={() => onPick(asString(t.slug))}
-                className="press rounded-full px-2 py-0.5 text-[11px] font-bold"
+                className="press rounded-full px-2 py-0.5 text-[10px] font-bold"
                 style={{ backgroundColor: WHITE, ...border }}
               >
                 {cut(asString(t.name), 20)}
@@ -3263,7 +3494,7 @@ function AlgoCard({ a, onPick }: { a: Obj; onPick: (slug: string) => void }) {
         : [];
   return (
     <div
-      className="rounded-2xl p-4"
+      className="min-w-0 rounded-2xl p-3.5"
       style={{
         backgroundColor: WHITE,
         ...border,
@@ -3273,23 +3504,23 @@ function AlgoCard({ a, onPick }: { a: Obj; onPick: (slug: string) => void }) {
     >
       <div className="flex flex-wrap items-center gap-2">
         <span
-          className="text-[15px] font-bold"
+          className="text-[14px] font-bold"
           style={{ fontFamily: DISPLAY_FONT }}
         >
           {asString(a.name)}
         </span>
         <Chip text={asString(a.engine)} background={engineBg} />
       </div>
-      <p className="mt-1.5 text-[13px] font-bold leading-5">
+      <p className="mt-1.5 text-[12px] font-bold leading-5">
         {asString(a.role)}
       </p>
-      <p className="mt-0.5 text-[12px] leading-4 text-neutral-600">
+      <p className="mt-0.5 text-[11px] leading-4 text-neutral-600">
         {a.affectsAssessment
           ? "Also feeds the confidence of each rating."
           : "Describes structure only."}
       </p>
       {st && (
-        <div className="mt-3 flex items-center gap-2 text-[12px] font-bold text-neutral-700">
+        <div className="mt-2.5 flex items-center gap-2 text-[11px] font-bold text-neutral-700">
           <span
             className="relative inline-block h-2.5 flex-1 overflow-hidden rounded-full"
             style={{ backgroundColor: CARD, border: `1.5px solid ${INK}` }}
@@ -3307,7 +3538,7 @@ function AlgoCard({ a, onPick }: { a: Obj; onPick: (slug: string) => void }) {
         </div>
       )}
       {chips.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
           {chips.map((x) => (
             <TopicChip
               key={asString(x.topic?.slug)}
@@ -3318,13 +3549,13 @@ function AlgoCard({ a, onPick }: { a: Obj; onPick: (slug: string) => void }) {
         </div>
       )}
       {a.id === "label_propagation" && (
-        <p className="mt-3 text-[12px] font-bold">
+        <p className="mt-2.5 text-[11px] font-bold">
           {num(f.communities)} communities
           {f.largest ? `, largest: ${asString(f.largest.label)}` : ""}
         </p>
       )}
       {a.id === "wcc" && (
-        <p className="mt-3 text-[12px] font-bold">
+        <p className="mt-2.5 text-[11px] font-bold">
           {num(f.components)} components, main body {num(f.mainSize)} topics
         </p>
       )}
@@ -3370,7 +3601,7 @@ function RelationInspector({
     </span>
   );
   const row = (e: Obj, other: string, label: string) => (
-    <li key={asString(e.id)} className="text-[12px] leading-4">
+    <li key={asString(e.id)} className="break-words text-[11px] leading-4">
       <button
         type="button"
         onClick={() => onEdge(e)}
@@ -3388,7 +3619,7 @@ function RelationInspector({
   );
   return (
     <div
-      className="max-h-[200px] overflow-y-auto px-4 py-3 text-[12px]"
+      className="max-h-[170px] overflow-y-auto px-3 py-2.5 text-[11px]"
       style={{
         borderTop: `2px solid ${INK}`,
         color: INK,
@@ -3400,17 +3631,17 @@ function RelationInspector({
           className="flex items-start justify-between gap-3"
           style={{ animation: "oslide .25s ease-out both" }}
         >
-          <div>
-            <div className="text-[13px] font-bold">
+          <div className="min-w-0">
+            <div className="break-words text-[12px] font-bold">
               {nameOf(asString(edge.source))}{" "}
               {pill(asString(edge.type), REL_LABEL(asString(edge.type)))}{" "}
               {nameOf(asString(edge.target))}
             </div>
-            <p className="mt-1 text-[13px] leading-5 text-neutral-800">
+            <p className="mt-1 text-[12px] leading-5 text-neutral-800">
               {asString(edge.reason) ||
                 "The graph records this link without a stated reason."}
             </p>
-            <p className="text-[11px] leading-4 text-neutral-600">
+            <p className="text-[10px] leading-4 text-neutral-600">
               {edge.type === "BUILDS_ON"
                 ? edge.trusted === false
                   ? "No stated reason, so it is ignored for prerequisites."
@@ -3434,12 +3665,12 @@ function RelationInspector({
             {selName || humanize(sel)} has no recorded link to other topics.
           </p>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <div className="mb-1.5 font-bold text-neutral-600">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="min-w-0">
+              <div className="mb-1 font-bold text-neutral-600">
                 Outgoing from {selName || humanize(sel)}
               </div>
-              <ul className="space-y-1.5">
+              <ul className="space-y-1">
                 {out.length === 0 && <li className="text-neutral-600">None</li>}
                 {out
                   .slice(0, 5)
@@ -3448,11 +3679,11 @@ function RelationInspector({
                   )}
               </ul>
             </div>
-            <div>
-              <div className="mb-1.5 font-bold text-neutral-600">
+            <div className="min-w-0">
+              <div className="mb-1 font-bold text-neutral-600">
                 Incoming to {selName || humanize(sel)}
               </div>
-              <ul className="space-y-1.5">
+              <ul className="space-y-1">
                 {inc.length === 0 && <li className="text-neutral-600">None</li>}
                 {inc
                   .slice(0, 5)
@@ -3494,7 +3725,7 @@ function RelationInspector({
             />{" "}
             bridge
           </span>
-          <span className="ml-auto text-neutral-700">
+          <span className="text-neutral-700 sm:ml-auto">
             Click a topic to light up its links, or a line to see why it exists.
           </span>
         </div>
@@ -3523,10 +3754,10 @@ function RunMini({
     .slice(-10);
   return (
     <div
-      className="flex items-center gap-3 rounded-2xl py-1.5 pl-2 pr-4"
+      className="flex items-center gap-3 rounded-2xl py-1 pl-2 pr-3"
       style={{ backgroundColor: INK, color: WHITE, ...border }}
     >
-      <svg viewBox="0 0 80 80" className="h-14 w-14 shrink-0" aria-hidden>
+      <svg viewBox="0 0 80 80" className="h-11 w-11 shrink-0" aria-hidden>
         <circle
           cx="40"
           cy="40"
@@ -3586,15 +3817,15 @@ function RunMini({
           );
         })}
       </svg>
-      <div className="min-w-[170px]">
+      <div className="min-w-[150px]">
         <div
-          className="text-[13px] font-bold"
+          className="text-[12px] font-bold"
           style={{ animation: "oblink 1.2s ease-in-out infinite" }}
         >
           {asString(job?.stageLabel, "Scanning")}… {pct}%
         </div>
         <div
-          className="mt-1.5 h-2 overflow-hidden rounded-full"
+          className="mt-1 h-2 overflow-hidden rounded-full"
           style={{ backgroundColor: "#2a2d2a" }}
         >
           <div
@@ -3624,7 +3855,7 @@ function RunMini({
             ))}
           </div>
         )}
-        <div className="mt-1 text-[11px] font-bold text-neutral-300">
+        <div className="mt-1 text-[10px] font-bold text-neutral-300">
           {num(job?.progress?.assessed)}/{num(job?.progress?.proposed)} judged
         </div>
       </div>
@@ -3940,7 +4171,7 @@ function TopicGraph({
                   x={(x1 + x2) / 2}
                   y={(y1 + y2) / 2 - 5}
                   textAnchor="middle"
-                  fontSize="10"
+                  fontSize="11"
                   fontWeight={700}
                   fontFamily={BODY_FONT}
                   style={{
@@ -4141,7 +4372,7 @@ function TopicGraph({
 
       {hn && hp && (
         <div
-          className="pointer-events-none absolute z-20 w-[210px] rounded-xl p-2.5 text-[12px] leading-4"
+          className="pointer-events-none absolute z-20 w-[200px] rounded-xl p-2 text-[11px] leading-4"
           style={{
             left: `${(hp.x / GW) * 100}%`,
             top: `${(hp.y / GH) * 100}%`,
@@ -4151,7 +4382,7 @@ function TopicGraph({
             animation: "oslide .15s ease-out both",
           }}
         >
-          <div className="text-[13px] font-bold">{asString(hn.label)}</div>
+          <div className="text-[12px] font-bold">{asString(hn.label)}</div>
           {hn.assessed ? (
             <>
               <div className="mt-0.5 opacity-80">
@@ -4219,7 +4450,7 @@ function TopicPanel({
 
   return (
     <div
-      className="space-y-5"
+      className="min-w-0 space-y-4"
       style={{ animation: "oslide .25s ease-out both" }}
     >
       <div className="flex items-start justify-between gap-3">
@@ -4230,12 +4461,12 @@ function TopicPanel({
             color={level && level !== "none" ? WHITE : INK}
           />
           <h3
-            className="mt-2.5 break-words text-[24px] font-bold leading-tight"
+            className="mt-2 break-words text-[20px] font-bold leading-tight"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             {name}
           </h3>
-          <p className="mt-1 text-[12px] font-semibold text-neutral-600">
+          <p className="mt-1 text-[11px] font-semibold text-neutral-600">
             {asString(t.domainLabel)},{" "}
             {AUTH_LABEL[asString(t.authenticity)] ??
               asString(t.authenticityLabel)}
@@ -4249,25 +4480,25 @@ function TopicPanel({
           className="hard shrink-0 rounded-full p-1.5"
           style={{ backgroundColor: WHITE, ...border }}
         >
-          <X size={14} />
+          <X size={13} />
         </button>
       </div>
 
       {loading && <InlineLoading label="Reading topic…" />}
       {err && (
-        <p className="text-[13px] font-bold" style={{ color: "#b8392a" }}>
+        <p className="text-[12px] font-bold" style={{ color: "#b8392a" }}>
           {err}
         </p>
       )}
 
       {detail && (
         <>
-          <p className="text-[13px] leading-relaxed text-neutral-700">
+          <p className="break-words text-[12px] leading-relaxed text-neutral-700">
             {asString(detail.verdict)}
           </p>
           {flags.length > 0 && (
             <div
-              className="rounded-xl p-3 text-[12px] leading-4"
+              className="break-words rounded-xl p-2.5 text-[11px] leading-4"
               style={{ backgroundColor: `${CORAL}22`, ...border }}
             >
               <b>Evidence conflicts with the rating:</b> {flags[0]}
@@ -4275,18 +4506,18 @@ function TopicPanel({
             </div>
           )}
           <div>
-            <div className="flex items-center justify-between text-[14px] font-bold">
+            <div className="flex items-center justify-between text-[13px] font-bold">
               <span style={{ fontFamily: DISPLAY_FONT }}>
                 Score {num(sc.score)}
               </span>
               {band.length === 2 && (
-                <span className="text-[12px] font-semibold text-neutral-600">
+                <span className="text-[11px] font-semibold text-neutral-600">
                   band {band[0]}–{band[1]}
                 </span>
               )}
             </div>
             <div
-              className="mt-2 h-3.5 overflow-hidden rounded-full"
+              className="mt-1.5 h-3 overflow-hidden rounded-full"
               style={{ backgroundColor: WHITE, border: `2px solid ${INK}` }}
             >
               <div
@@ -4317,17 +4548,17 @@ function TopicPanel({
             ).map(([label, n, bg, fg]) => (
               <div
                 key={label}
-                className="rounded-xl py-2.5"
+                className="rounded-xl py-2"
                 style={{ backgroundColor: bg, color: fg, ...border }}
               >
                 <div
-                  className="text-[22px] font-bold leading-none"
+                  className="text-[18px] font-bold leading-none"
                   style={{ fontFamily: DISPLAY_FONT }}
                 >
                   {n}
                 </div>
                 <div
-                  className="mt-1 text-[10px] font-bold tracking-wide"
+                  className="mt-1 text-[9px] font-bold tracking-wide"
                   style={{ fontFamily: MONO }}
                 >
                   {label.toUpperCase()}
@@ -4338,17 +4569,17 @@ function TopicPanel({
           <button
             type="button"
             onClick={onEvidence}
-            className="hard flex w-full items-center justify-between rounded-full px-4 py-2.5 text-[13px] font-bold"
+            className="hard flex w-full items-center justify-between rounded-full px-4 py-2 text-[12px] font-bold"
             style={{ backgroundColor: YELLOW, ...border }}
           >
             <span>See the evidence graph below</span>
             <ChevronRight size={14} strokeWidth={3} />
           </button>
           <Block title="Why this confidence">
-            <ConfidenceBox c={detail.confidence} />
+            <ConfidenceBox c={detail.confidence} compact />
           </Block>
           <Fold title="How it connects" open>
-            <div className="space-y-3 text-[13px]">
+            <div className="space-y-3 text-[12px]">
               <div className="flex flex-wrap gap-1.5">
                 <Chip
                   text={`PageRank ${fix(g.metrics?.foundationRank)}`}
@@ -4384,18 +4615,18 @@ function TopicPanel({
               {!asArray(g.foundations).length &&
                 !asArray(g.unlocks).length &&
                 !asArray(g.related).length && (
-                  <p className="text-[13px] leading-5 text-neutral-700">
+                  <p className="text-[12px] leading-5 text-neutral-700">
                     The graph records no connection for this topic.
                   </p>
                 )}
             </div>
           </Fold>
           <div className="flex flex-wrap gap-2">
-            <Btn onClick={() => onAsk(name)} bg={WHITE}>
-              <MessageCircle size={13} /> Ask about this
+            <Btn onClick={() => onAsk(name)} bg={WHITE} small>
+              <MessageCircle size={12} /> Ask about this
             </Btn>
-            <Btn onClick={onReanalyze} bg={YELLOW} disabled={running}>
-              <RefreshCw size={13} className={running ? "animate-spin" : ""} />{" "}
+            <Btn onClick={onReanalyze} bg={YELLOW} disabled={running} small>
+              <RefreshCw size={12} className={running ? "animate-spin" : ""} />{" "}
               Re-judge
             </Btn>
           </div>
@@ -4417,8 +4648,8 @@ function RefList({
   if (!list.length) return null;
   return (
     <div>
-      <div className="text-[12px] font-bold text-neutral-600">{title}</div>
-      <div className="mt-1.5 flex flex-wrap gap-1.5">
+      <div className="text-[11px] font-bold text-neutral-600">{title}</div>
+      <div className="mt-1 flex flex-wrap gap-1.5">
         {list.slice(0, 8).map((r, i) => {
           const slug = asString(r.slug);
           const lvl = r.level ?? r.developerLevel;
@@ -4430,7 +4661,7 @@ function RefList({
               type="button"
               title={asString(r.reason)}
               onClick={() => (assessed ? onPick(slug) : undefined)}
-              className="press rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+              className="press max-w-full truncate rounded-full px-2.5 py-0.5 text-[11px] font-bold"
               style={{
                 backgroundColor: assessed ? WHITE : CARD,
                 border: `2px ${assessed ? "solid" : "dashed"} ${INK}`,
@@ -4468,26 +4699,26 @@ function EvidenceRow({ e }: { e: EvItem }) {
           : "Code";
   return (
     <li
-      className="rounded-lg p-2.5"
+      className="min-w-0 rounded-lg p-2"
       style={{ backgroundColor: PAPER, border: `1.5px solid ${INK}` }}
     >
-      <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
+      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
         <span
           className="rounded-full px-1.5 text-[10px] font-bold"
           style={{ backgroundColor: WHITE, border: `1.5px solid ${INK}` }}
         >
           {kindLabel}
         </span>
-        <span className="font-bold">{cut(label, 90)}</span>
+        <span className="break-words font-bold">{cut(label, 90)}</span>
         {e.when && (
-          <span className="text-[11px] text-neutral-600">
+          <span className="text-[10px] text-neutral-600">
             {timeAgo(e.when)}
           </span>
         )}
       </div>
       {e.snippet && (
         <pre
-          className="mt-1.5 overflow-x-auto rounded-md p-2 text-[11px] leading-4"
+          className="mt-1.5 max-w-full overflow-x-auto rounded-md p-2 text-[10px] leading-4"
           style={{
             backgroundColor: WHITE,
             border: `1px solid ${LINE}`,
@@ -4498,7 +4729,7 @@ function EvidenceRow({ e }: { e: EvItem }) {
         </pre>
       )}
       {where && (
-        <div className="mt-1 break-all text-[11px] leading-4 text-neutral-600">
+        <div className="mt-1 break-all text-[10px] leading-4 text-neutral-600">
           {cut(where, 110)}
         </div>
       )}
@@ -4507,7 +4738,7 @@ function EvidenceRow({ e }: { e: EvItem }) {
           href={e.permalink}
           target="_blank"
           rel="noreferrer"
-          className="mt-0.5 block text-[11px] font-bold underline"
+          className="mt-0.5 block text-[10px] font-bold underline"
         >
           View the code
         </a>
@@ -4611,7 +4842,7 @@ function TopicEvidence({
     note: string,
   ) => (
     <div
-      className="rounded-xl p-4"
+      className="min-w-0 rounded-xl p-3"
       style={{
         backgroundColor: WHITE,
         border: `2px solid ${INK}`,
@@ -4619,22 +4850,24 @@ function TopicEvidence({
         boxShadow: shadow(2),
       }}
     >
-      <div className="text-[12px] font-bold text-neutral-600">{title}</div>
+      <div className="text-[11px] font-bold text-neutral-600">{title}</div>
       <div
-        className="mt-1 text-[22px] font-bold leading-none"
+        className="mt-1 break-words text-[18px] font-bold leading-tight"
         style={{ fontFamily: DISPLAY_FONT }}
       >
         {value}
       </div>
-      <div className="mt-1.5 text-[12px] leading-4 text-neutral-600">{sub}</div>
-      <div className="mt-0.5 text-[12px] font-bold leading-4">{note}</div>
+      <div className="mt-1 text-[11px] leading-4 text-neutral-600">{sub}</div>
+      <div className="mt-0.5 break-words text-[11px] font-bold leading-4">
+        {note}
+      </div>
     </div>
   );
 
   return (
     <section
       id={EVIDENCE_ID}
-      className="mt-10 scroll-mt-24 rounded-2xl p-5 sm:p-6"
+      className="mt-6 min-w-0 scroll-mt-16 rounded-2xl p-4"
       style={{
         backgroundColor: PAPER,
         ...border,
@@ -4642,16 +4875,16 @@ function TopicEvidence({
         animation: "oslide .25s ease-out both",
       }}
     >
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
-        <div>
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
           <Eyebrow>WHY PATHWAY BELIEVES THIS</Eyebrow>
           <h2
-            className="mt-1 text-[30px] font-bold leading-tight tracking-tight"
+            className="mt-1 break-words text-[22px] font-bold leading-tight tracking-tight"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             {name}
           </h2>
-          <p className="mt-1 text-[13px] font-semibold text-neutral-600">
+          <p className="mt-1 text-[12px] font-semibold text-neutral-600">
             {LEVEL_LABEL[asString(detail.topic?.level)] ?? ""},{" "}
             {asString(tr.assessment?.confidence)} confidence,{" "}
             {num(detail.topic?.evidence?.files)} files across{" "}
@@ -4665,11 +4898,12 @@ function TopicEvidence({
               onAsk(`Show me the code that demonstrates my ${name}`)
             }
             bg={WHITE}
+            small
           >
-            <MessageCircle size={13} /> Ask for the code
+            <MessageCircle size={12} /> Ask for the code
           </Btn>
-          <Btn onClick={() => void explain()} bg={YELLOW} disabled={busy}>
-            <Sparkles size={13} />{" "}
+          <Btn onClick={() => void explain()} bg={YELLOW} disabled={busy} small>
+            <Sparkles size={12} />{" "}
             {busy ? "Writing…" : "Explain in plain English"}
           </Btn>
         </div>
@@ -4680,7 +4914,7 @@ function TopicEvidence({
       <DepthProfile p={detail.depthProfile} name={name} />
 
       {/* three separate answers */}
-      <div className="mt-6 grid gap-4 md:grid-cols-3">
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
         {measure(
           "Developer proficiency",
           "Judged from cited evidence, checked by guard-rails",
@@ -4709,15 +4943,15 @@ function TopicEvidence({
 
       {flags.length > 0 && (
         <div
-          className="mt-4 rounded-xl p-4"
+          className="mt-3 rounded-xl p-3"
           style={{ backgroundColor: `${CORAL}22`, ...border }}
         >
-          <div className="text-[13px] font-bold">
+          <div className="text-[12px] font-bold">
             Where the evidence conflicts or is out of date
           </div>
           <ul className="mt-1.5 space-y-1">
             {flags.map((f, i) => (
-              <li key={i} className="text-[13px] leading-5">
+              <li key={i} className="break-words text-[12px] leading-5">
                 {f}
               </li>
             ))}
@@ -4725,11 +4959,11 @@ function TopicEvidence({
         </div>
       )}
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-3">
+      <div className="mt-3 grid gap-3 lg:grid-cols-3">
         {columns.map((c) => (
           <div
             key={c.key}
-            className="rounded-xl p-4"
+            className="min-w-0 rounded-xl p-3"
             style={{
               backgroundColor: WHITE,
               border: `2px solid ${INK}`,
@@ -4737,17 +4971,17 @@ function TopicEvidence({
               boxShadow: shadow(2),
             }}
           >
-            <div className="flex items-center gap-1.5 text-[14px] font-bold">
+            <div className="flex items-center gap-1.5 text-[13px] font-bold">
               {c.icon} {c.title}
-              <span className="ml-auto text-[12px] text-neutral-600">
+              <span className="ml-auto text-[11px] text-neutral-600">
                 {c.claims.length}
               </span>
             </div>
-            <div className="text-[12px] text-neutral-600">{c.hint}</div>
+            <div className="text-[11px] text-neutral-600">{c.hint}</div>
             {c.claims.length ? (
-              <ul className="mt-3 space-y-2">
+              <ul className="mt-2.5 space-y-2">
                 {c.claims.slice(0, 6).map((x, i) => (
-                  <li key={i} className="text-[13px] leading-5">
+                  <li key={i} className="break-words text-[12px] leading-5">
                     {cut(asString(x.text), 200)}
                     {asArray<string>(x.evidenceIds).map((id) => (
                       <span
@@ -4766,7 +5000,7 @@ function TopicEvidence({
                 ))}
               </ul>
             ) : (
-              <p className="mt-3 text-[13px] leading-5 text-neutral-600">
+              <p className="mt-2.5 text-[12px] leading-5 text-neutral-600">
                 {c.empty}
               </p>
             )}
@@ -4776,19 +5010,19 @@ function TopicEvidence({
 
       {approaches.length > 0 && (
         <div
-          className="mt-6 rounded-xl p-4"
+          className="mt-4 rounded-xl p-3.5"
           style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
         >
           <div
-            className="text-[16px] font-bold"
+            className="text-[15px] font-bold"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             Approaches demonstrated ({approaches.length})
           </div>
-          <p className="text-[12px] text-neutral-600">
+          <p className="text-[11px] text-neutral-600">
             Each approach is judged on its own evidence.
           </p>
-          <div className="mt-3 grid gap-4 lg:grid-cols-2">
+          <div className="mt-3 grid gap-3 lg:grid-cols-2">
             {approaches.map((a, i) => {
               const ev = approachEvidence(a, all);
               const hardening = asArray<string>(a.hardening).filter(Boolean);
@@ -4797,7 +5031,7 @@ function TopicEvidence({
               return (
                 <div
                   key={`${asString(a.slug)}-${i}`}
-                  className="rounded-xl p-3.5"
+                  className="min-w-0 rounded-xl p-3"
                   style={{
                     backgroundColor: PAPER,
                     border: `2px solid ${INK}`,
@@ -4805,7 +5039,7 @@ function TopicEvidence({
                   }}
                 >
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[14px] font-bold">
+                    <span className="break-words text-[13px] font-bold">
                       {asString(a.name ?? a.slug)}
                     </span>
                     <Chip
@@ -4816,18 +5050,18 @@ function TopicEvidence({
                     {a.isPrimary && <Chip text="primary" background={YELLOW} />}
                   </div>
                   {a.howImplemented && (
-                    <p className="mt-2 text-[13px] leading-5 text-neutral-800">
+                    <p className="mt-2 break-words text-[12px] leading-5 text-neutral-800">
                       {cut(asString(a.howImplemented), 240)}
                     </p>
                   )}
                   {hardening.length > 0 && (
-                    <p className="mt-1.5 text-[12px] leading-4 text-neutral-700">
+                    <p className="mt-1.5 break-words text-[11px] leading-4 text-neutral-700">
                       <b>Hardening seen:</b> {hardening.slice(0, 3).join("; ")}
                     </p>
                   )}
                   {gaps.length > 0 && (
                     <p
-                      className="mt-1.5 text-[12px] font-bold leading-4"
+                      className="mt-1.5 break-words text-[11px] font-bold leading-4"
                       style={{ color: "#b8392a" }}
                     >
                       Not shown: {gaps.slice(0, 2).join("; ")}
@@ -4852,20 +5086,20 @@ function TopicEvidence({
         </div>
       )}
 
-      <div className="mt-6 grid items-start gap-4 lg:grid-cols-2">
+      <div className="mt-4 grid items-start gap-3 lg:grid-cols-2">
         <div
-          className="rounded-xl p-4"
+          className="min-w-0 rounded-xl p-3.5"
           style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
         >
           <div
-            className="mb-2 text-[16px] font-bold"
+            className="mb-2 text-[15px] font-bold"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             Foundation paths
           </div>
           <PrereqPaths paths={prereqs} onPick={onPick} />
           {prereqs.length === 0 && (
-            <div className="mt-4 space-y-3">
+            <div className="mt-3 space-y-3">
               <RefList
                 title="Linked foundations (no confirmed path)"
                 list={asObjects(detail.graph?.foundations)}
@@ -4885,11 +5119,11 @@ function TopicEvidence({
           )}
         </div>
         <div
-          className="rounded-xl p-4"
+          className="min-w-0 rounded-xl p-3.5"
           style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(2) }}
         >
           <div
-            className="mb-2 text-[16px] font-bold"
+            className="mb-2 text-[15px] font-bold"
             style={{ fontFamily: DISPLAY_FONT }}
           >
             Why this confidence level
@@ -4900,7 +5134,7 @@ function TopicEvidence({
 
       {(story || storyErr) && (
         <div
-          className="mt-6 rounded-xl p-5"
+          className="mt-4 min-w-0 rounded-xl p-4"
           style={{
             backgroundColor: WHITE,
             ...border,
@@ -4908,12 +5142,12 @@ function TopicEvidence({
             animation: "oslide .25s ease-out both",
           }}
         >
-          <div className="flex items-center justify-between gap-2">
-            <span className="flex items-center gap-2 text-[13px] font-bold">
-              <Sparkles size={14} /> In plain English
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="flex items-center gap-2 text-[12px] font-bold">
+              <Sparkles size={13} /> In plain English
             </span>
             {story && (
-              <span className="text-[12px] font-semibold text-neutral-600">
+              <span className="text-[11px] font-semibold text-neutral-600">
                 {storySrc === "llm"
                   ? "Written by the Pathway agent, numbers checked against your graph"
                   : "Summary built from your graph"}
@@ -4922,7 +5156,7 @@ function TopicEvidence({
           </div>
           {storyErr && (
             <p
-              className="mt-2 text-[13px] font-bold"
+              className="mt-2 text-[12px] font-bold"
               style={{ color: "#b8392a" }}
             >
               {storyErr}
@@ -4931,45 +5165,45 @@ function TopicEvidence({
           {story && (
             <>
               <h3
-                className="mt-3 text-[20px] font-bold leading-snug"
+                className="mt-2.5 break-words text-[18px] font-bold leading-snug"
                 style={{ fontFamily: DISPLAY_FONT }}
               >
                 {asString(story.headline)}
               </h3>
-              <p className="mt-1.5 text-[14px] leading-6 text-neutral-800">
+              <p className="mt-1.5 break-words text-[13px] leading-6 text-neutral-800">
                 {asString(story.summary)}
               </p>
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
                 <div
-                  className="rounded-xl p-3.5"
+                  className="rounded-xl p-3"
                   style={{
                     backgroundColor: `${GREEN}22`,
                     border: `2px solid ${INK}`,
                   }}
                 >
-                  <div className="text-[12px] font-bold">What it means</div>
-                  <p className="mt-1 text-[13px] leading-5">
+                  <div className="text-[11px] font-bold">What it means</div>
+                  <p className="mt-1 break-words text-[12px] leading-5">
                     {asString(story.meaning)}
                   </p>
                 </div>
                 <div
-                  className="rounded-xl p-3.5"
+                  className="rounded-xl p-3"
                   style={{
                     backgroundColor: `${CORAL}22`,
                     border: `2px solid ${INK}`,
                   }}
                 >
-                  <div className="text-[12px] font-bold">
+                  <div className="text-[11px] font-bold">
                     What is not proven
                   </div>
-                  <p className="mt-1 text-[13px] leading-5">
+                  <p className="mt-1 break-words text-[12px] leading-5">
                     {asString(story.caveat)}
                   </p>
                 </div>
               </div>
               {asArray<string>(story.followups).length > 0 && (
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <span className="text-[12px] font-bold text-neutral-600">
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-bold text-neutral-600">
                     Ask the agent:
                   </span>
                   {asArray<string>(story.followups)
@@ -4979,7 +5213,7 @@ function TopicEvidence({
                         key={q}
                         type="button"
                         onClick={() => onAsk(q)}
-                        className="press rounded-full px-3 py-1 text-[12px] font-bold"
+                        className="press max-w-full rounded-full px-3 py-1 text-left text-[11px] font-bold"
                         style={{ backgroundColor: WHITE, ...border }}
                       >
                         {q}
@@ -5008,13 +5242,13 @@ function PrereqPaths({
 }) {
   if (!paths.length)
     return (
-      <p className="text-[13px] leading-5 text-neutral-700">
+      <p className="text-[12px] leading-5 text-neutral-700">
         No confirmed foundation is recorded for this topic. Related topics are
         associations, not prerequisites.
       </p>
     );
   return (
-    <div className="space-y-3">
+    <div className="space-y-2.5">
       {paths.slice(0, 6).map((p, i) => {
         const st = PREREQ_STYLE[asString(p.status)] ?? PREREQ_STYLE.unverified;
         const steps = asArray<Obj>(p.steps);
@@ -5022,7 +5256,7 @@ function PrereqPaths({
         return (
           <div
             key={i}
-            className="rounded-lg p-3"
+            className="rounded-lg p-2.5"
             style={{ backgroundColor: PAPER, border: `1.5px solid ${INK}` }}
           >
             <Chip text={st.label} background={st.bg} color={st.color} />
@@ -5038,7 +5272,7 @@ function PrereqPaths({
                       onClick={() =>
                         canOpen ? onPick?.(asString(s.slug)) : undefined
                       }
-                      className="press inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+                      className="press inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-bold"
                       style={{
                         backgroundColor: assessed ? WHITE : CARD,
                         border: `2px ${assessed ? "solid" : "dashed"} ${INK}`,
@@ -5056,7 +5290,7 @@ function PrereqPaths({
               })}
             </div>
             {reasons[0] && (
-              <p className="mt-2 text-[12px] leading-4 text-neutral-700">
+              <p className="mt-2 break-words text-[11px] leading-4 text-neutral-700">
                 {cut(reasons[0], 170)}
               </p>
             )}
@@ -5067,12 +5301,20 @@ function PrereqPaths({
   );
 }
 
-function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
+function ConfidenceBox({
+  c,
+  compact = false,
+}: {
+  c: Obj | null | undefined;
+  compact?: boolean;
+}) {
   if (!c) return null;
   const eff = asString(c.effective);
   const factors = asArray<Obj>(c.factors);
+  const labelW = compact ? "w-24" : "w-32";
+  const padL = compact ? "pl-[6.5rem]" : "pl-[8.5rem]";
   return (
-    <div>
+    <div className="min-w-0">
       <div className="flex flex-wrap items-center gap-2">
         <Chip
           text={`${eff} confidence`}
@@ -5080,17 +5322,17 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
           color={eff === "high" ? WHITE : INK}
         />
         {asString(c.stated) !== eff && (
-          <span className="text-[12px] leading-4 text-neutral-700">
+          <span className="text-[11px] leading-4 text-neutral-700">
             Stored as {asString(c.stated)}; current evidence supports{" "}
             {asString(c.derived)}.
           </span>
         )}
       </div>
-      <div className="mt-3 space-y-2.5">
+      <div className="mt-2.5 space-y-2">
         {factors.map((f) => (
           <div key={asString(f.id)}>
-            <div className="flex items-center gap-2 text-[12px]">
-              <span className="w-32 shrink-0 font-bold">
+            <div className="flex items-center gap-2 text-[11px]">
+              <span className={`${labelW} shrink-0 font-bold`}>
                 {asString(f.label)}
               </span>
               <div
@@ -5109,7 +5351,9 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
                 {num(f.value)}/{num(f.max)}
               </span>
             </div>
-            <div className="pl-[8.5rem] text-[11px] leading-4 text-neutral-600">
+            <div
+              className={`${padL} break-words text-[10px] leading-4 text-neutral-600`}
+            >
               {asString(f.note)}
             </div>
           </div>
@@ -5126,8 +5370,8 @@ function ConfidenceBox({ c }: { c: Obj | null | undefined }) {
 function Mark() {
   return (
     <svg
-      width="24"
-      height="24"
+      width="22"
+      height="22"
       viewBox="0 0 24 24"
       fill="none"
       aria-hidden="true"
@@ -5154,7 +5398,7 @@ function Eyebrow({ children }: { children: ReactNode }) {
 function Row({ children }: { children: ReactNode }) {
   return (
     <div
-      className="flex flex-col gap-2 py-3.5 sm:flex-row sm:items-center sm:gap-6"
+      className="flex flex-col gap-1.5 py-3 sm:flex-row sm:items-center sm:gap-5"
       style={{ borderBottom: `1px solid ${LINE}` }}
     >
       {children}
@@ -5188,17 +5432,17 @@ function Tile({
 }) {
   return (
     <div
-      className="rounded-2xl p-4"
+      className="min-w-0 rounded-2xl p-3"
       style={{ backgroundColor: WHITE, ...border, boxShadow: shadow(3) }}
     >
       <div
-        className="text-[32px] font-bold leading-none"
+        className="text-[24px] font-bold leading-none"
         style={{ fontFamily: DISPLAY_FONT }}
       >
         {typeof value === "number" ? value.toLocaleString() : value}
       </div>
-      <div className="mt-2 text-[13px] font-bold">{label}</div>
-      <div className="text-[12px] leading-4 text-neutral-600">{hint}</div>
+      <div className="mt-1.5 text-[12px] font-bold">{label}</div>
+      <div className="text-[11px] leading-4 text-neutral-600">{hint}</div>
     </div>
   );
 }
@@ -5216,7 +5460,7 @@ function Fold({
 }) {
   return (
     <details
-      className="group"
+      className="group min-w-0"
       open={open}
       style={{
         borderTop: small ? undefined : `1px solid ${LINE}`,
@@ -5224,7 +5468,7 @@ function Fold({
       }}
     >
       <summary
-        className={`flex cursor-pointer items-center gap-1.5 font-bold ${small ? "mt-2 text-[12px] text-neutral-600" : "py-3 text-[13px]"}`}
+        className={`flex cursor-pointer items-center gap-1.5 font-bold ${small ? "mt-2 text-[11px] text-neutral-600" : "py-2.5 text-[12px]"}`}
       >
         <ChevronRight
           size={small ? 12 : 14}
@@ -5254,7 +5498,7 @@ function TopicSelect({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={placeholder}
-      className="max-w-[210px] rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
+      className="max-w-[190px] rounded-full bg-white px-3 py-1 text-[12px] font-bold outline-none"
       style={border}
     >
       <option value="">{placeholder}</option>
@@ -5288,7 +5532,7 @@ function FilterSelect({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={label}
-      className="rounded-full bg-white px-3 py-1.5 text-[13px] font-bold outline-none"
+      className="rounded-full bg-white px-3 py-1 text-[12px] font-bold outline-none"
       style={border}
     >
       {allowEmpty && <option value="">{label}: all</option>}
@@ -5306,20 +5550,20 @@ function TopicChip({ t, onClick }: { t: Obj; onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="press inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[13px] font-bold"
+      className="press inline-flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-bold"
       style={{ backgroundColor: WHITE, ...border }}
     >
       <Dot color={LEVEL_COLOR[asString(t?.level)] ?? CARD} small />
-      {asString(t?.name ?? t?.label)}
+      <span className="truncate">{asString(t?.name ?? t?.label)}</span>
     </button>
   );
 }
 
 function Block({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section>
+    <section className="min-w-0">
       <div
-        className="text-[15px] font-bold"
+        className="text-[14px] font-bold"
         style={{ fontFamily: DISPLAY_FONT }}
       >
         {title}
@@ -5334,18 +5578,20 @@ function Btn({
   children,
   bg = WHITE,
   disabled = false,
+  small = false,
 }: {
   onClick: () => void;
   children: ReactNode;
   bg?: string;
   disabled?: boolean;
+  small?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="hard inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[13px] font-bold disabled:opacity-50"
+      className={`hard inline-flex items-center gap-1.5 rounded-full font-bold disabled:opacity-50 ${small ? "px-2.5 py-0.5 text-[11px]" : "px-3 py-1 text-[12px]"}`}
       style={{ backgroundColor: bg, color: INK, ...border }}
     >
       {children}
@@ -5364,7 +5610,7 @@ function Chip({
 }) {
   return (
     <span
-      className="inline-flex rounded-full px-2.5 py-0.5 text-[12px] font-bold"
+      className="inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-bold"
       style={{ backgroundColor: background, color, ...border }}
     >
       {text}
@@ -5376,13 +5622,13 @@ function MiniStat({ label, value }: { label: string; value: number }) {
   return (
     <div className="text-center">
       <div
-        className="text-[22px] font-bold leading-none"
+        className="text-[18px] font-bold leading-none"
         style={{ fontFamily: DISPLAY_FONT }}
       >
         {value.toLocaleString()}
       </div>
       <div
-        className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500"
+        className="mt-1 text-[9px] font-bold tracking-wide text-neutral-500"
         style={{ fontFamily: MONO }}
       >
         {label.toUpperCase()}
@@ -5394,7 +5640,7 @@ function MiniStat({ label, value }: { label: string; value: number }) {
 function Empty({ text }: { text: string }) {
   return (
     <div
-      className="rounded-xl border-2 border-dashed p-5 text-[13px] text-neutral-700"
+      className="rounded-xl border-2 border-dashed p-4 text-[12px] text-neutral-700"
       style={{ borderColor: LINE }}
     >
       {text}
@@ -5405,8 +5651,8 @@ function Empty({ text }: { text: string }) {
 function InlineLoading({ label }: { label: string }) {
   return (
     <div className="flex items-center gap-3 py-2">
-      <RefreshCw size={15} className="animate-spin" />
-      <span className="text-[13px] font-bold">{label}</span>
+      <RefreshCw size={14} className="animate-spin" />
+      <span className="text-[12px] font-bold">{label}</span>
     </div>
   );
 }
