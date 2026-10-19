@@ -88,21 +88,9 @@ This section follows **one recommendation** from your code to your next lesson.
 
 **What the developer asked:** *"make my background jobs reliable"* (or simply: *"what should I learn next?"*)
 
-```mermaid
-flowchart LR
-    CODE[(FileChange<br/>added_code, imports, symbols)] --> DET[Detector rules]
-    DET --> DEM[Demonstration<br/>job_queue_workers]
-    DEM -->|OF_CAPABILITY| CAP[Capability<br/>job_queues]
-    CAP -->|MAPS_TO| TOP[Topic<br/>background_job_processing<br/>level: working]
-    TOP -->|RELATED / BUILDS_ON| FR[Learning frontier<br/>error_handling_and_retries<br/>prerequisites met]
-    FR --> GG[Goal graph<br/>retrieve, rank, read code]
-    GG --> NM[Learn-next move<br/>dead-letter handling]
-    NM --> M[Practice mission<br/>3 criteria]
-    M --> V{Verified?}
-    V -->|yes| VD[Demonstration source=mission]
-    VD -->|EVIDENCE_FOR_TOPIC| TOP
-    VD -.->|marks stale| DA[Re-grade topic]
-```
+<p align="center">
+  <img src="docs/worked-example.svg" alt="Worked example: from code to a verified lesson" width="100%"/>
+</p>
 
 ### Step 1: what you already know
 
@@ -236,59 +224,30 @@ The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is a
   <sub><b>The real graph in FalkorDB Browser:</b> one developer's demonstrations, the capabilities they prove, and the file changes behind them.</sub>
 </p>
 
-```mermaid
-flowchart TB
-    subgraph L1[1. Evidence layer - what you did]
-        D1[Developer] --> FC[FileChange / Commit / Repository]
-        FC --> DEM[Demonstration / Experience]
-    end
-    subgraph L2[2. Capability taxonomy - seeded]
-        CAP[Capability<br/>SPECIALIZES / PREREQUISITE_OF / RELATED_TO]
-        TS[TechniqueSpec / Safeguard]
-    end
-    subgraph L3[3. Topic taxonomy and depth - discovered]
-        TOP[Topic<br/>BUILDS_ON / RELATED_TOPIC]
-        APP[Approach]
-        DA2[DepthAssessment / DepthSnapshot]
-    end
-    subgraph L4[4. Learning plan]
-        GOAL[Goal] --> NM[NextMove] --> MIS[Mission] --> EVAL[Evaluation]
-    end
-    DEM -->|OF_CAPABILITY| CAP
-    CAP -->|HAS_TECHNIQUE_SPEC| TS
-    TOP -->|MAPS_TO| CAP
-    TOP -->|HAS_APPROACH| APP
-    DA2 -->|OF_TOPIC| TOP
-    DA2 -->|BACKED_BY| FC
-    DEM -->|EVIDENCE_FOR_TOPIC| TOP
-    DEM -->|DEMONSTRATES_APPROACH| APP
-    NM -->|FOCUSES_ON| TOP
-    NM -->|ADVANCES| CAP
-    NM -->|STARTS_AT| FC
-    EVAL -.->|verified mission creates| DEM
-```
+<p align="center">
+  <img src="docs/graph-layers.svg" alt="The four layers of the graph" width="100%"/>
+</p>
 
 **Seeded vs. discovered.** Capabilities (20 learnable, 8 domains), detector rules (21), technique specs and safeguards are defined in code and written by `ensureCapabilityGraph`, which is stamped with a definitions version and re-seeds only when the definitions change. **Topics are not seeded.** They are proposed from your evidence by the Depth Analyzer, validated against it, and shared in one taxonomy across developers. No developer data is stored on a `Topic`.
 
 ### Layer 3: Topics, approaches and depth
 
-```mermaid
-erDiagram
-    Topic }o--o{ Topic : "BUILDS_ON (strength, reason, confidence, basis)"
-    Topic }o--o{ Topic : "RELATED_TOPIC (reason, confidence, basis)"
-    Topic }o--o{ Capability : "MAPS_TO (weight, reason, basis)"
-    Topic ||--o{ Approach : HAS_APPROACH
-    Developer ||--o{ DepthAssessment : ASSESSED
-    DepthAssessment }o--|| Topic : OF_TOPIC
-    DepthAssessment }o--o{ Approach : "USES_APPROACH (depth, authenticity)"
-    DepthAssessment }o--o{ FileChange : BACKED_BY
-    DepthAssessment }o--o{ Demonstration : BACKED_BY
-    Developer ||--o{ DepthSnapshot : HAD_SNAPSHOT
-    DepthSnapshot }o--|| Topic : SNAPSHOT_OF
-    Developer }o--o{ Topic : "KNOWS_TOPIC (level, score, confidence)"
-    Demonstration }o--o{ Topic : "EVIDENCE_FOR_TOPIC (reason, confidence, source)"
-    Demonstration }o--o{ Approach : "DEMONSTRATES_APPROACH (reason, confidence, source)"
-```
+| From | Relationship | To |
+|---|---|---|
+| `Topic` | `BUILDS_ON (strength, reason, confidence, basis)` | `Topic` |
+| `Topic` | `RELATED_TOPIC (reason, confidence, basis)` | `Topic` |
+| `Topic` | `MAPS_TO (weight, reason, basis)` | `Capability` |
+| `Topic` | `HAS_APPROACH` | `Approach` |
+| `Developer` | `ASSESSED` | `DepthAssessment` |
+| `DepthAssessment` | `OF_TOPIC` | `Topic` |
+| `DepthAssessment` | `USES_APPROACH (depth, authenticity)` | `Approach` |
+| `DepthAssessment` | `BACKED_BY` | `FileChange` |
+| `DepthAssessment` | `BACKED_BY` | `Demonstration` |
+| `Developer` | `HAD_SNAPSHOT` | `DepthSnapshot` |
+| `DepthSnapshot` | `SNAPSHOT_OF` | `Topic` |
+| `Developer` | `KNOWS_TOPIC (level, score, confidence)` | `Topic` |
+| `Demonstration` | `EVIDENCE_FOR_TOPIC (reason, confidence, source)` | `Topic` |
+| `Demonstration` | `DEMONSTRATES_APPROACH (reason, confidence, source)` | `Approach` |
 
 `Topic` properties: `id` (`topic:<slug>`), `slug`, `name`, `domain` (`frontend | backend | database | infrastructure | ai_ml | mobile | general`), `description`, `aliases_text`, `stub`, plus **algorithm results written onto the node**:
 
@@ -321,53 +280,51 @@ erDiagram
 
 ### Layer 1: Evidence
 
-```mermaid
-erDiagram
-    Developer ||--o{ Commit : MADE
-    Developer ||--o{ FileChange : AUTHORED_CODE
-    Developer ||--o{ Demonstration : DEMONSTRATED
-    Developer ||--o{ Experience : EXPERIENCED
-    Developer }o--o{ Capability : "HAS_CAPABILITY (level, counts)"
-    Developer }o--o{ Skill : HAS_SKILL
-    FileChange ||--o{ Demonstration : PRODUCED
-    Demonstration }o--|| Capability : OF_CAPABILITY
-    Demonstration }o--o{ FileChange : EVIDENCED_BY
-    Demonstration }o--|| Repository : IN_REPOSITORY
-    Demonstration }o--o| EngineeringContext : IN_CONTEXT
-    Demonstration }o--o{ Skill : USES
-    Experience }o--o{ Capability : DEMONSTRATES_CAPABILITY
-    Experience }o--o{ Problem : SOLVES
-    Experience }o--o{ Technique : USES_TECHNIQUE
-    Experience }o--o{ Technology : USES_TECHNOLOGY
-    Experience }o--|| Repository : OCCURS_IN
-    Experience }o--o{ FileChange : EVIDENCED_BY
-    Experience }o--o{ Demonstration : SUPPORTED_BY
-    Experience }o--o{ EngineeringContext : IN_CONTEXT
-```
+| From | Relationship | To |
+|---|---|---|
+| `Developer` | `MADE` | `Commit` |
+| `Developer` | `AUTHORED_CODE` | `FileChange` |
+| `Developer` | `DEMONSTRATED` | `Demonstration` |
+| `Developer` | `EXPERIENCED` | `Experience` |
+| `Developer` | `HAS_CAPABILITY (level, counts)` | `Capability` |
+| `Developer` | `HAS_SKILL` | `Skill` |
+| `FileChange` | `PRODUCED` | `Demonstration` |
+| `Demonstration` | `OF_CAPABILITY` | `Capability` |
+| `Demonstration` | `EVIDENCED_BY` | `FileChange` |
+| `Demonstration` | `IN_REPOSITORY` | `Repository` |
+| `Demonstration` | `IN_CONTEXT` | `EngineeringContext` |
+| `Demonstration` | `USES` | `Skill` |
+| `Experience` | `DEMONSTRATES_CAPABILITY` | `Capability` |
+| `Experience` | `SOLVES` | `Problem` |
+| `Experience` | `USES_TECHNIQUE` | `Technique` |
+| `Experience` | `USES_TECHNOLOGY` | `Technology` |
+| `Experience` | `OCCURS_IN` | `Repository` |
+| `Experience` | `EVIDENCED_BY` | `FileChange` |
+| `Experience` | `SUPPORTED_BY` | `Demonstration` |
+| `Experience` | `IN_CONTEXT` | `EngineeringContext` |
 
 > **Verified vs. inferred.** Only edges produced from your own code count as evidence. Structural edges are `basis = "declared"`; anything guessed from goal text or similarity is `basis = "inferred"` and can never satisfy a prerequisite. `Topic -[:MAPS_TO]-> Capability` is taxonomy: it selects which demonstrations to read and is **never proof of skill**.
 
 ### Layer 4: Goal, NextMove, Mission, Evaluation
 
-```mermaid
-erDiagram
-    Developer ||--o{ Goal : HAS_GOAL
-    Developer ||--o{ Mission : ASSIGNED
-    Goal ||--o| NextMove : PROPOSES
-    Goal ||--o{ Mission : HAS_MISSION
-    Goal }o--o{ Topic : TARGETS
-    NextMove }o--o{ Topic : "FOCUSES_ON / LEVERAGES / CLOSES_GAP_IN"
-    NextMove }o--|| Capability : ADVANCES
-    NextMove }o--o| FileChange : STARTS_AT
-    NextMove }o--o{ Demonstration : "BACKED_BY (ref)"
-    Mission }o--|| NextMove : FROM_MOVE
-    Mission }o--|| Capability : ADVANCES
-    Mission }o--o| Topic : FOCUSES_ON
-    Mission }o--o| FileChange : STARTS_AT
-    Mission }o--o{ Demonstration : "BACKED_BY (ref)"
-    Mission }o--|| Repository : IN_REPOSITORY
-    Mission ||--o{ Evaluation : EVALUATED_AS
-```
+| From | Relationship | To |
+|---|---|---|
+| `Developer` | `HAS_GOAL` | `Goal` |
+| `Developer` | `ASSIGNED` | `Mission` |
+| `Goal` | `PROPOSES` | `NextMove` |
+| `Goal` | `HAS_MISSION` | `Mission` |
+| `Goal` | `TARGETS` | `Topic` |
+| `NextMove` | `FOCUSES_ON / LEVERAGES / CLOSES_GAP_IN` | `Topic` |
+| `NextMove` | `ADVANCES` | `Capability` |
+| `NextMove` | `STARTS_AT` | `FileChange` |
+| `NextMove` | `BACKED_BY (ref)` | `Demonstration` |
+| `Mission` | `FROM_MOVE` | `NextMove` |
+| `Mission` | `ADVANCES` | `Capability` |
+| `Mission` | `FOCUSES_ON` | `Topic` |
+| `Mission` | `STARTS_AT` | `FileChange` |
+| `Mission` | `BACKED_BY (ref)` | `Demonstration` |
+| `Mission` | `IN_REPOSITORY` | `Repository` |
+| `Mission` | `EVALUATED_AS` | `Evaluation` |
 
 | Node | Key properties |
 |---|---|
@@ -412,17 +369,9 @@ CALL db.idx.fulltext.createNodeIndex('Issue', 'title', 'body')
 
 Before Pathway can say what is next, it has to know where you are. The Depth Analyzer (`analyzeDeveloperDepth`) turns your evidence into topics and judges each one.
 
-```mermaid
-flowchart TD
-    A[Evidence atlas<br/>packages, signals, vocabulary,<br/>co-occurrence clusters, capabilities,<br/>experiences, skills, repositories] --> B[Discover topics<br/>LLM proposes, code validates]
-    B --> C[Gap-fill topics for<br/>uncovered capabilities]
-    C --> D[Gather topic evidence<br/>graph queries + in-memory matching]
-    D --> E[Baseline depth<br/>deterministic prior]
-    E --> F[LLM judge<br/>cites S/D/E/C refs]
-    F --> G[Reconcile<br/>guard-rails cap the level]
-    G --> H[Relate pass<br/>BUILDS_ON proposals with reasons]
-    H --> I[Persist + refresh<br/>FalkorDB metrics]
-```
+<p align="center">
+  <img src="docs/depth-analyzer.svg" alt="Depth Analyzer pipeline" width="100%"/>
+</p>
 
 1. **Evidence atlas.** One read of your authored file changes (keyset-paginated), capabilities, experiences, skills, repositories and demonstrations. Packages, signals and vocabulary are counted; a deterministic label-propagation groups atoms that are used together.
 2. **Discovery, grounded.** The LLM may only use packages, signals and capability ids copied from the atlas, and keywords found in the atlas vocabulary. Anything else is discarded and reported. A topic with no remaining supporting atom is dropped. The `domain` must be one of the controlled domains; otherwise a deterministic `inferDomain` classifies it. Capability coverage is computed and gaps are filled from the capability list.
@@ -443,15 +392,9 @@ The LLM layer goes through one shared governor per model (requests and tokens pe
 
 "What next?" is answered from graph position, not an LLM-invented score. The central idea is the **learning frontier**: the topics you do not yet know well whose required foundations you already have.
 
-```mermaid
-flowchart LR
-    K[Topics you know<br/>level >= working] --> F{Frontier filter}
-    U[Topics below the cut-off level] --> F
-    F -->|required prerequisites met| R[Ready now]
-    F -->|a required prerequisite is weak| B[Blocked<br/>learn the foundation first]
-    R --> O[Order by readiness,<br/>foundation_rank, unlock count,<br/>current score]
-    B --> LO[readiness.learningOrder<br/>deepest foundation first]
-```
+<p align="center">
+  <img src="docs/learning-frontier.svg" alt="Learning frontier" width="100%"/>
+</p>
 
 | Question | How it is computed | Stored as / used by |
 |---|---|---|
@@ -510,20 +453,9 @@ RETURN node.id AS id, communityId
 
 `planGoal` turns the frontier into **one concrete thing to learn**. It has two halves: **`buildGoalGraph` retrieves and ranks; the LLM decides; validators check the decision against the graph.**
 
-```mermaid
-flowchart TD
-    W[Your goal or "what next?"] --> R[1. Resolve seeds<br/>agent topics, exact name,<br/>domain, full-text]
-    R --> X[2. Expand<br/>RELATED_TOPIC up to 2 hops<br/>+ same-cluster peers]
-    X --> Q[3. Read<br/>depth, capability coverage,<br/>evidence, completed missions]
-    Q --> C[Read code excerpts<br/>of the strongest evidence]
-    Q --> P[4. Personalized PageRank<br/>over the retrieved subgraph]
-    P --> S[5. Signals<br/>strengths, unproven, opportunities]
-    C --> L[LLM chooses ONE thing to learn]
-    S --> L
-    L --> F{finalize<br/>validators}
-    F -->|rejected: up to 2 repairs| L
-    F -->|accepted| N[storeNextMove]
-```
+<p align="center">
+  <img src="docs/goal-agent.svg" alt="Goal Agent flow" width="100%"/>
+</p>
 
 | Input to the agent | Where it comes from |
 |---|---|
@@ -562,21 +494,12 @@ Reading about a topic is not the same as learning it. A mission is the smallest 
 - Earlier and verified missions are listed so none is repeated
 - You **never write tests**; the platform writes and runs them in a sandbox
 
-```mermaid
-sequenceDiagram
-    participant A as Mission Agent (LLM)
-    participant V as Validators
-    participant DB as FalkorDB
-    loop up to 3 attempts
-        A->>V: JSON mission
-        alt rejected
-            V-->>A: exact rejection reasons + previous reply
-        else accepted
-            V->>DB: store (source = llm or llm_repaired)
-        end
-    end
-    Note over A,V: No LLM configured: status = llm_unavailable, nothing is invented
-```
+1. The Mission Agent (LLM) drafts a JSON mission.
+2. Validators check it. If rejected, the exact rejection reasons and the previous reply are sent back to the agent.
+3. This repeats for up to 3 attempts.
+4. When accepted, the mission is stored in FalkorDB with `source = llm` or `llm_repaired`.
+
+> With no LLM configured, the status is `llm_unavailable` and nothing is invented.
 
 ### Three different facts, kept apart
 
@@ -596,21 +519,9 @@ sequenceDiagram
 
 Learning should change the map. Each verified mission becomes new evidence, and the frontier moves.
 
-```mermaid
-flowchart LR
-    T[Topic] --> DA[DepthAssessment]
-    DA --> FR[Frontier]
-    FR --> NM[Learn-next move]
-    NM --> M[Mission]
-    M --> SB[Sandbox tests + CI]
-    SB --> VF{verifyEvaluation}
-    VF -->|verified| VD[Demonstration source=mission<br/>depth_rank 2]
-    VD -->|OF_CAPABILITY| CAP[Capability roll-up grows]
-    VD -->|EVIDENCE_FOR_TOPIC<br/>mission_verified, 0.8| T
-    VD -.->|DepthAssessment.stale = true| DA
-    DA -.->|reanalyzeTopicDepth| DA2[Updated assessment<br/>new frontier]
-    VF -->|no longer verified| RT[Retract demonstration<br/>mark topic stale]
-```
+<p align="center">
+  <img src="docs/feedback-loop.svg" alt="Feedback loop" width="100%"/>
+</p>
 
 What `recordEvaluation` does:
 
@@ -692,13 +603,9 @@ ORDER BY commits DESC LIMIT 50
 
 <img width="1535" height="690" alt="graph" src="https://github.com/user-attachments/assets/cd872edd-baf8-4a9e-ba09-f69bd23cdd55" />
 
-```mermaid
-flowchart LR
-    HUB((Developer<br/>hub)) ---|bridge| B1[Building = SkillCategory]
-    HUB ---|bridge| B2[Building = SkillCategory]
-    B1 --> F1[Floor = Skill<br/>ranked by depthScore]
-    F1 --> D1[Sign, trend glyph,<br/>5-dot depth meter, activity bars]
-```
+<p align="center">
+  <img src="docs/skill-city.svg" alt="3D Skill City mapping" width="100%"/>
+</p>
 
 | Visual | Graph data |
 |---|---|
@@ -728,13 +635,9 @@ Skills are classified by rule (a definitive path such as `Dockerfile` or a real 
 
 Pathway reaches GitHub **only through the official [GitHub MCP server](https://github.com/github/github-mcp-server)**. There is no hand-written GitHub REST client: the backend starts the server as a short-lived Docker container and talks to it over stdio with the MCP client SDK.
 
-```mermaid
-flowchart LR
-    SYNC[Sync pipeline] --> CALL[MCP client<br/>@modelcontextprotocol/client]
-    AGENT[Agent-side repo access<br/>mission inspection] --> CALL
-    CALL -->|stdio| DOCKER[docker run -i --rm<br/>ghcr.io/github/github-mcp-server]
-    DOCKER -->|GitHub API| GH[(GitHub)]
-```
+<p align="center">
+  <img src="docs/mcp-access.svg" alt="GitHub MCP access" width="100%"/>
+</p>
 
 **Read-only tool allow-list.** The container is started with `GITHUB_TOOLS`, so only these tools exist for the session:
 
@@ -760,20 +663,9 @@ flowchart LR
 
 Incremental, rate-limit aware, idempotent (every write is a `MERGE`).
 
-```mermaid
-flowchart TD
-    A[connecting<br/>start MCP session] --> B[fetching_repos<br/>search_repositories]
-    B --> C[per repository<br/>list_commits: initial window or since checkpoint]
-    C --> D[get_commit<br/>full patch per file]
-    D --> E[classify and parse<br/>roles, hunks, symbols, imports, dependency changes]
-    E --> F[repo context<br/>README, manifests, config]
-    F --> G[pull requests + activity]
-    G --> H[commit budget applied]
-    H --> I[writing<br/>batched MERGE into FalkorDB]
-    I --> J[learning pipeline<br/>this batch's file changes]
-    J --> K[checkpoint last_synced_at]
-    K --> L[sync_complete + stats]
-```
+<p align="center">
+  <img src="docs/sync-pipeline.svg" alt="Sync pipeline" width="100%"/>
+</p>
 
 **What is extracted from every commit**
 
@@ -790,22 +682,21 @@ Lockfiles, `node_modules/`, `dist/`, generated and minified files, images and do
 
 **What sync writes**
 
-```mermaid
-erDiagram
-    Developer ||--o{ Repository : CONTRIBUTED_TO
-    Developer ||--o{ Commit : MADE
-    Developer ||--o{ FileChange : AUTHORED_CODE
-    Developer ||--o{ PullRequest : AUTHORED
-    Developer ||--o{ Issue : OPENED
-    Developer ||--o{ ReviewedPullRequest : REVIEWED
-    Commit }o--|| Repository : IN_REPOSITORY
-    Commit ||--o{ FileChange : CHANGED
-    Commit }o--o| PullRequest : IN_PR
-    FileChange }o--|| Repository : IN_REPOSITORY
-    PullRequest }o--|| Repository : IN_REPOSITORY
-    PullRequest ||--o{ File : CHANGED
-    Issue }o--|| Repository : IN_REPOSITORY
-```
+| From | Relationship | To |
+|---|---|---|
+| `Developer` | `CONTRIBUTED_TO` | `Repository` |
+| `Developer` | `MADE` | `Commit` |
+| `Developer` | `AUTHORED_CODE` | `FileChange` |
+| `Developer` | `AUTHORED` | `PullRequest` |
+| `Developer` | `OPENED` | `Issue` |
+| `Developer` | `REVIEWED` | `ReviewedPullRequest` |
+| `Commit` | `IN_REPOSITORY` | `Repository` |
+| `Commit` | `CHANGED` | `FileChange` |
+| `Commit` | `IN_PR` | `PullRequest` |
+| `FileChange` | `IN_REPOSITORY` | `Repository` |
+| `PullRequest` | `IN_REPOSITORY` | `Repository` |
+| `PullRequest` | `CHANGED` | `File` |
+| `Issue` | `IN_REPOSITORY` | `Repository` |
 
 **Built for real accounts**
 
