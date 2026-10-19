@@ -1,4 +1,4 @@
-<div align="center">
+<img width="684" height="2184" alt="depth-analyzer" src="https://github.com/user-attachments/assets/b64bb849-2b1c-4a89-b3c9-f1e7699d1d09" /><img width="2222" height="4000" alt="graph-layers" src="https://github.com/user-attachments/assets/3fc1048f-0eb5-4639-9710-82741869af31" /><img width="962" height="3806" alt="worked-example" src="https://github.com/user-attachments/assets/338d096f-e9e6-4e78-9acb-243c75edf3e6" /><div align="center">
 
 <img width="1100" height="662" alt="home" src="https://github.com/user-attachments/assets/7a8091a1-aa06-4dcf-8e66-222a07510e0f" />
 
@@ -89,8 +89,11 @@ This section follows **one recommendation** from your code to your next lesson.
 **What the developer asked:** *"make my background jobs reliable"* (or simply: *"what should I learn next?"*)
 
 <p align="center">
-  <img src="docs/worked-example.svg" alt="Worked example: from code to a verified lesson" width="100%"/>
+<img width="962" height="3806" alt="worked-example" src="https://github.com/user-attachments/assets/f058a019-7e9c-47d8-91bf-50f944c1ca78" />
 </p>
+
+
+
 
 ### Step 1: what you already know
 
@@ -193,8 +196,10 @@ When a mission is **verified**, the platform writes a `Demonstration {source: "m
 ## 🏗️ Architecture
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Pathway architecture: GitHub, sync, FalkorDB, evidence, depth analyzer, topic graph, learning frontier, goal agent, mission agent, sandbox tests" width="100%"/>
+<img width="2800" height="4166" alt="architecture" src="https://github.com/user-attachments/assets/b98111b1-005e-4a44-8fab-86bc5423e41f" />
 </p>
+
+
 
 | Stage | What happens |
 |---|---|
@@ -225,8 +230,10 @@ The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is a
 </p>
 
 <p align="center">
-  <img src="docs/graph-layers.svg" alt="The four layers of the graph" width="100%"/>
+<img width="2222" height="4000" alt="graph-layers" src="https://github.com/user-attachments/assets/e62aba37-98fb-46b2-84b2-05445daf3bbc" />
 </p>
+
+
 
 **Seeded vs. discovered.** Capabilities (20 learnable, 8 domains), detector rules (21), technique specs and safeguards are defined in code and written by `ensureCapabilityGraph`, which is stamped with a definitions version and re-seeds only when the definitions change. **Topics are not seeded.** They are proposed from your evidence by the Depth Analyzer, validated against it, and shared in one taxonomy across developers. No developer data is stored on a `Topic`.
 
@@ -370,8 +377,10 @@ CALL db.idx.fulltext.createNodeIndex('Issue', 'title', 'body')
 Before Pathway can say what is next, it has to know where you are. The Depth Analyzer (`analyzeDeveloperDepth`) turns your evidence into topics and judges each one.
 
 <p align="center">
-  <img src="docs/depth-analyzer.svg" alt="Depth Analyzer pipeline" width="100%"/>
+<img width="684" height="2184" alt="depth-analyzer" src="https://github.com/user-attachments/assets/37e18f97-8b36-4824-a121-e649c75d4e79" />
 </p>
+
+
 
 1. **Evidence atlas.** One read of your authored file changes (keyset-paginated), capabilities, experiences, skills, repositories and demonstrations. Packages, signals and vocabulary are counted; a deterministic label-propagation groups atoms that are used together.
 2. **Discovery, grounded.** The LLM may only use packages, signals and capability ids copied from the atlas, and keywords found in the atlas vocabulary. Anything else is discarded and reported. A topic with no remaining supporting atom is dropped. The `domain` must be one of the controlled domains; otherwise a deterministic `inferDomain` classifies it. Capability coverage is computed and gaps are filled from the capability list.
@@ -393,8 +402,10 @@ The LLM layer goes through one shared governor per model (requests and tokens pe
 "What next?" is answered from graph position, not an LLM-invented score. The central idea is the **learning frontier**: the topics you do not yet know well whose required foundations you already have.
 
 <p align="center">
-  <img src="docs/learning-frontier.svg" alt="Learning frontier" width="100%"/>
+<img width="2632" height="478" alt="learning-frontier" src="https://github.com/user-attachments/assets/d7a784b2-299d-4e2b-84cb-4e5b69235989" />
 </p>
+
+
 
 | Question | How it is computed | Stored as / used by |
 |---|---|---|
@@ -454,8 +465,10 @@ RETURN node.id AS id, communityId
 `planGoal` turns the frontier into **one concrete thing to learn**. It has two halves: **`buildGoalGraph` retrieves and ranks; the LLM decides; validators check the decision against the graph.**
 
 <p align="center">
-  <img src="docs/goal-agent.svg" alt="Goal Agent flow" width="100%"/>
+<img width="2632" height="478" alt="learning-frontier" src="https://github.com/user-attachments/assets/cbcce362-6fb6-4bad-9e2f-37395076c3cc" />
 </p>
+
+
 
 | Input to the agent | Where it comes from |
 |---|---|
@@ -520,8 +533,9 @@ Reading about a topic is not the same as learning it. A mission is the smallest 
 Learning should change the map. Each verified mission becomes new evidence, and the frontier moves.
 
 <p align="center">
-  <img src="docs/feedback-loop.svg" alt="Feedback loop" width="100%"/>
+<img width="1522" height="2236" alt="feedback-loop" src="https://github.com/user-attachments/assets/2b2ad464-0005-4cbc-bb96-fd73917458a8" />
 </p>
+
 
 What `recordEvaluation` does:
 
@@ -604,8 +618,9 @@ ORDER BY commits DESC LIMIT 50
 <img width="1535" height="690" alt="graph" src="https://github.com/user-attachments/assets/cd872edd-baf8-4a9e-ba09-f69bd23cdd55" />
 
 <p align="center">
-  <img src="docs/skill-city.svg" alt="3D Skill City mapping" width="100%"/>
+<img width="2132" height="344" alt="skill-city" src="https://github.com/user-attachments/assets/60a65c43-2d76-4d08-9a6c-2a27b828dcee" />
 </p>
+
 
 | Visual | Graph data |
 |---|---|
@@ -636,8 +651,9 @@ Skills are classified by rule (a definitive path such as `Dockerfile` or a real 
 Pathway reaches GitHub **only through the official [GitHub MCP server](https://github.com/github/github-mcp-server)**. There is no hand-written GitHub REST client: the backend starts the server as a short-lived Docker container and talks to it over stdio with the MCP client SDK.
 
 <p align="center">
-  <img src="docs/mcp-access.svg" alt="GitHub MCP access" width="100%"/>
+<img width="2530" height="370" alt="mcp-access" src="https://github.com/user-attachments/assets/47facdda-017a-48bf-8dab-ad99e2bf3487" />
 </p>
+
 
 **Read-only tool allow-list.** The container is started with `GITHUB_TOOLS`, so only these tools exist for the session:
 
@@ -664,8 +680,10 @@ Pathway reaches GitHub **only through the official [GitHub MCP server](https://g
 Incremental, rate-limit aware, idempotent (every write is a `MERGE`).
 
 <p align="center">
-  <img src="docs/sync-pipeline.svg" alt="Sync pipeline" width="100%"/>
+<img width="944" height="2568" alt="sync-pipeline" src="https://github.com/user-attachments/assets/ce729bf8-6073-4e09-892a-84060e603709" />
 </p>
+
+
 
 **What is extracted from every commit**
 
