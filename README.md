@@ -228,8 +228,9 @@ The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is a
 </p>
 
 <p align="center">
-<img width="2222" height="4000" alt="graph-layers" src="https://github.com/user-attachments/assets/e62aba37-98fb-46b2-84b2-05445daf3bbc" />
+<img width="1916" height="1666" alt="sync-er" src="https://github.com/user-attachments/assets/ff373fa2-1b98-4ed7-8a66-b590b1968ab6" />
 </p>
+
 
 
 
@@ -463,7 +464,7 @@ RETURN node.id AS id, communityId
 `planGoal` turns the frontier into **one concrete thing to learn**. It has two halves: **`buildGoalGraph` retrieves and ranks; the LLM decides; validators check the decision against the graph.**
 
 <p align="center">
-<img width="2632" height="478" alt="learning-frontier" src="https://github.com/user-attachments/assets/cbcce362-6fb6-4bad-9e2f-37395076c3cc" />
+<img width="2222" height="4000" alt="graph-layers" src="https://github.com/user-attachments/assets/f07abe32-c037-4c29-9dfb-4014c0aaf026" />
 </p>
 
 
