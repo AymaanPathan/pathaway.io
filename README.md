@@ -204,21 +204,9 @@ When a mission is **verified**, the platform writes a `Demonstration {source: "m
 
 ## 🏗️ Architecture
 
-**Main pipeline: from GitHub history to a verified lesson**
-
-```mermaid
-flowchart LR
-    GH[("GitHub")] -->|"MCP server"| SYNC["Sync pipeline"]
-    SYNC --> DB[("FalkorDB")]
-    DB --> EV["Evidence build"]
-    EV --> DA["Depth Analyzer"]
-    DA --> TG["Topic graph"]
-    TG --> FR["Learning frontier"]
-    FR --> GA["Goal Agent"]
-    GA --> MA["Mission Agent"]
-    MA --> SB["Sandbox tests"]
-    SB -->|"verified"| DB
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="Pathway architecture: GitHub, sync, FalkorDB, evidence, depth analyzer, topic graph, learning frontier, goal agent, mission agent, sandbox tests" width="100%"/>
+</p>
 
 | Stage | What happens |
 |---|---|
@@ -229,16 +217,6 @@ flowchart LR
 | Goal Agent | Retrieves the neighbourhood (Personalized PageRank plus code excerpts) and picks one thing to learn |
 | Mission Agent | Turns it into a practice task; validators reject and repair bad output up to 3 times |
 | Sandbox tests | Platform-run tests verify the work; a verified mission is written back as a new `Demonstration` |
-
-**Side views that read the same data**
-
-```mermaid
-flowchart LR
-    DB[("FalkorDB")] --> TG["Topic graph"]
-    TG <--> CH["Chat Agent"]
-    DB --> SK["Skill classification"]
-    SK --> CITY["3D Skill City"]
-```
 
 The **Chat Agent** exposes 5 public tools over 16 graph tools. The **Skill graph** and 3D city are rule-based and independent of the Topic graph.
 
