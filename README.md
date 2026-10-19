@@ -2,7 +2,9 @@
 
 <img width="1100" height="662" alt="home" src="https://github.com/user-attachments/assets/7a8091a1-aa06-4dcf-8e66-222a07510e0f" />
 
-### Your GitHub history, turned into a topic knowledge graph that assigns your next coding mission.
+### Know what you know. Learn what's next.
+
+**Pathway reads your GitHub history, maps what you already know into a topic knowledge graph, and tells you the one thing worth learning next, and why.**
 
 **Built for the FalkorDB Hackathon**
 
@@ -20,23 +22,31 @@
 
 ## 📖 What is Pathway?
 
-Pathway reads your GitHub coding history and builds a **Topic Graph**: the engineering topics you have actually worked on, how those topics depend on and relate to each other, and how deeply *you* know each one, graded from your own code. It then recommends **one specific coding mission** in your own repository, verifies it with platform-run tests, and feeds the verified code back into the graph as new evidence.
+Most learning advice starts from a blank page: "pick a language, follow a roadmap." Pathway starts from **you**.
+
+It reads your GitHub coding history and builds a **Topic Graph** of the engineering topics you have actually worked on, how those topics depend on each other, and how deeply you know each one, graded from your own code. Then it answers the question that matters most when you want to grow:
+
+> **Given what I already know, what should I learn next?**
+
+The recommendation is not a tutorial list. It is a specific topic that sits at the edge of your knowledge (its prerequisites are met, it builds on what you already use) plus a small, concrete practice task in your own repository, verified by platform-run tests, so the new knowledge is proven rather than self-reported.
 
 The Topic Graph answers four questions that a list of tutorials cannot:
 
 1. **What do I know?** A `DepthAssessment` per topic, backed by real file changes, with a confidence and an authenticity verdict.
-2. **What does this topic rest on?** Prerequisites through `BUILDS_ON` edges, each with a written reason.
-3. **What is adjacent?** `RELATED_TOPIC` edges and algorithmic communities.
-4. **What should I do next?** A `NextMove` anchored to a real file and a failure visible in your code, turned into a `Mission` with acceptance criteria.
+2. **What is ready for me?** The *learning frontier*: topics just above your level whose required prerequisites you already meet.
+3. **What is in my way?** Missing foundations on the path to a topic, listed in the order to learn them.
+4. **How do I learn it?** A `NextMove` anchored to a real file and a visible gap in your code, turned into a `Mission` with acceptance criteria.
 
-> **Graph for structure, LLM for judgment.** FalkorDB supplies topics, edges, ranks, evidence and traversals. LLM agents classify, judge and write. Every LLM output passes validators that check it against the graph before it is stored.
+> **Graph for structure, LLM for judgment.** FalkorDB supplies topics, prerequisites, ranks, evidence and traversals. LLM agents classify, judge and write. Every LLM output passes validators that check it against the graph before it is stored.
 
-| Typical growth tools | Pathway |
+| Typical learning tools | Pathway |
 |---|---|
+| Start from a generic roadmap | Start from **what you have already built** |
 | Self-rated skills or quiz scores | Depth derived from **real file changes** (`DepthAssessment` → `BACKED_BY` → `FileChange`) |
-| "Top 10 tutorials" | **One mission** anchored to a file in *your* repo |
-| Flat skill lists | A **prerequisite graph** with reasons on every edge |
-| Checkbox completion | A mission counts only when criteria are **verified against the diff** and CI is acceptable |
+| "Top 10 tutorials" | **One next topic**, with the reason it is next |
+| Flat skill lists | A **prerequisite graph** with a written reason on every edge |
+| Same advice for everyone | A frontier computed from **your** levels and **your** gaps |
+| Checkbox completion | Learning counts only when criteria are **verified against the diff** and CI is acceptable |
 | Opaque scoring | **FalkorDB algorithms** (PageRank, betweenness, label propagation, WCC) plus stored query traces |
 
 ---
@@ -50,72 +60,51 @@ The Topic Graph answers four questions that a list of tutorials cannot:
 
 ## 📑 Table of contents
 
-1. [How Pathway understands a topic (worked example)](#-how-pathway-understands-a-topic)
+1. [How Pathway decides what you learn next (worked example)](#-how-pathway-decides-what-you-learn-next)
 2. [Architecture](#%EF%B8%8F-architecture)
 3. [The Topic Graph](#%EF%B8%8F-the-topic-graph)
-4. [Topic discovery and depth assessment](#-topic-discovery-and-depth-assessment)
-5. [Graph algorithms and traversals](#-graph-algorithms-and-traversals)
-6. [Goal Agent: from graph to NextMove](#-goal-agent-from-graph-to-nextmove)
-7. [Mission Agent and verification](#-mission-agent-and-verification)
-8. [The feedback loop at topic level](#-the-feedback-loop-at-topic-level)
-9. [Chat agent](#-chat-agent)
-10. [Evidence layer: capabilities, detectors, experiences](#-evidence-layer-capabilities-detectors-experiences)
+4. [Understanding what you know: discovery and depth](#-understanding-what-you-know)
+5. [Finding what to learn next: the learning frontier](#-finding-what-to-learn-next)
+6. [Learn-Next recommendation (Goal Agent)](#-learn-next-recommendation-goal-agent)
+7. [Learn by doing: missions and verification](#%EF%B8%8F-learn-by-doing-missions-and-verification)
+8. [The feedback loop: learning updates the graph](#-the-feedback-loop)
+9. [Chat agent: ask what to learn](#-chat-agent)
+10. [Evidence layer](#-evidence-layer-capabilities-detectors-experiences)
 11. [Journey view and 3D Skill City](#%EF%B8%8F-journey-view-and-3d-skill-city)
 12. [GitHub MCP server and sync pipeline](#-github-mcp-server-and-sync-pipeline)
 13. [Tech stack](#-tech-stack)
 14. [Setup instructions](#-setup-instructions)
 15. [Troubleshooting](#%EF%B8%8F-troubleshooting)
 16. [Limitations](#-limitations)
-17. [Roadmap](#%EF%B8%8F-roadmap)
-18. [Design principles](#-design-principles)
+17. [Design principles](#-design-principles)
 
 ---
 
-## 🧭 How Pathway understands a topic
+## 🧭 How Pathway decides what you learn next
 
-This section follows **one topic** from evidence to mission.
+This section follows **one recommendation** from your code to your next lesson.
 
-> **What is real and what is illustrative.** The mechanisms, queries, function names, fields and rules below are the ones in the code. The topic slugs, scores, file paths and quoted lines are **illustrative values** for a developer who built BullMQ workers. Topics are **discovered per developer** by the Depth Analyzer, so slugs differ between developers. Capabilities, detector rules and completion criteria are **seeded** and identical for everyone. Replace the example values with output from your own run (see [step 7 of setup](#7-reproduce-the-topic-trace-on-your-own-data)).
+> **What is real and what is illustrative.** The mechanisms, queries, function names, fields and rules below are the ones in the code. The topic slugs, scores, file paths and quoted lines are **illustrative values** for a developer who built BullMQ workers. Topics are **discovered per developer** by the Depth Analyzer, so slugs differ between developers. Capabilities, detector rules and completion criteria are **seeded** and identical for everyone. Replace the example values with output from your own run (see [step 7 of setup](#7-reproduce-the-recommendation-on-your-own-data)).
 
-**Goal typed by the developer:** *"make my background jobs reliable"*
+**What the developer asked:** *"make my background jobs reliable"* (or simply: *"what should I learn next?"*)
 
 ```mermaid
 flowchart LR
-    CODE[(FileChange<br/>added_code, imports, symbols)] --> DET[Detector rules<br/>SIGNAL_RULES]
-    DET --> DEM[Demonstration<br/>job_queue_workers: 2 hardening behaviours]
+    CODE[(FileChange<br/>added_code, imports, symbols)] --> DET[Detector rules]
+    DET --> DEM[Demonstration<br/>job_queue_workers]
     DEM -->|OF_CAPABILITY| CAP[Capability<br/>job_queues]
-    CAP -->|MAPS_TO weight, reason| TOP[Topic<br/>background_job_processing]
-    TOP -->|BUILDS_ON required| RD[Topic redis_data_structures]
-    TOP -->|BUILDS_ON required| AP[Topic asynchronous_programming]
-    TOP -->|RELATED_TOPIC| OBS[Topic observability]
-    TOP --> DA[DepthAssessment<br/>working, genuine_implementation]
-    DA --> GG[Goal graph<br/>retrieve, rank, read code]
-    GG --> NM[NextMove<br/>dead-letter handling]
-    NM --> M[Mission<br/>3 criteria, contract]
+    CAP -->|MAPS_TO| TOP[Topic<br/>background_job_processing<br/>level: working]
+    TOP -->|RELATED / BUILDS_ON| FR[Learning frontier<br/>error_handling_and_retries<br/>prerequisites met]
+    FR --> GG[Goal graph<br/>retrieve, rank, read code]
+    GG --> NM[Learn-next move<br/>dead-letter handling]
+    NM --> M[Practice mission<br/>3 criteria]
     M --> V{Verified?}
     V -->|yes| VD[Demonstration source=mission]
     VD -->|EVIDENCE_FOR_TOPIC| TOP
-    VD -.->|marks stale| DA
+    VD -.->|marks stale| DA[Re-grade topic]
 ```
 
-### Step 1: what the topic rests on
-
-The topic and its prerequisites come from the shared taxonomy. Edges carry `strength`, `reason`, `confidence`, `basis`, `build_id`, `model`. The walk is a breadth-first traversal over `BUILDS_ON` edges held in memory (one cached read of the taxonomy), up to 3 hops for prerequisites and 2 for "unlocks".
-
-```ts
-const lg = await readTopicLearningGraph(graph, developerId, "background_job_processing");
-// lg.prerequisites, lg.unlocks, lg.related, lg.capabilityPaths, lg.readiness
-```
-
-| Prerequisite | Hops | Strength | Edge reason (excerpt) | Developer level | Met |
-|---|---|---|---|---|---|
-| `redis_data_structures` | 1 | required | the queue stores jobs in Redis lists and sorted sets | proficient | yes |
-| `asynchronous_programming` | 1 | required | workers process jobs concurrently off the request path | proficient | yes |
-| `error_handling_and_retries` | 1 | helpful | failed jobs need classification before a retry policy applies | surface | no (not blocking: helpful) |
-
-`readiness.ready` is true when no **required** prerequisite on a required path is below `working`. Edges with `basis = "llm_inferred"` or `"evidence_overlap"` are labelled; none is anonymous.
-
-### Step 2: what the developer actually knows
+### Step 1: what you already know
 
 ```cypher
 MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment {topic_slug: $slug})
@@ -140,22 +129,39 @@ gaps:          no failed-job handling observed
 
 The rationale separates `Observed:`, `Inferred:` and `Associated:` statements. Only observed statements, each citing a ref (`S1` code sample, `D1` detection, `E1` experience, `C1` commit), count as evidence. Every cited ref maps to real graph nodes through `BACKED_BY`.
 
-### Step 3: what "done well" means for this capability
+### Step 2: what the topic rests on, and what you are missing
+
+The walk is a breadth-first traversal over `BUILDS_ON` edges held in memory (one cached read of the taxonomy), up to 3 hops for prerequisites and 2 for "unlocks".
+
+```ts
+const lg = await readTopicLearningGraph(graph, developerId, "background_job_processing");
+// lg.prerequisites, lg.unlocks, lg.related, lg.capabilityPaths, lg.readiness
+```
+
+| Prerequisite | Hops | Strength | Edge reason (excerpt) | Your level | Met |
+|---|---|---|---|---|---|
+| `redis_data_structures` | 1 | required | the queue stores jobs in Redis lists and sorted sets | proficient | yes |
+| `asynchronous_programming` | 1 | required | workers process jobs concurrently off the request path | proficient | yes |
+| `error_handling_and_retries` | 1 | helpful | failed jobs need classification before a retry policy applies | surface | no (not blocking: helpful) |
+
+`readiness.ready` is true when no **required** prerequisite on a required path is below `working`. When something *is* blocking, `readiness.learningOrder` lists the blocking foundations deepest first: that is the order to learn them in.
+
+### Step 3: what "done well" looks like
 
 `COMPLETION_CRITERIA` (seeded as `TechniqueSpec` / `Safeguard` nodes) defines what a successful implementation of each technique contains. For `job_queue_workers`:
 
-| Safeguard (modifier label) | Required | Observed in this developer's code |
+| Safeguard | Required | Observed in your code |
 |---|---|---|
 | retry policy | yes | yes |
 | bounded worker concurrency | yes | yes |
 | failed-job / dead-letter handling | yes | **no** |
 | job de-duplication | no | no |
 
-`evaluateCapabilityCompletion("job_queues", demos)` reports the technique as **not met**: depth was reached, but a required safeguard was never observed. That missing safeguard is the real, checkable gap that the next steps work from.
+`evaluateCapabilityCompletion("job_queues", demos)` reports the technique as **not met**: depth was reached, but a required safeguard was never observed. That missing safeguard is the real, checkable thing to learn next.
 
-### Step 4: the decision (Goal graph, then Goal Agent)
+### Step 4: the recommendation (Goal graph, then Goal Agent)
 
-`buildGoalGraph` retrieves a neighbourhood and `planGoal` asks the LLM to choose **one** move. The graph never chooses.
+`buildGoalGraph` retrieves a neighbourhood around what you know and `planGoal` asks the LLM to choose **one** thing to learn. The graph never chooses.
 
 ```text
 resolution:  method=full_text, seeds=[background_job_processing]
@@ -172,7 +178,7 @@ validators:  quote must be verbatim in the code, failure must be concrete (40+ c
              no repeat of a previous or verified mission
 ```
 
-The accepted draft is stored by `storeNextMove`:
+The accepted recommendation is stored by `storeNextMove`:
 
 ```text
 (Goal)-[:PROPOSES]->(NextMove {title, summary, done_when, details_json})
@@ -182,17 +188,17 @@ The accepted draft is stored by `storeNextMove`:
 (NextMove)-[:LEVERAGES|CLOSES_GAP_IN]->(Topic)
 ```
 
-A topic can be claimed as a strength only if the move cites evidence that belongs to that topic; otherwise the link is dropped and reported in `rejected`.
+`LEVERAGES` points at topics you already know and will build on; `CLOSES_GAP_IN` points at the topic whose gap the lesson fills. A topic can be claimed as a strength only if the recommendation cites evidence that belongs to that topic; otherwise the link is dropped and reported in `rejected`.
 
-### Step 5: the mission
+### Step 5: the practice mission
 
-The Mission Agent turns the saved move into an implementation-ready task: at most 5 files, exactly 3 acceptance criteria written as test cases, a `contract` of decisions the developer must not guess (library, exported names, key format, TTL, error behavior), and a verbatim `grounding.observedNow` fragment from the pinned code. At least 2 criteria must name the required library and assert the interaction with it, so a trivial local stub cannot pass. The developer writes implementation only; the platform writes and runs the tests.
+The Mission Agent turns the recommendation into an implementation-ready task in your own repository: at most 5 files, exactly 3 acceptance criteria written as test cases, a `contract` of decisions you must not guess (library, exported names, key format, TTL, error behavior), and a verbatim `grounding.observedNow` fragment from the pinned code. At least 2 criteria name the required library and assert the interaction with it, so a trivial local stub cannot pass. You write the implementation; the platform writes and runs the tests.
 
-`Mission.explanation_json` stores the real queries that loaded the saved move (relationship pattern, Cypher, row counts, timings). Nothing in that trace is reconstructed afterwards.
+`Mission.explanation_json` stores the real queries that loaded the recommendation (relationship pattern, Cypher, row counts, timings). Nothing in that trace is reconstructed afterwards.
 
-### Step 6: closing the loop
+### Step 6: the graph learns with you
 
-When a mission is **verified** (see [Mission Agent and verification](#-mission-agent-and-verification)), the platform writes a `Demonstration {source: "mission"}`, links it to the topic with `EVIDENCE_FOR_TOPIC {source: "mission_verified"}`, and flags the topic's `DepthAssessment` as `stale`. Only that topic needs to be re-graded. Details in [the feedback loop](#-the-feedback-loop-at-topic-level).
+When a mission is **verified**, the platform writes a `Demonstration {source: "mission"}`, links it to the topic with `EVIDENCE_FOR_TOPIC {source: "mission_verified"}`, and flags the topic's `DepthAssessment` as `stale`. Only that topic needs to be re-graded, and then the frontier moves forward. See [the feedback loop](#-the-feedback-loop).
 
 ---
 
@@ -210,7 +216,8 @@ flowchart LR
 
     subgraph T[Topic graph + agents - core reasoning]
         DA[Depth Analyzer<br/>discover, gather, judge] --> TG[Topic graph<br/>BUILDS_ON / RELATED_TOPIC<br/>+ DepthAssessment]
-        TG --> GG[Goal graph retrieval<br/>PPR + code excerpts] --> GA[Goal Agent] --> MA[Mission Agent]
+        TG --> FR[Learning frontier<br/>what is ready next]
+        FR --> GG[Goal graph retrieval<br/>PPR + code excerpts] --> GA[Goal Agent<br/>learn-next] --> MA[Mission Agent]
         MA --> V{Validators}
         V -->|rejected: repair up to 3x| MA
         V -->|accepted| M[Mission] --> SB[Sandbox tests]
@@ -248,7 +255,7 @@ The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is a
 
 ```mermaid
 flowchart TB
-    subgraph L1[1. Evidence layer]
+    subgraph L1[1. Evidence layer - what you did]
         D1[Developer] --> FC[FileChange / Commit / Repository]
         FC --> DEM[Demonstration / Experience]
     end
@@ -261,7 +268,7 @@ flowchart TB
         APP[Approach]
         DA2[DepthAssessment / DepthSnapshot]
     end
-    subgraph L4[4. Goal and mission]
+    subgraph L4[4. Learning plan]
         GOAL[Goal] --> NM[NextMove] --> MIS[Mission] --> EVAL[Evaluation]
     end
     DEM -->|OF_CAPABILITY| CAP
@@ -302,12 +309,12 @@ erDiagram
 
 `Topic` properties: `id` (`topic:<slug>`), `slug`, `name`, `domain` (`frontend | backend | database | infrastructure | ai_ml | mobile | general`), `description`, `aliases_text`, `stub`, plus **algorithm results written onto the node**:
 
-| Property | Written by |
-|---|---|
-| `foundation_rank` | `algo.pageRank` over `BUILDS_ON` (falls back to `RELATED_TOPIC`) |
-| `bridge_score` | `algo.betweenness` |
-| `cluster_id` | `algo.labelPropagation` over `RELATED_TOPIC` |
-| `component_id` | `algo.WCC` |
+| Property | Written by | What it means for learning |
+|---|---|---|
+| `foundation_rank` | `algo.pageRank` over `BUILDS_ON` (falls back to `RELATED_TOPIC`) | How foundational a topic is: high-rank topics unlock the most |
+| `bridge_score` | `algo.betweenness` | Topics that connect otherwise separate areas of your knowledge |
+| `cluster_id` | `algo.labelPropagation` over `RELATED_TOPIC` | The neighbourhood a topic belongs to |
+| `component_id` | `algo.WCC` | Knowledge that sits in disconnected islands |
 
 **Edge semantics.** `(advanced)-[:BUILDS_ON]->(prerequisite)`: the target should be understood *before* the source. `strength` is `required` or `helpful`. `RELATED_TOPIC` is stored symmetric. Writers enforce:
 
@@ -317,7 +324,7 @@ erDiagram
 - A later assertion replaces the stored rationale only when it is at least as confident.
 - A foundation the model names without an assessment is stored as an **unassessed stub** topic, so the edge is not lost.
 
-**`DepthAssessment`** (one per developer and topic) carries `level`, `level_rank`, `score`, `baseline_score`, `confidence`, `authenticity`, `verdict`, `rationale`, `strengths_json`, `gaps_json`, `safeguards_json`, `implementations_json`, `approaches_json`, `evidence_json`, `stats_json`, `spec_json`, `dimensions_json`, `evidence_band`, `is_current`, `stale`, `fallback`, `model`, `build_id`, plus counts and `first_seen` / `last_seen`. One immutable `DepthSnapshot` per build keeps history when the current assessment is replaced.
+**`DepthAssessment`** (one per developer and topic) carries `level`, `level_rank`, `score`, `baseline_score`, `confidence`, `authenticity`, `verdict`, `rationale`, `strengths_json`, `gaps_json`, `safeguards_json`, `implementations_json`, `approaches_json`, `evidence_json`, `stats_json`, `spec_json`, `dimensions_json`, `evidence_band`, `is_current`, `stale`, `fallback`, `model`, `build_id`, plus counts and `first_seen` / `last_seen`. One immutable `DepthSnapshot` per build keeps history, so you can see how your knowledge changed over time.
 
 | Depth level | Rank | Score band |
 |---|---|---|
@@ -355,7 +362,7 @@ erDiagram
     Experience }o--o{ EngineeringContext : IN_CONTEXT
 ```
 
-> **Verified vs. inferred.** Only edges produced from the developer's own code count as evidence. Structural edges are `basis = "declared"`; anything guessed from goal text or similarity is `basis = "inferred"` and can never satisfy a prerequisite. `Topic -[:MAPS_TO]-> Capability` is taxonomy: it selects which demonstrations to read and is **never proof of skill**.
+> **Verified vs. inferred.** Only edges produced from your own code count as evidence. Structural edges are `basis = "declared"`; anything guessed from goal text or similarity is `basis = "inferred"` and can never satisfy a prerequisite. `Topic -[:MAPS_TO]-> Capability` is taxonomy: it selects which demonstrations to read and is **never proof of skill**.
 
 ### Layer 4: Goal, NextMove, Mission, Evaluation
 
@@ -386,7 +393,7 @@ erDiagram
 | `Mission` | `status`, `verification_state`, `repository`, `branch`, `base_commit`, `start_path`, `capability_id`, `focus_slug`, `spec_json`, `pin_json`, `explanation_json`, `fork_repository`, `work_branch` |
 | `Evaluation` | `verdict`, `head_commit`, `ci_state`, `results_json`, `scope_warnings_json`, `changed_files_json`, `verified`, `verification_reasons_json` |
 
-A `Mission` keeps a **full snapshot** of the move it came from, because planning a new move replaces the goal's `NextMove`. Mission `status` moves through `proposed → in_progress → submitted → completed | needs_work`, or `abandoned`.
+A `Mission` keeps a **full snapshot** of the recommendation it came from, because planning a new one replaces the goal's `NextMove`. Mission `status` moves through `proposed → in_progress → submitted → completed | needs_work`, or `abandoned`.
 
 ### Indexes
 
@@ -418,9 +425,9 @@ CALL db.idx.fulltext.createNodeIndex('Issue', 'title', 'body')
 
 ---
 
-## 🔬 Topic discovery and depth assessment
+## 🔬 Understanding what you know
 
-The Depth Analyzer (`analyzeDeveloperDepth`) turns evidence into topics and judges each one.
+Before Pathway can say what is next, it has to know where you are. The Depth Analyzer (`analyzeDeveloperDepth`) turns your evidence into topics and judges each one.
 
 ```mermaid
 flowchart TD
@@ -434,7 +441,7 @@ flowchart TD
     H --> I[Persist + refresh<br/>FalkorDB metrics]
 ```
 
-1. **Evidence atlas.** One read of the developer's authored file changes (keyset-paginated), capabilities, experiences, skills, repositories and demonstrations. Packages, signals and vocabulary are counted; a deterministic label-propagation groups atoms that are used together.
+1. **Evidence atlas.** One read of your authored file changes (keyset-paginated), capabilities, experiences, skills, repositories and demonstrations. Packages, signals and vocabulary are counted; a deterministic label-propagation groups atoms that are used together.
 2. **Discovery, grounded.** The LLM may only use packages, signals and capability ids copied from the atlas, and keywords found in the atlas vocabulary. Anything else is discarded and reported. A topic with no remaining supporting atom is dropped. The `domain` must be one of the controlled domains; otherwise a deterministic `inferDomain` classifies it. Capability coverage is computed and gaps are filled from the capability list.
 3. **Gather.** For each topic: matched files (packages, signals, symbol and path keywords), scaffold-commit detection, maturation (revisited files, follow-up fix/perf/refactor commits), declared-but-never-imported packages, hardening behaviours, code samples, demonstrations (read via `MAPS_TO`, with text-only matches capped at `usage`) and a footprint (commits, repositories, directories) used to relate topics by real overlap.
 4. **Baseline.** `computeBaselineDepth` sums capped components (volume, breadth, commits, sustained work, repositories, own implementation, hardening, maturation, tests, approach diversity) and applies caps (scaffold-heavy evidence ×0.6, one commit ≤ 25, one file ≤ 20). Every reduction is listed in `caps`.
@@ -449,31 +456,43 @@ The LLM layer goes through one shared governor per model (requests and tokens pe
 
 ---
 
-## 🧮 Graph algorithms and traversals
+## 🧮 Finding what to learn next
 
-Ordering and ranking come from graph position, not an LLM-invented score.
+"What next?" is answered from graph position, not an LLM-invented score. The central idea is the **learning frontier**: the topics you do not yet know well whose required foundations you already have.
+
+```mermaid
+flowchart LR
+    K[Topics you know<br/>level >= working] --> F{Frontier filter}
+    U[Topics below the cut-off level] --> F
+    F -->|required prerequisites met| R[Ready now]
+    F -->|a required prerequisite is weak| B[Blocked<br/>learn the foundation first]
+    R --> O[Order by readiness,<br/>foundation_rank, unlock count,<br/>current score]
+    B --> LO[readiness.learningOrder<br/>deepest foundation first]
+```
 
 | Question | How it is computed | Stored as / used by |
 |---|---|---|
+| **What is ready for me?** | Topics below the cut-off level whose required prerequisites are met, ordered by readiness, `foundation_rank`, unlock count, current score | `readLearningFrontier` |
+| **What must I learn before X?** | Breadth-first walk of `BUILDS_ON` in memory, up to 3 hops, each hop carrying its edge reason | `readTopicLearningGraph` |
+| **What does learning X unlock?** | The same walk in reverse, up to 2 hops | `readTopicLearningGraph` |
+| **How do X and Y connect?** | Cypher `shortestPath` over `BUILDS_ON\|RELATED_TOPIC*1..6`, tried in both directions | path with hop types |
 | What are my foundations? | `algo.pageRank('Topic', 'BUILDS_ON')` (falls back to `RELATED_TOPIC`) | `foundation_rank` |
 | What connects my skills? | `algo.betweenness` over `BUILDS_ON` + `RELATED_TOPIC` | `bridge_score` |
 | What do I work on together? | `algo.labelPropagation` over `RELATED_TOPIC` (10 iterations) | `cluster_id` |
 | Which areas are disconnected? | `algo.WCC` | `component_id` |
-| How do topics X and Y connect? | Cypher `shortestPath` over `BUILDS_ON\|RELATED_TOPIC*1..6`, tried in both directions | path with hop types |
-| What must I learn before X? | Breadth-first walk of `BUILDS_ON` in memory, up to 3 hops, each hop carrying its edge reason | `readTopicLearningGraph` |
-| What does X unlock? | The same walk in reverse, up to 2 hops | `readTopicLearningGraph` |
-| What is ready for me? | Topics below the cut-off level whose required prerequisites are met, ordered by readiness, `foundation_rank`, unlock count, current score | `readLearningFrontier` |
-| Which evidence ties a topic to code? | `Topic -[:MAPS_TO]-> Capability <-[:OF_CAPABILITY]- Demonstration` for one developer, plus `EVIDENCE_FOR_TOPIC` | `readTopicGraphEvidence` |
+| Which evidence ties a topic to my code? | `Topic -[:MAPS_TO]-> Capability <-[:OF_CAPABILITY]- Demonstration` for one developer, plus `EVIDENCE_FOR_TOPIC` | `readTopicGraphEvidence` |
 
 Metrics refresh safely: each metric is computed, written, and **only then** are stale values of that metric removed, so a failed run leaves the previous ranks intact. The result reports `status` (`ok | partial | failed | empty_graph`), the algorithms that ran and any failures. The taxonomy is small (hundreds of topics), so it is read once, cached for a short TTL, and traversed in memory; writers invalidate the cache.
 
 ### What relationships buy you
 
-**1. A prerequisite walk exposes a missing foundation.** `readTopicLearningGraph` marks a prerequisite `blocking` when it is required, on a required path, and below `working`. `readiness.learningOrder` lists blocking foundations deepest first, which is the order to learn them in.
+**1. A prerequisite walk exposes a missing foundation.** `readTopicLearningGraph` marks a prerequisite `blocking` when it is required, on a required path, and below `working`. Instead of "go learn Kubernetes," you get "learn X first, because Y needs it, and you have not shown X."
 
-**2. Shortest path connects two topics.** `connect_topics` returns the route and the type of every hop, so an association (`RELATED_TOPIC`) is never presented as a prerequisite (`BUILDS_ON`).
+**2. Shortest path connects what you know to what you want.** `connect_topics` returns the route and the type of every hop, so an association (`RELATED_TOPIC`) is never presented as a prerequisite (`BUILDS_ON`).
 
-**3. Communities reveal adjacent areas.** `labelPropagation` clusters topics; `WCC` flags knowledge that sits in disconnected islands. The goal graph adds same-cluster topics as weak (weight 0.25) neighbours.
+**3. Communities reveal adjacent areas.** `labelPropagation` clusters topics; `WCC` flags knowledge that sits in disconnected islands. The goal graph adds same-cluster topics as weak (weight 0.25) neighbours, so recommendations lean toward areas next to what you already do.
+
+**4. Foundations and unlocks rank the options.** When several topics are ready, the ones with higher `foundation_rank` and more unlocks come first, because learning them opens the most further topics.
 
 <details>
 <summary><b>Prerequisite roadmap query (Cypher form)</b></summary>
@@ -504,19 +523,19 @@ RETURN node.id AS id, communityId
 
 ---
 
-## 🎯 Goal Agent: from graph to NextMove
+## 🎯 Learn-Next recommendation (Goal Agent)
 
-`planGoal` has two halves. **`buildGoalGraph` retrieves and ranks; the LLM decides; validators check the decision against the graph.**
+`planGoal` turns the frontier into **one concrete thing to learn**. It has two halves: **`buildGoalGraph` retrieves and ranks; the LLM decides; validators check the decision against the graph.**
 
 ```mermaid
 flowchart TD
-    W[Wish text or goal topics] --> R[1. Resolve seeds<br/>agent topics, exact name,<br/>domain, full-text]
+    W[Your goal or "what next?"] --> R[1. Resolve seeds<br/>agent topics, exact name,<br/>domain, full-text]
     R --> X[2. Expand<br/>RELATED_TOPIC up to 2 hops<br/>+ same-cluster peers]
     X --> Q[3. Read<br/>depth, capability coverage,<br/>evidence, completed missions]
     Q --> C[Read code excerpts<br/>of the strongest evidence]
     Q --> P[4. Personalized PageRank<br/>over the retrieved subgraph]
     P --> S[5. Signals<br/>strengths, unproven, opportunities]
-    C --> L[LLM chooses ONE move]
+    C --> L[LLM chooses ONE thing to learn]
     S --> L
     L --> F{finalize<br/>validators}
     F -->|rejected: up to 2 repairs| L
@@ -527,26 +546,26 @@ flowchart TD
 |---|---|
 | Seeds | Topics named by the goal agent (must exist as `Topic` nodes), an exact `Topic` name/slug match, a whole-area `domain`, or the `Topic` full-text index; a vague wish is mapped to existing slugs by a small LLM call, never invented |
 | Neighbourhood | `RELATED_TOPIC` up to 2 hops (one query per hop, so each edge keeps its reason) plus topics sharing `cluster_id` |
-| Developer depth | `Developer -[:ASSESSED]-> DepthAssessment -[:OF_TOPIC]-> Topic` (level, authenticity, approaches, gaps, safeguards, what was built) |
-| Capability coverage | `Topic -[:MAPS_TO]-> Capability` with the count of this developer's demonstrations per capability (zero means "no evidence found", not "cannot do it") |
+| Your depth | `Developer -[:ASSESSED]-> DepthAssessment -[:OF_TOPIC]-> Topic` (level, authenticity, approaches, gaps, safeguards, what was built) |
+| Capability coverage | `Topic -[:MAPS_TO]-> Capability` with the count of your demonstrations per capability (zero means "no evidence found", not "cannot do it") |
 | Evidence | Demonstrations linked by `EVIDENCE_FOR_TOPIC` (confidence ≥ 0.3), demonstrations reached through `MAPS_TO`, code cited by assessments (`BACKED_BY`), and files matching the topic's own packages and keywords. Older file versions are marked superseded and the newest change to the same file is added |
 | Code | `FileChange.added_code` excerpts for the strongest evidence. **The agent may quote only this code** |
 | History | The previous `NextMove` of the goal and the verified missions on these topics, so nothing is repeated |
-| Ranking | Personalized PageRank (restart on seeds, damping 0.85), computed in TypeScript over the retrieved topic, assessment, capability, demonstration, file and repository nodes. It orders context; it does not choose the goal |
+| Ranking | Personalized PageRank (restart on seeds, damping 0.85), computed in TypeScript over the retrieved topic, assessment, capability, demonstration, file and repository nodes. It orders context; it does not choose what you learn |
 
-**Validation (`finalize`).** The draft must pick evidence that has code behind it; its `observedInCode` must be a verbatim fragment of that code (a real line is substituted if it is not); the failure must be concrete, at least 40 characters, and not rest on practice, flexibility or "the code lacks an option"; steps must be specific; `doneWhen` must be checkable; named files must exist in the evidence; the move must not repeat a technique already demonstrated, the previous move, or a verified mission; and it may not mention earlier work when no history exists. Rejected output is repaired up to twice with the exact reasons. Transport failures (timeouts, 429s, 5xx) are retried separately and never spend repair attempts.
+**Validation (`finalize`).** The draft must pick evidence that has code behind it; its `observedInCode` must be a verbatim fragment of that code (a real line is substituted if it is not); the failure must be concrete, at least 40 characters, and not rest on practice, flexibility or "the code lacks an option"; steps must be specific; `doneWhen` must be checkable; named files must exist in the evidence; the recommendation must not repeat a technique already demonstrated, the previous one, or a verified mission; and it may not mention earlier work when no history exists. Rejected output is repaired up to twice with the exact reasons. Transport failures (timeouts, 429s, 5xx) are retried separately and never spend repair attempts.
 
 **Statuses.** `planned`, `needs_clarification`, `needs_evidence` (no readable code behind the neighbourhood), `llm_unavailable` (nothing is invented without an LLM) and `generation_failed` (with `stage: "transport" | "validation"`).
 
-The decision trace (`DecisionTrace`) is built from the graph in code, not by the LLM: topic route from the seeds with relationship types and reasons, the assessment, capability and evidence on each path, neighbours of the focus topic, the code that is reused, and the alternative the agent considered.
+The decision trace (`DecisionTrace`) is built from the graph in code, not by the LLM, so you can see **why this topic is next**: the route from your seeds with relationship types and reasons, the assessment, capability and evidence on each path, neighbours of the focus topic, the code that is reused, and the alternative the agent considered.
 
 ---
 
-## 🛠️ Mission Agent and verification
+## 🛠️ Learn by doing: missions and verification
 
 <img width="1525" height="692" alt="mission-1" src="https://github.com/user-attachments/assets/46fc1b66-30c0-41ec-bcea-6289377d7fa6" />
 
-`planMission` receives the saved `NextMove`, the capability it advances, the evidence, and a fresh **inspection of the repository** at a pinned commit (package root, package manager, test runner, nearby files, a gap probe over dependencies, the start file and paths). It does not change the goal, focus or capability.
+Reading about a topic is not the same as learning it. A mission is the smallest real change that makes you use the new idea inside code you already own. `planMission` receives the saved recommendation, the capability it advances, the evidence, and a fresh **inspection of the repository** at a pinned commit (package root, package manager, test runner, nearby files, a gap probe over dependencies, the start file and paths). It does not change the goal, focus or capability.
 
 **Guarantees**
 
@@ -558,7 +577,7 @@ The decision trace (`DecisionTrace`) is built from the graph in code, not by the
 - At least 2 criteria name the required library and assert the interaction with it
 - The mission must keep the saved capability and name the mechanism the Goal Agent selected
 - Earlier and verified missions are listed so none is repeated
-- The developer **never writes tests**; the platform writes and runs them in a sandbox
+- You **never write tests**; the platform writes and runs them in a sandbox
 
 ```mermaid
 sequenceDiagram
@@ -582,20 +601,23 @@ sequenceDiagram
 
 | State | Meaning |
 |---|---|
-| `assigned` | The developer was given the task (proposed, in progress, submitted) |
+| `assigned` | You were given the task (proposed, in progress, submitted) |
 | `evaluated` | The code was assessed; the outcome may still be `needs_work` |
 | `verified` | **Every** criterion is met **and** verified against the diff, CI did not fail or stay pending, and a demonstration was extracted |
 
-`verifyEvaluation` is a pure function: verdict `completed`, at least one criterion, all met, all verified (the quote was found in the diff and the check's preconditions held), `ciState` not `failure` or `pending`, and a demonstration present. Only `verified` writes a demonstration and reaches the topic pipeline. A `completed` verdict alone is not proof of a capability.
+`verifyEvaluation` is a pure function: verdict `completed`, at least one criterion, all met, all verified (the quote was found in the diff and the check's preconditions held), `ciState` not `failure` or `pending`, and a demonstration present. Only `verified` writes a demonstration and reaches the topic pipeline. A `completed` verdict alone is not proof that you learned something.
 
 ---
 
-## 🔁 The feedback loop at topic level
+## 🔁 The feedback loop
+
+Learning should change the map. Each verified mission becomes new evidence, and the frontier moves.
 
 ```mermaid
 flowchart LR
     T[Topic] --> DA[DepthAssessment]
-    DA --> NM[NextMove]
+    DA --> FR[Frontier]
+    FR --> NM[Learn-next move]
     NM --> M[Mission]
     M --> SB[Sandbox tests + CI]
     SB --> VF{verifyEvaluation}
@@ -603,7 +625,7 @@ flowchart LR
     VD -->|OF_CAPABILITY| CAP[Capability roll-up grows]
     VD -->|EVIDENCE_FOR_TOPIC<br/>mission_verified, 0.8| T
     VD -.->|DepthAssessment.stale = true| DA
-    DA -.->|reanalyzeTopicDepth| DA2[Updated assessment]
+    DA -.->|reanalyzeTopicDepth| DA2[Updated assessment<br/>new frontier]
     VF -->|no longer verified| RT[Retract demonstration<br/>mark topic stale]
 ```
 
@@ -620,12 +642,12 @@ What `recordEvaluation` does:
 
 ## 🤖 Chat agent
 
-The chat agent reads the **Topic graph**. It exposes **5 public tools** that wrap **16 underlying graph tools**, each declaring its name, `whenToUse`, the FalkorDB features it uses and a parameter schema. One declaration feeds the planner, the argument validator (`parseToolArgs` clamps numbers, enforces enums, drops unknown keys) and the UI.
+Ask in plain language: *"what should I learn next?"*, *"what am I missing before I can do X?"*, *"how does my caching work relate to my queues?"*. The chat agent reads the **Topic graph**. It exposes **5 public tools** that wrap **16 underlying graph tools**, each declaring its name, `whenToUse`, the FalkorDB features it uses and a parameter schema. One declaration feeds the planner, the argument validator (`parseToolArgs` clamps numbers, enforces enums, drops unknown keys) and the UI.
 
 | Public tool | Wraps (graph capability) |
 |---|---|
+| **`gap_analysis`** | `find_gaps`, `recommend_next_topics` (prerequisite walk + `KNOWS_TOPIC` join), `learning_path_to_topic` |
 | `skill_overview` | `profile_overview`, `strongest_topics`, `search_topics` (full-text), `audit_authenticity`, `recent_activity` |
-| `gap_analysis` | `find_gaps`, `recommend_next_topics` (prerequisite walk + `KNOWS_TOPIC` join), `learning_path_to_topic` |
 | `topic_deep_dive` | `explain_topic`, `compare_topics` |
 | `topic_connections` | `connect_topics` (`shortestPath`), `explore_neighborhood` |
 | `graph_structure` | `rank_foundations` (PageRank), `find_bridges` (betweenness), `knowledge_communities` (label propagation), `connectivity_check` (WCC) |
@@ -644,7 +666,7 @@ The response keeps four ideas apart: **proficiency** (how deep the skill is), **
 
 ## 🧰 Evidence layer: capabilities, detectors, experiences
 
-This layer feeds everything above.
+This layer is where "what you know" comes from.
 
 **Capabilities.** 20 learnable capabilities in 8 domains (concurrency, async processing, reliability, caching, real-time, API design and security, data layer, frontend delivery), for example `distributed_locking`, `job_queues`, `idempotent_operations`, `retry_backoff`, `application_caching`, `graph_modeling`. Domains only group learnable capabilities through `SPECIALIZES`; they are never prerequisites. Few `PREREQUISITE_OF` edges are declared (for example `api_design` before `webhook_handling` and `rate_limiting`), and every learnable capability has an explicit dependency entry with a reason, including a written reason when it has none. The graph is validated for cycles, depth, unknown ids, category endpoints and capabilities that no detector can demonstrate.
 
@@ -656,7 +678,7 @@ This layer feeds everything above.
 
 **Experiences.** Demonstrations of the same capability and technique are grouped (deterministically, without an LLM) into developer-scoped `Experience` nodes with counts across commits, repositories and days, linked to a problem statement (from commit subjects), technique, technologies, repositories and engineering context.
 
-**Completion criteria.** `COMPLETION_CRITERIA` defines, per technique, a minimum depth and safeguards that must (required) or should (optional) be observed. A technique is met only from demonstrations of **its own rule**; a capability is complete when at least one of its techniques is met.
+**Completion criteria.** `COMPLETION_CRITERIA` defines, per technique, a minimum depth and safeguards that must (required) or should (optional) be observed. A technique is met only from demonstrations of **its own rule**; a capability is complete when at least one of its techniques is met. Unmet required safeguards are the most concrete "learn this next" signals in the system.
 
 ```cypher
 // Files that are frequently changed together (co-change coupling)
@@ -681,9 +703,9 @@ ORDER BY commits DESC LIMIT 50
 
 ## 🏙️ Journey view and 3D Skill City
 
-**Journey.** `readJourney` is a read-only account of what was detected, built from traversals and explained in plain English with the developer's real numbers: capabilities with level and techniques, the demonstrations that triggered each (file, line range, permalink), strengths by deterministic rules (`core` = a hardened mechanism in 2+ commits, `solid` = mechanism detected, `emerging` = repeated use only; thin evidence is flagged `tentative`), domains, a monthly timeline, per-repository summary and a coverage check that says whether any history was unreadable. Missing evidence always means "not seen", never "cannot do it".
+**Journey.** `readJourney` is a read-only account of what was detected, built from traversals and explained in plain English with your real numbers: capabilities with level and techniques, the demonstrations that triggered each (file, line range, permalink), strengths by deterministic rules (`core` = a hardened mechanism in 2+ commits, `solid` = mechanism detected, `emerging` = repeated use only; thin evidence is flagged `tentative`), domains, a monthly timeline, per-repository summary and a coverage check that says whether any history was unreadable. Missing evidence always means "not seen", never "cannot do it".
 
-**3D Skill City.** An interactive view built with **React Three Fiber**, driven entirely by the **Skill graph**, which is independent of the Topic graph.
+**3D Skill City.** An interactive view built with **React Three Fiber**, driven entirely by the **Skill graph**, which is independent of the Topic graph. Use it to see the shape of your knowledge, then use the recommendation to decide where to build next.
 
 <img width="1535" height="690" alt="graph" src="https://github.com/user-attachments/assets/cd872edd-baf8-4a9e-ba09-f69bd23cdd55" />
 
@@ -737,7 +759,7 @@ flowchart LR
 |---|---|
 | `get_me` | Resolve the signed-in developer |
 | `search_repositories` | Discover repositories (pushed within the history window) |
-| `list_commits` | Find the developer's commits |
+| `list_commits` | Find your commits |
 | `get_commit` | Fetch the full patch and per-file diffs |
 | `get_file_contents` | README, manifests, config, directory listings; repo inspection at a commit |
 | `list_pull_requests` | Pull requests per repository |
@@ -1049,39 +1071,46 @@ Frontend: **http://localhost:5173**. The 3D Skill City uses `three`, `@react-thr
 npm install three @react-three/fiber @react-three/drei
 ```
 
-### 6. Try the full loop
+### 6. Try the full learning loop
 
 1. Sign in with GitHub and sync your repositories
 2. Run the **analysis** (the Depth Analyzer discovers topics, judges them, writes `DepthAssessment`s and `KNOWS_TOPIC` edges, then refreshes PageRank, betweenness, communities and WCC)
-3. Set a **goal** on the Goal page
-4. Get your **next move**, then your **mission**
-5. Implement it, push your branch, and let the sandbox verify it
-6. Re-grade the focus topic and watch the graph grow
+3. Look at **what you know**: the Journey view and the 3D Skill City
+4. Ask **"what should I learn next?"** in chat, or set a **goal** on the Goal page
+5. Read your **learn-next recommendation** and the reason it was chosen, then open your **practice mission**
+6. Implement it, push your branch, and let the sandbox verify it
+7. Re-grade the focus topic and watch your frontier move forward
 
 <img width="862" height="491" alt="goal-2" src="https://github.com/user-attachments/assets/edc45e77-ac63-4654-b8b1-20f2e0796935" />
 
-### 7. Reproduce the topic trace on your own data
+### 7. Reproduce the recommendation on your own data
 
 Open the FalkorDB Browser at http://localhost:3000 and run, with your `Developer.id` and a topic slug from your profile:
 
 ```cypher
-// the assessment and what backs it
+// what you know about the topic, and what backs it
 MATCH (:Developer {id: $dev})-[:ASSESSED]->(a:DepthAssessment {topic_slug: $slug})
 OPTIONAL MATCH (a)-[b:BACKED_BY]->(x)
 RETURN a.level, a.score, a.confidence, a.authenticity, a.rationale, a.stale,
        labels(x)[0] AS kind, b.ref AS ref, coalesce(x.path, x.technique) AS evidence
+
+// what the topic rests on, and your level in each prerequisite
+MATCH path = (t:Topic {slug: $slug})-[:BUILDS_ON*1..3]->(f:Topic)
+WITH f, min(length(path)) AS hops
+OPTIONAL MATCH (:Developer {id: $dev})-[k:KNOWS_TOPIC]->(f)
+RETURN f.slug AS prerequisite, hops, coalesce(k.level, "none") AS your_level
 
 // the capabilities mapped to the topic and your demonstrations for each
 MATCH (t:Topic {slug: $slug})-[m:MAPS_TO]->(c:Capability)
 OPTIONAL MATCH (:Developer {id: $dev})-[:DEMONSTRATED]->(x:Demonstration)-[:OF_CAPABILITY]->(c)
 RETURN c.id, m.weight, m.reason, count(DISTINCT x) AS demonstrations
 
-// the move and mission built from it, with the stored query trace
+// the practice mission built from the recommendation, with the stored query trace
 MATCH (:Developer {id: $dev})-[:ASSIGNED]->(m:Mission {focus_slug: $slug})
 RETURN m.status, m.verification_state, m.explanation_json
 ```
 
-The `explanation_json` on each Mission contains the real queries that loaded the saved move, with parameters and row counts.
+The `explanation_json` on each Mission contains the real queries that loaded the saved recommendation, with parameters and row counts.
 
 ---
 
@@ -1095,10 +1124,11 @@ The `explanation_json` on each Mission contains the real queries that loaded the
 | `learning_failed` after sync | The LLM provider failed during enrichment. GitHub data is already saved; rerun the sync |
 | Depth analysis reports `llmCircuitOpen` | Repeated LLM failures opened the breaker for 30 seconds. Topics fall back to counts-only estimates (level capped at `proficient`, confidence `low`) until the provider recovers; re-run with `force` |
 | Metrics status `empty_graph` | Fewer than 2 topics or no `BUILDS_ON` / `RELATED_TOPIC` edges yet: re-run the analysis, or `relinkTopicTaxonomy` |
+| Frontier is empty or recommendations look generic | Too few prerequisite edges or too little evidence. Sync more repositories, re-run the analysis and check metrics status |
 | Communities show only "Standalone" | Not enough `RELATED_TOPIC` links; the tools fall back to `Topic.cluster_id` |
 | `needs_clarification` on a goal | The wording could not be tied reliably to any `Topic`. Name a topic from your graph |
 | `needs_evidence` on a goal | No readable, non-test code is linked to that topic or its neighbourhood. Sync or analyse the relevant repositories |
-| `llm_unavailable` | Set `CEREBRAS_API_KEY`; Pathway will not invent a goal or mission without an LLM |
+| `llm_unavailable` | Set `CEREBRAS_API_KEY`; Pathway will not invent a recommendation or mission without an LLM |
 | `generation_failed` | Check `failure.stage`: `transport` means the provider failed after retries; `validation` means all repair attempts were rejected (see the rejection notes in the logs) |
 | "N of M rows matched nothing" in logs | A `MATCH` in a batch write found no node; parent nodes must be written first. Strict writes abort before stale cleanup |
 | Assessment marked `stale` | A mission changed the topic's evidence. Re-grade it with `reanalyzeTopicDepth` |
@@ -1109,31 +1139,32 @@ The `explanation_json` on each Mission contains the real queries that loaded the
 
 ## ⚖️ Limitations
 
-- **Detectors are heuristics.** Capabilities and demonstrations come from deterministic patterns over added lines. A match does not prove the code is good, and good work written in an unrecognised way is not seen.
-- **Topics are model-discovered.** They are validated against your evidence, but the topic list, domains and `BUILDS_ON` edges are model proposals with stored rationales and confidences, not curated truth. Edges are labelled by `basis`.
+- **Detectors are heuristics.** Capabilities and demonstrations come from deterministic patterns over added lines. A match does not prove the code is good, and good work written in an unrecognised way is not seen. That means a topic you know well may appear as a gap.
+- **Topics are model-discovered.** They are validated against your evidence, but the topic list, domains and `BUILDS_ON` edges are model proposals with stored rationales and confidences, not curated truth. Edges are labelled by `basis`, so treat the "learn next" order as a well-grounded suggestion rather than a fixed curriculum.
 - **Levels are Pathway's own thresholds**, not an industry standard. Confidence describes the evidence, not the skill.
-- **Missing evidence means "not seen".** Work outside GitHub, in unsynced private repositories, or outside the history window is not represented.
-- **The Goal Agent decides, not the graph.** The graph retrieves, ranks and validates; Personalized PageRank orders context and is not a recommendation score. Only the chosen move is saved, so alternatives are not recorded beyond the one the agent weighed.
+- **Missing evidence means "not seen".** Work outside GitHub, in unsynced private repositories, or outside the history window is not represented, and learning you did elsewhere will not show up until you build with it.
+- **The Goal Agent decides, not the graph.** The graph retrieves, ranks and validates; Personalized PageRank orders context and is not a recommendation score. Only the chosen recommendation is saved, so alternatives are not recorded beyond the one the agent weighed.
 - **Mission verification** trusts the diff-check and CI state; a single mission never claims more than `working`-level evidence.
-
 
 ---
 
 ## 💡 Design principles
 
-1. **Graph for structure, LLM for judgment**: ordering, readiness and ranks come from algorithms; classification and writing come from models
-2. **Topics order the learning, capabilities prove it**: `BUILDS_ON` says what is next, verified demonstrations say what is done
-3. **Ground every claim**: verbatim code quotes, cited refs, gap probes, stored query traces
-4. **Validate model output against the graph**: unknown slugs, ids, files and quotes are rejected, not trusted
-5. **Independent verification**: platform tests run against developer code, and completion needs verified criteria plus acceptable CI
-6. **Evidence over assertion**: only code-backed edges count; inferred edges are labelled and never satisfy a prerequisite
-7. **Keep four ideas apart**: proficiency, confidence, graph importance and gap priority never share a field
-8. **Self-describing tools**: adding a chat graph tool is a single declaration
+1. **Start from what you know**: every recommendation is anchored to your own code, not a generic roadmap
+2. **Graph for structure, LLM for judgment**: ordering, readiness and ranks come from algorithms; classification and writing come from models
+3. **Topics order the learning, capabilities prove it**: `BUILDS_ON` says what is next, verified demonstrations say what is done
+4. **Explain every "next"**: each recommendation carries the path, the prerequisite reasons and the gap that put it first
+5. **Ground every claim**: verbatim code quotes, cited refs, gap probes, stored query traces
+6. **Validate model output against the graph**: unknown slugs, ids, files and quotes are rejected, not trusted
+7. **Learning is proven by building**: platform tests run against your code, and completion needs verified criteria plus acceptable CI
+8. **Evidence over assertion**: only code-backed edges count; inferred edges are labelled and never satisfy a prerequisite
+9. **Keep four ideas apart**: proficiency, confidence, graph importance and gap priority never share a field
+10. **Self-describing tools**: adding a chat graph tool is a single declaration
 
 ---
 
 <div align="center">
 
-### ⭐ If you like Pathway, please star the repo!
+### ⭐ If Pathway helps you decide what to learn next, please star the repo!
 
 </div>
