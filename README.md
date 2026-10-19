@@ -204,38 +204,43 @@ When a mission is **verified**, the platform writes a `Demonstration {source: "m
 
 ## 🏗️ Architecture
 
+**Main pipeline: from GitHub history to a verified lesson**
+
 ```mermaid
 flowchart LR
-    GH[(GitHub)] <-->|GitHub MCP server<br/>Docker, stdio| SYNC[Sync pipeline]
-    SYNC --> EV[(Evidence<br/>Commit / FileChange)]
-    EV --> DB[(FalkorDB)]
-
-    subgraph E[Evidence build]
-        DET[Detectors + learning pipeline] --> DEMO[Demonstration / Experience<br/>HAS_CAPABILITY roll-up]
-    end
-
-    subgraph T[Topic graph + agents - core reasoning]
-        DA[Depth Analyzer<br/>discover, gather, judge] --> TG[Topic graph<br/>BUILDS_ON / RELATED_TOPIC<br/>+ DepthAssessment]
-        TG --> FR[Learning frontier<br/>what is ready next]
-        FR --> GG[Goal graph retrieval<br/>PPR + code excerpts] --> GA[Goal Agent<br/>learn-next] --> MA[Mission Agent]
-        MA --> V{Validators}
-        V -->|rejected: repair up to 3x| MA
-        V -->|accepted| M[Mission] --> SB[Sandbox tests]
-        SB -->|verified| VE[Mission Demonstration]
-        TG <--> CH[Chat Agent<br/>5 tools over 16 graph tools]
-    end
-
-    subgraph S[Skill graph - independent view]
-        SK[Skill classification<br/>rule-based] --> SG[Skill + SkillCategory graph] --> CITY[3D Skill City]
-    end
-
-    DB --> DET
-    DB --> DA
-    DB --> SK
-    DEMO --> DB
-    VE --> DB
-    GH -.->|inspect repo at pinned commit| MA
+    GH[("GitHub")] -->|"MCP server"| SYNC["Sync pipeline"]
+    SYNC --> DB[("FalkorDB")]
+    DB --> EV["Evidence build"]
+    EV --> DA["Depth Analyzer"]
+    DA --> TG["Topic graph"]
+    TG --> FR["Learning frontier"]
+    FR --> GA["Goal Agent"]
+    GA --> MA["Mission Agent"]
+    MA --> SB["Sandbox tests"]
+    SB -->|"verified"| DB
 ```
+
+| Stage | What happens |
+|---|---|
+| Sync pipeline | Pulls commits, diffs and repo context through the GitHub MCP server (Docker, stdio) |
+| Evidence build | Detectors and the learning pipeline write `Demonstration` and `Experience` nodes and the `HAS_CAPABILITY` roll-up |
+| Depth Analyzer | Discovers topics, gathers evidence, judges depth, writes `BUILDS_ON` / `RELATED_TOPIC` edges and `DepthAssessment`s |
+| Learning frontier | Finds the topics that are ready for you next, using prerequisites and graph ranks |
+| Goal Agent | Retrieves the neighbourhood (Personalized PageRank plus code excerpts) and picks one thing to learn |
+| Mission Agent | Turns it into a practice task; validators reject and repair bad output up to 3 times |
+| Sandbox tests | Platform-run tests verify the work; a verified mission is written back as a new `Demonstration` |
+
+**Side views that read the same data**
+
+```mermaid
+flowchart LR
+    DB[("FalkorDB")] --> TG["Topic graph"]
+    TG <--> CH["Chat Agent"]
+    DB --> SK["Skill classification"]
+    SK --> CITY["3D Skill City"]
+```
+
+The **Chat Agent** exposes 5 public tools over 16 graph tools. The **Skill graph** and 3D city are rule-based and independent of the Topic graph.
 
 > The **Skill graph** (3D city) is independent of the **Topic graph**. Both read the same evidence. The Journey view reads the **capability** layer.
 
@@ -252,8 +257,6 @@ The graph lives in **FalkorDB** and is queried with **Cypher**. Every write is a
   <br/>
   <sub><b>The real graph in FalkorDB Browser:</b> one developer's demonstrations, the capabilities they prove, and the file changes behind them.</sub>
 </p>
-
-
 
 ```mermaid
 flowchart TB
