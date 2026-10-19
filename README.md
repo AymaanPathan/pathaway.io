@@ -1,5 +1,3 @@
-<img width="684" height="2184" alt="depth-analyzer" src="https://github.com/user-attachments/assets/b64bb849-2b1c-4a89-b3c9-f1e7699d1d09" /><img width="2222" height="4000" alt="graph-layers" src="https://github.com/user-attachments/assets/3fc1048f-0eb5-4639-9710-82741869af31" /><img width="962" height="3806" alt="worked-example" src="https://github.com/user-attachments/assets/338d096f-e9e6-4e78-9acb-243c75edf3e6" /><div align="center">
-
 <img width="1100" height="662" alt="home" src="https://github.com/user-attachments/assets/7a8091a1-aa06-4dcf-8e66-222a07510e0f" />
 
 ### Know what you know. Learn what's next.
